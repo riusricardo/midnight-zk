@@ -75,24 +75,38 @@ where
         params: &Self::Parameters,
         polynomial: &Polynomial<E::Fr, Coeff>,
     ) -> Self::Commitment {
+        #[cfg(feature = "trace-kzg")]
+        let start = std::time::Instant::now();
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("📍 [KZG::commit] Committing to polynomial of degree {}", polynomial.len());
         let mut scalars = Vec::<E::Fr>::with_capacity(polynomial.len());
         scalars.extend(polynomial.iter());
         let size = scalars.len();
         assert!(params.g.len() >= size);
-        msm_specific::<E::G1Affine>(&scalars, &params.g[..size])
+        let result = msm_specific::<E::G1Affine>(&scalars, &params.g[..size]);
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("✓  [KZG::commit] Total time: {:?}", start.elapsed());
+        result
     }
 
     fn commit_lagrange(
         params: &Self::Parameters,
         poly: &Polynomial<E::Fr, LagrangeCoeff>,
     ) -> E::G1 {
+        #[cfg(feature = "trace-kzg")]
+        let start = std::time::Instant::now();
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("📍 [KZG::commit_lagrange] Committing to Lagrange polynomial of size {}", poly.len());
         let mut scalars = Vec::with_capacity(poly.len());
         scalars.extend(poly.iter());
         let size = scalars.len();
 
         assert!(params.g_lagrange.len() >= size);
 
-        msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size])
+        let result = msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size]);
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("✓  [KZG::commit_lagrange] Total time: {:?}", start.elapsed());
+        result
     }
 
     fn multi_open<T: Transcript>(

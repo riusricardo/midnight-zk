@@ -110,18 +110,41 @@ where
 #[allow(unsafe_code)]
 /// Wrapper over the MSM function to use the blstrs underlying function
 pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
+    #[cfg(feature = "trace-msm")]
+    let start = std::time::Instant::now();
+    #[cfg(feature = "trace-msm")]
+    eprintln!("🔢 [MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
+    
     // We empirically checked that for MSMs larger than 2**18, the blstrs
     // implementation regresses.
     if coeffs.len() <= (2 << 18) && TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>() {
         // Safe: we just checked type
         let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
         let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using BLST multi_exp (optimized path)");
         let res = G1Projective::multi_exp(bases, coeffs);
-        unsafe { std::mem::transmute_copy(&res) }
+        let result = unsafe { std::mem::transmute_copy(&res) };
+        #[cfg(feature = "trace-msm")]
+        eprintln!("✓  [MSM] Completed in {:?} ({:.2} points/ms)", start.elapsed(), coeffs.len() as f64 / start.elapsed().as_millis().max(1) as f64);
+        result
     } else {
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using halo2curves msm_best (fallback path)");
+        #[cfg(feature = "trace-msm")]
+        let normalize_start = std::time::Instant::now();
         let mut affine_bases = vec![C::identity(); coeffs.len()];
         C::Curve::batch_normalize(bases, &mut affine_bases);
-        msm_best(coeffs, &affine_bases)
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Batch normalize took {:?}", normalize_start.elapsed());
+        #[cfg(feature = "trace-msm")]
+        let msm_start = std::time::Instant::now();
+        let result = msm_best(coeffs, &affine_bases);
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] msm_best took {:?}", msm_start.elapsed());
+        #[cfg(feature = "trace-msm")]
+        eprintln!("✓  [MSM] Completed in {:?} ({:.2} points/ms)", start.elapsed(), coeffs.len() as f64 / start.elapsed().as_millis().max(1) as f64);
+        result
     }
 }
 

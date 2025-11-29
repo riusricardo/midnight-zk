@@ -283,9 +283,26 @@ where
     #[cfg(not(feature = "committed-instances"))]
     let nb_committed_instances: usize = 0;
 
+    #[cfg(feature = "trace-phases")]
+    let finalise_start = std::time::Instant::now();
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n{}", "=".repeat(100));
+    #[cfg(feature = "trace-phases")]
+    eprintln!("📐 [FINALISE] Starting proof finalization (quotient polynomial phase)");
+    #[cfg(feature = "trace-phases")]
+    eprintln!("{}", "=".repeat(100));
+
     let domain = pk.get_vk().get_domain();
 
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🧮 [QUOTIENT] Computing H(X) - the quotient polynomial");
+    #[cfg(feature = "trace-phases")]
+    eprintln!("   This aggregates ALL constraints (gates + permutations + lookups)");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     let h_poly = bench_and_run!(_group; ; ;"Compute H poly"; || compute_h_poly(pk, &trace));
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [QUOTIENT] H(X) computed in {:?}", phase_start.elapsed());
 
     let ProverTrace {
         advice_polys,
@@ -298,11 +315,25 @@ where
     } = trace;
 
     // Construct the vanishing argument's h(X) commitments
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n📍 [COMMIT] Constructing and committing to H(X) pieces");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     let vanishing = bench_and_run!(_group; ref transcript; own h_poly, own vanishing; "Construct vanishing commitments";
         |t, h, vanishing: vanishing::prover::Committed<F>| vanishing.construct::<CS, T>(params, domain, h, t))?;
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [COMMIT] H(X) commitments done in {:?}", phase_start.elapsed());
 
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🎲 [CHALLENGE] Sampling x for evaluation point");
     let x: F = transcript.squeeze_challenge();
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [CHALLENGE] X sampled");
 
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🎯 [EVALUATE] Evaluating all polynomials at challenge point x");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     bench_and_run!(_group; ref transcript; ; "Write evals to transcript";
         |t| write_evals_to_transcript(
         pk,
@@ -321,8 +352,14 @@ where
     bench_and_run!(_group; ref transcript; ; "Evaluate permutation data"; |t|
         pk.permutation.evaluate(x, t)
     )?;
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [EVALUATE] Base polynomials evaluated in {:?}", phase_start.elapsed());
 
     // Evaluate the permutations, if any, at omega^i x.
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🔗 [EVALUATE] Evaluating permutations");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     let permutations: Vec<permutation::prover::Evaluated<F>> = bench_and_run!(_group; ref transcript; own permutations ; "Evaluate perms";
     |t: &mut T, permutations: Vec<permutation::prover::Committed<F>>|
     permutations
@@ -330,8 +367,14 @@ where
         .map(|permutation| -> Result<_, _> { permutation.evaluate(pk, x, &mut *t) })
         .collect::<Result<Vec<_>, _>>()
     )?;
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [EVALUATE] Permutations evaluated in {:?}", phase_start.elapsed());
 
     // Evaluate the lookups, if any, at omega^i x.
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🔍 [EVALUATE] Evaluating lookups");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     let lookups: Vec<Vec<lookup::prover::Evaluated<F>>> = bench_and_run!(_group; ref transcript; own lookups; "Evaluate lookups";
         |t: &mut T, lookups: Vec<Vec<lookup::prover::Committed<F>>>| lookups
         .into_iter()
@@ -342,6 +385,8 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>())?;
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [EVALUATE] Lookups evaluated in {:?}", phase_start.elapsed());
 
     // Evaluate the trashcans, if any, at x.
     let trashcans: Vec<Vec<trash::prover::Evaluated<F>>> = trashcans
@@ -354,6 +399,10 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n📋 [QUERIES] Computing opening queries");
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
     let queries = bench_and_run!(_group; ; ; "Compute queries"; || compute_queries(
         pk,
         nb_committed_instances,
@@ -365,10 +414,26 @@ where
         &vanishing,
         x,
     ));
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [QUERIES] {} queries computed in {:?}", queries.len(), phase_start.elapsed());
 
-    bench_and_run!(_group; ref transcript; ; "Multi open argument"; |t|
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n🔓 [MULTI-OPEN] Generating batched KZG opening proofs");
+    #[cfg(feature = "trace-phases")]
+    eprintln!("   This proves all {} evaluations are correct using batching", queries.len());
+    #[cfg(feature = "trace-phases")]
+    let phase_start = std::time::Instant::now();
+    let result = bench_and_run!(_group; ref transcript; ; "Multi open argument"; |t|
         CS::multi_open(params, &queries, t).map_err(|_| Error::ConstraintSystemFailure)
-    )
+    );
+    #[cfg(feature = "trace-phases")]
+    eprintln!("✓  [MULTI-OPEN] Opening proofs generated in {:?}", phase_start.elapsed());
+    
+    #[cfg(feature = "trace-phases")]
+    eprintln!("\n✅ [FINALISE] Proof finalization completed in {:?}", finalise_start.elapsed());
+    #[cfg(feature = "trace-phases")]
+    eprintln!("{}", "=".repeat(100));
+    result
 }
 
 #[cfg_attr(all(test, feature = "bench-internal"), inner_bench)]

@@ -32,6 +32,10 @@ name = "zswap_output"
 required-features = ["bench-internal"]
 harness = false
 
+[[bench]]
+name = "proof_generation"
+harness = false
+
 [dependencies]
 backtrace = { version = "0.3", optional = true }
 ff = { workspace = true }
@@ -92,6 +96,15 @@ committed-instances = []
 # _group: &mut BenchmarkGroup<WallTime>, and return granular benchmarks
 # of the prover for that concrete circuit.
 bench-internal = ["midnight-circuits/bench-internal"]
+
+# Instrumentation features for performance analysis
+# These add detailed tracing to measure operation timing and throughput
+# Note: These should NOT be enabled in production builds due to performance overhead
+trace-msm = []        # Trace multi-scalar multiplication operations
+trace-fft = []        # Trace FFT/IFFT operations
+trace-phases = []     # Trace high-level prover phases
+trace-kzg = []        # Trace KZG commitment operations
+trace-all = ["trace-msm", "trace-fft", "trace-phases", "trace-kzg"]
 
 [lib]
 bench = false
