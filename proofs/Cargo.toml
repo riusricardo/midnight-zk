@@ -20,20 +20,12 @@ name = "commit_zk"
 harness = false
 
 [[bench]]
-name = "plonk"
-harness = false
-
-[[bench]]
 name = "dev_lookup"
 harness = false
 
 [[bench]]
 name = "zswap_output"
 required-features = ["bench-internal"]
-harness = false
-
-[[bench]]
-name = "proof_generation"
 harness = false
 
 [dependencies]

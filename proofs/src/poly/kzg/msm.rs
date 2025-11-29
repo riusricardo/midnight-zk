@@ -1,9 +1,8 @@
 use std::{any::TypeId, fmt::Debug};
 
 use ff::Field;
-use group::{Curve, Group};
+use group::Group;
 use halo2curves::{
-    msm::msm_best,
     pairing::{Engine, MillerLoopResult, MultiMillerLoop},
     CurveAffine,
 };
@@ -107,45 +106,50 @@ where
     }
 }
 
+/// Check if BLST optimization is available for the given curve type
+/// 
+/// This should always return true for midnight_curves::G1Affine (BLS12-381).
+/// If this returns false, the code will panic in msm_specific().
+#[inline]
+pub fn is_blst_available<C: CurveAffine>() -> bool {
+    TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
+}
+
 #[allow(unsafe_code)]
-/// Wrapper over the MSM function to use the blstrs underlying function
+/// MSM using BLST multi_exp (mandatory for midnight_curves)
+/// 
+/// This function REQUIRES midnight_curves::G1Affine and will panic if used with other curves.
+/// BLST provides optimized multi-scalar multiplication for BLS12-381 curve.
 pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
     eprintln!("🔢 [MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
     
-    // We empirically checked that for MSMs larger than 2**18, the blstrs
-    // implementation regresses.
-    if coeffs.len() <= (2 << 18) && TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>() {
-        // Safe: we just checked type
-        let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
-        let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using BLST multi_exp (optimized path)");
-        let res = G1Projective::multi_exp(bases, coeffs);
-        let result = unsafe { std::mem::transmute_copy(&res) };
-        #[cfg(feature = "trace-msm")]
-        eprintln!("✓  [MSM] Completed in {:?} ({:.2} points/ms)", start.elapsed(), coeffs.len() as f64 / start.elapsed().as_millis().max(1) as f64);
-        result
-    } else {
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using halo2curves msm_best (fallback path)");
-        #[cfg(feature = "trace-msm")]
-        let normalize_start = std::time::Instant::now();
-        let mut affine_bases = vec![C::identity(); coeffs.len()];
-        C::Curve::batch_normalize(bases, &mut affine_bases);
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Batch normalize took {:?}", normalize_start.elapsed());
-        #[cfg(feature = "trace-msm")]
-        let msm_start = std::time::Instant::now();
-        let result = msm_best(coeffs, &affine_bases);
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] msm_best took {:?}", msm_start.elapsed());
-        #[cfg(feature = "trace-msm")]
-        eprintln!("✓  [MSM] Completed in {:?} ({:.2} points/ms)", start.elapsed(), coeffs.len() as f64 / start.elapsed().as_millis().max(1) as f64);
-        result
+    // Verify we're using midnight_curves (BLS12-381 with BLST)
+    assert!(
+        is_blst_available::<C>(),
+        "MSM must use midnight_curves::G1Affine with BLST optimization. Found: {}",
+        std::any::type_name::<C>()
+    );
+    
+    // Safe: we just verified the type
+    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+    let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
+    
+    #[cfg(feature = "trace-msm")]
+    eprintln!("   [MSM] Using BLST multi_exp (BLS12-381 optimized)");
+    
+    let res = G1Projective::multi_exp(bases, coeffs);
+    let result = unsafe { std::mem::transmute_copy(&res) };
+    
+    #[cfg(feature = "trace-msm")]
+    {
+        let elapsed = start.elapsed();
+        eprintln!("✓  [MSM] Completed in {:?}", elapsed);
     }
+    
+    result
 }
 
 /// Two channel MSM accumulator
