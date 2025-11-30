@@ -10,6 +10,7 @@
 use std::marker::PhantomData;
 
 use halo2curves::pairing::Engine;
+use rayon::prelude::*;
 
 /// Multiscalar multiplication engines
 pub mod msm;
@@ -120,10 +121,18 @@ where
     {
         // Refer to the halo2 book for docs:
         // https://zcash.github.io/halo2/design/proving-system/multipoint-opening.html
+        #[cfg(feature = "trace-msm")]
+        let total_start = std::time::Instant::now();
+        
         let x1: E::Fr = transcript.squeeze_challenge();
         let x2: E::Fr = transcript.squeeze_challenge();
 
+        #[cfg(feature = "trace-msm")]
+        let construct_start = std::time::Instant::now();
         let (poly_map, point_sets) = construct_intermediate_sets(prover_query)?;
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN] construct_intermediate_sets: {:?} ({} polys, {} point sets)", 
+            construct_start.elapsed(), poly_map.len(), point_sets.len());
 
         let mut q_polys = vec![vec![]; point_sets.len()];
 
@@ -131,8 +140,10 @@ where
             q_polys[com_data.set_index].push(com_data.commitment.poly.clone());
         }
 
+        #[cfg(feature = "trace-msm")]
+        let q_polys_start = std::time::Instant::now();
         let q_polys = q_polys
-            .iter()
+            .par_iter()  // Parallel: each inner_product is independent
             .map(|polys| {
                 #[cfg(feature = "truncated-challenges")]
                 let x1 = truncated_powers(x1);
@@ -143,10 +154,14 @@ where
                 inner_product(polys, x1)
             })
             .collect::<Vec<_>>();
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN-PARALLEL] q_polys computation ({} sets): {:?}", q_polys.len(), q_polys_start.elapsed());
 
+        #[cfg(feature = "trace-msm")]
+        let f_poly_start = std::time::Instant::now();
         let f_poly = {
             let f_polys = point_sets
-                .iter()
+                .par_iter()  // Parallel: each kate_division fold is independent
                 .zip(q_polys.clone())
                 .map(|(points, q_poly)| {
                     let mut poly = points.iter().fold(q_poly.clone().values, |poly, point| {
@@ -161,22 +176,38 @@ where
                 .collect::<Vec<_>>();
             inner_product(&f_polys, powers(x2))
         };
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN-PARALLEL] f_poly computation (kate_division): {:?}", f_poly_start.elapsed());
 
+        #[cfg(feature = "trace-msm")]
+        let commit_start = std::time::Instant::now();
         let f_com = Self::commit(params, &f_poly);
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN] f_com MSM commit: {:?}", commit_start.elapsed());
         transcript.write(&f_com).map_err(|_| Error::OpeningError)?;
 
         let x3: E::Fr = transcript.squeeze_challenge();
         #[cfg(feature = "truncated-challenges")]
         let x3 = truncate(x3);
 
-        for q_poly in q_polys.iter() {
+        #[cfg(feature = "trace-msm")]
+        let eval_start = std::time::Instant::now();
+        // Parallel evaluation, then sequential transcript writes for Fiat-Shamir security
+        let evals: Vec<_> = q_polys.par_iter()
+            .map(|q_poly| eval_polynomial(&q_poly.values, x3))
+            .collect();
+        for eval in evals {
             transcript
-                .write(&eval_polynomial(&q_poly.values, x3))
+                .write(&eval)
                 .map_err(|_| Error::OpeningError)?;
         }
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN-PARALLEL] Polynomial evaluations ({} polys): {:?}", q_polys.len(), eval_start.elapsed());
 
         let x4: E::Fr = transcript.squeeze_challenge();
 
+        #[cfg(feature = "trace-msm")]
+        let final_start = std::time::Instant::now();
         let final_poly = {
             let mut polys = q_polys;
             polys.push(f_poly);
@@ -189,7 +220,11 @@ where
             inner_product(&polys, powers)
         };
         let v = eval_polynomial(&final_poly, x3);
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN] final_poly computation: {:?}", final_start.elapsed());
 
+        #[cfg(feature = "trace-msm")]
+        let pi_start = std::time::Instant::now();
         let pi = {
             let pi_poly = Polynomial {
                 values: kate_division(&(&final_poly - v).values, x3),
@@ -197,8 +232,13 @@ where
             };
             Self::commit(params, &pi_poly)
         };
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MULTIOPEN] pi MSM commit: {:?}", pi_start.elapsed());
 
-        transcript.write(&pi).map_err(|_| Error::OpeningError)
+        transcript.write(&pi).map_err(|_| Error::OpeningError)?;
+        #[cfg(feature = "trace-msm")]
+        eprintln!("✓  [MULTIOPEN] Total time: {:?}\n", total_start.elapsed());
+        Ok(())
     }
 
     fn multi_prepare<'com, T: Transcript>(
