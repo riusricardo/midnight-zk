@@ -32,6 +32,8 @@ use crate::{
     utils::{arithmetic::eval_polynomial, rational::Rational},
 };
 
+use rayon::prelude::*;
+
 #[cfg(feature = "committed-instances")]
 /// Commit to a vector of raw instances. This function can be used to prepare
 /// the committed instances that the verifier will be provided with when this
@@ -77,6 +79,7 @@ pub(crate) fn compute_trace<
 ) -> Result<ProverTrace<F>, Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -273,6 +276,7 @@ pub(crate) fn finalise_proof<'a, F, CS: PolynomialCommitmentScheme<F>, T: Transc
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -457,6 +461,7 @@ pub fn create_proof<
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -570,6 +575,7 @@ where
     ConcreteCircuit: Circuit<F>,
     T: Transcript,
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -664,9 +670,24 @@ where
                 }
             }
 
+            // Parallelize commitment computation for independent polynomials
+            // This is safe because:
+            // 1. Each MSM operates on independent data
+            // 2. The order is preserved by par_iter (deterministic)
+            // 3. Transcript writes are still sequential below
+            #[cfg(feature = "trace-msm")]
+            eprintln!("   [MSM-PARALLEL] Computing {} advice commitments in parallel", advice_values.len());
+            #[cfg(feature = "trace-msm")]
+            let parallel_start = std::time::Instant::now();
+            
+            // Always use parallel execution for performance (no feature flag needed)
             let advice_commitments: Vec<_> =
-                advice_values.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+                advice_values.par_iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+            
+            #[cfg(feature = "trace-msm")]
+            eprintln!("✓  [MSM-PARALLEL] {} commitments completed in {:?}", advice_commitments.len(), parallel_start.elapsed());
 
+            // Transcript writes must remain sequential to maintain Fiat-Shamir security
             for commitment in &advice_commitments {
                 transcript.write(commitment)?;
             }
@@ -710,24 +731,65 @@ fn compute_h_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F
         ..
     } = &trace;
     // Calculate the advice and instance cosets
+    // Parallelize FFT operations for larger circuits (K>=12) where benefit > overhead
+    let use_parallel_fft = pk.vk.domain.k() >= 12;
+    
+    #[cfg(feature = "trace-fft")]
+    if use_parallel_fft {
+        eprintln!("   [FFT-PARALLEL] Computing advice cosets in parallel (K={})", pk.vk.domain.k());
+    }
+    #[cfg(feature = "trace-fft")]
+    let fft_start = std::time::Instant::now();
+    
     let advice_cosets: Vec<Vec<Polynomial<F, ExtendedLagrangeCoeff>>> = advice_polys
         .iter()
         .map(|advice_polys| {
-            advice_polys
-                .iter()
-                .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
-                .collect()
+            if use_parallel_fft {
+                // Parallel for K>=12: benefit outweighs overhead
+                advice_polys
+                    .par_iter()
+                    .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
+                    .collect()
+            } else {
+                // Sequential for K<12: avoid parallelization overhead
+                advice_polys
+                    .iter()
+                    .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
+                    .collect()
+            }
         })
         .collect();
+    
+    #[cfg(feature = "trace-fft")]
+    if use_parallel_fft {
+        eprintln!("✓  [FFT-PARALLEL] Advice cosets completed in {:?}", fft_start.elapsed());
+    }
+    #[cfg(feature = "trace-fft")]
+    let fft_start = std::time::Instant::now();
+    
     let instance_cosets: Vec<Vec<Polynomial<F, ExtendedLagrangeCoeff>>> = instance_polys
         .iter()
         .map(|instance_polys| {
-            instance_polys
-                .iter()
-                .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
-                .collect()
+            if use_parallel_fft {
+                // Parallel for K>=12: benefit outweighs overhead
+                instance_polys
+                    .par_iter()
+                    .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
+                    .collect()
+            } else {
+                // Sequential for K<12: avoid parallelization overhead
+                instance_polys
+                    .iter()
+                    .map(|poly| pk.vk.get_domain().coeff_to_extended(poly.clone()))
+                    .collect()
+            }
         })
         .collect();
+    
+    #[cfg(feature = "trace-fft")]
+    if use_parallel_fft {
+        eprintln!("✓  [FFT-PARALLEL] Instance cosets completed in {:?}", fft_start.elapsed());
+    }
 
     // Evaluate the h(X) polynomial
     pk.ev.evaluate_h::<ExtendedLagrangeCoeff>(
