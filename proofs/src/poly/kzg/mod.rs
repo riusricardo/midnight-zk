@@ -84,7 +84,20 @@ where
         scalars.extend(polynomial.iter());
         let size = scalars.len();
         assert!(params.g.len() >= size);
+        
+        // Use cached GPU bases when available (following ingonyama-zk pattern)
+        #[cfg(feature = "gpu")]
+        let result = if size >= 16384 {
+            use crate::poly::kzg::msm::msm_with_cached_bases;
+            let device_bases = params.get_or_upload_gpu_bases();
+            msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+        } else {
+            msm_specific::<E::G1Affine>(&scalars, &params.g[..size])
+        };
+        
+        #[cfg(not(feature = "gpu"))]
         let result = msm_specific::<E::G1Affine>(&scalars, &params.g[..size]);
+        
         #[cfg(feature = "trace-kzg")]
         eprintln!("✓  [KZG::commit] Total time: {:?}", start.elapsed());
         result
@@ -104,7 +117,19 @@ where
 
         assert!(params.g_lagrange.len() >= size);
 
+        // Use cached GPU Lagrange bases when available
+        #[cfg(feature = "gpu")]
+        let result = if size >= 16384 {
+            use crate::poly::kzg::msm::msm_with_cached_bases;
+            let device_bases = params.get_or_upload_gpu_lagrange_bases();
+            msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+        } else {
+            msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size])
+        };
+        
+        #[cfg(not(feature = "gpu"))]
         let result = msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size]);
+        
         #[cfg(feature = "trace-kzg")]
         eprintln!("✓  [KZG::commit_lagrange] Total time: {:?}", start.elapsed());
         result

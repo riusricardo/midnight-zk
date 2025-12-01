@@ -120,6 +120,57 @@ pub fn is_blst_available<C: CurveAffine>() -> bool {
     TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
 }
 
+#[cfg(feature = "gpu")]
+/// Optimized MSM using pre-uploaded GPU bases (zero-copy, following ingonyama-zk pattern)
+/// 
+/// This function uses bases cached in GPU memory, eliminating per-call conversion
+/// and upload overhead. Expected improvement: 1.5-2x over msm_specific for GPU MSMs.
+/// 
+/// # Arguments
+/// * `coeffs` - Scalars for MSM computation
+/// * `device_bases` - Pre-uploaded GPU bases (from ParamsKZG::get_or_upload_gpu_bases)
+/// 
+/// # Panics
+/// Panics if type is not midnight_curves::G1Affine
+pub fn msm_with_cached_bases<C: CurveAffine>(
+    coeffs: &[C::Scalar],
+    device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+) -> C::Curve {
+    #[cfg(feature = "trace-msm")]
+    let start = std::time::Instant::now();
+    #[cfg(feature = "trace-msm")]
+    eprintln!("🔢 [MSM-CACHED] Starting with {} points (using pre-uploaded GPU bases)", coeffs.len());
+    
+    // Verify we're using midnight_curves (BLS12-381)
+    assert!(
+        is_blst_available::<C>(),
+        "MSM must use midnight_curves::G1Affine. Found: {}",
+        std::any::type_name::<C>()
+    );
+    
+    // Safe: we just verified the type
+    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+    
+    // Use GPU-cached bases via MsmExecutor
+    use once_cell::sync::Lazy;
+    static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
+    
+    #[cfg(feature = "trace-msm")]
+    eprintln!("   [MSM-CACHED] Executing zero-copy GPU MSM");
+    
+    let res = MSM_EXECUTOR.execute_with_device_bases(coeffs, device_bases)
+        .expect("Cached MSM execution failed");
+    let result = unsafe { std::mem::transmute_copy(&res) };
+    
+    #[cfg(feature = "trace-msm")]
+    {
+        let elapsed = start.elapsed();
+        eprintln!("✓  [MSM-CACHED] Completed in {:?} (no conversion overhead!)", elapsed);
+    }
+    
+    result
+}
+
 #[allow(unsafe_code)]
 /// MSM using BLST multi_exp with optional GPU acceleration
 /// 

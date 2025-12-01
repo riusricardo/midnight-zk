@@ -210,6 +210,68 @@ impl MsmExecutor {
         self.cpu_backend.compute_msm(scalars, points)
     }
     
+    /// Execute MSM using pre-uploaded GPU bases (zero-copy, following ingonyama-zk pattern)
+    /// 
+    /// This eliminates the per-call conversion and upload overhead by using bases
+    /// that are already cached in GPU memory.
+    /// 
+    /// Expected improvement: 1.5-2x over regular execute() for GPU MSMs
+    #[cfg(feature = "gpu")]
+    pub fn execute_with_device_bases(
+        &self,
+        scalars: &[Scalar],
+        device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+    ) -> Result<G1Projective, MsmError> {
+        use icicle_core::msm::{msm, MSMConfig};
+        use icicle_core::ecntt::Projective; // For zero() method
+        use icicle_runtime::memory::{DeviceVec, HostSlice, HostOrDeviceSlice};
+        use icicle_bls12_381::curve::G1Projective as IcicleG1Projective;
+        use icicle_runtime::{Device, set_device};
+        
+        if scalars.is_empty() {
+            return Ok(G1Projective::identity());
+        }
+        
+        // Ensure we're using the same device where bases were allocated
+        let device = Device::new("CUDA", 0);
+        set_device(&device).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Failed to set device: {:?}", e))))?;
+        
+        if scalars.len() > device_bases.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "More scalars ({}) than available bases ({})",
+                scalars.len(),
+                device_bases.len()
+            )));
+        }
+        
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [GPU] Using pre-uploaded bases (zero-copy MSM)");
+        
+        // Convert scalars to ICICLE format (only conversion, no bases conversion!)
+        let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
+        
+        // Allocate device result buffer
+        let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        
+        // Execute MSM directly on device bases (no upload!)
+        let cfg = MSMConfig::default();
+        msm(
+            HostSlice::from_slice(&icicle_scalars),
+            &device_bases[..scalars.len()],  // Use slice of pre-uploaded bases
+            &cfg,
+            &mut device_result[..]
+        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        
+        // Copy result back to host
+        let mut host_result = vec![IcicleG1Projective::zero(); 1];
+        device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        
+        // Convert back to midnight types
+        Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))
+    }
+    
     /// Determine if GPU should be used for the given problem size
     fn should_use_gpu(&self, size: usize) -> bool {
         #[cfg(feature = "gpu")]
