@@ -46,6 +46,7 @@ rayon = { workspace = true }
 icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", optional = true }
 icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", optional = true }
 icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", features = ["msm"], optional = true }
+once_cell = { version = "1.20", optional = true }
 
 # Developer tooling dependencies
 plotters = { version = "0.3.7", default-features = false, optional = true }
@@ -104,7 +105,7 @@ trace-kzg = []        # Trace KZG commitment operations
 trace-all = ["trace-msm", "trace-fft", "trace-phases", "trace-kzg"]
 
 # GPU acceleration features
-gpu = ["icicle-runtime", "icicle-core", "icicle-bls12-381"]
+gpu = ["icicle-runtime", "icicle-core", "icicle-bls12-381", "once_cell"]
 gpu-cuda = ["gpu"]    # Future: separate CUDA backend
 
 [lib]

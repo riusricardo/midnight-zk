@@ -9,6 +9,11 @@ use halo2curves::{
 use midnight_curves::{Fq, G1Projective};
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
+#[cfg(feature = "gpu")]
+use midnight_curves::G1Affine;
+#[cfg(feature = "gpu")]
+use crate::gpu::MsmExecutor;
+
 use super::params::ParamsVerifierKZG;
 use crate::{
     poly::{
@@ -116,10 +121,14 @@ pub fn is_blst_available<C: CurveAffine>() -> bool {
 }
 
 #[allow(unsafe_code)]
-/// MSM using BLST multi_exp (mandatory for midnight_curves)
+/// MSM using BLST multi_exp with optional GPU acceleration
 /// 
 /// This function REQUIRES midnight_curves::G1Affine and will panic if used with other curves.
-/// BLST provides optimized multi-scalar multiplication for BLS12-381 curve.
+/// 
+/// # GPU Acceleration
+/// When compiled with `gpu` feature and size >= 16384 (K≥14):
+/// - Uses ICICLE CUDA backend for GPU acceleration
+/// - Threshold: K≥14 (16,384 points)
 pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
@@ -137,19 +146,51 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
     let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
     
-    #[cfg(feature = "trace-msm")]
-    eprintln!("   [MSM] Using BLST multi_exp (BLS12-381 optimized)");
-    
-    let res = G1Projective::multi_exp(bases, coeffs);
-    let result = unsafe { std::mem::transmute_copy(&res) };
-    
-    #[cfg(feature = "trace-msm")]
+    #[cfg(feature = "gpu")]
     {
-        let elapsed = start.elapsed();
-        eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+        // Convert projective bases to affine for GPU MSM
+        let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
+        
+        // Use GPU accelerated MSM via MsmExecutor
+        // Will automatically use GPU for K>=14, CPU for smaller sizes
+        use once_cell::sync::Lazy;
+        static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
+        
+        #[cfg(feature = "trace-msm")]
+        let backend = if bases.len() >= 16384 { "GPU" } else { "CPU" };
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using {} backend ({} points)", backend, bases.len());
+        
+        let res = MSM_EXECUTOR.execute(coeffs, &bases_affine)
+            .expect("MSM execution failed");
+        let result = unsafe { std::mem::transmute_copy(&res) };
+        
+        #[cfg(feature = "trace-msm")]
+        {
+            let elapsed = start.elapsed();
+            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+        }
+        
+        result
     }
     
-    result
+    #[cfg(not(feature = "gpu"))]
+    {
+        // CPU-only path using BLST multi_exp
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using BLST multi_exp (BLS12-381 optimized)");
+        
+        let res = G1Projective::multi_exp(bases, coeffs);
+        let result = unsafe { std::mem::transmute_copy(&res) };
+        
+        #[cfg(feature = "trace-msm")]
+        {
+            let elapsed = start.elapsed();
+            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+        }
+        
+        result
+    }
 }
 
 /// Two channel MSM accumulator

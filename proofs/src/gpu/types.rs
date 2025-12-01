@@ -21,9 +21,9 @@ use icicle_core::ecntt::Projective as IcicleProjective;
 #[cfg(feature = "gpu")]
 use icicle_core::bignum::BigNum;
 #[cfg(feature = "gpu")]
-use group::prime::PrimeCurveAffine;
-#[cfg(feature = "gpu")]
 use halo2curves::CurveAffine;
+#[cfg(feature = "gpu")]
+use ff::PrimeField;
 
 /// Type converter for midnight-curves <-> ICICLE types
 #[derive(Debug)]
@@ -34,14 +34,12 @@ impl TypeConverter {
     /// Convert midnight Scalar (Fr) to ICICLE ScalarField
     #[inline]
     pub fn scalar_to_icicle(scalar: &Scalar) -> IcicleScalar {
-        use ff::PrimeField;
         let bytes = scalar.to_repr();
         IcicleScalar::from_bytes_le(bytes.as_ref())
     }
     
     /// Convert slice of scalars - batched for efficiency
     pub fn scalar_slice_to_icicle_vec(scalars: &[Scalar]) -> Vec<IcicleScalar> {
-        use ff::PrimeField;
         scalars.iter().map(|s| {
             let bytes = s.to_repr();
             IcicleScalar::from_bytes_le(bytes.as_ref())
@@ -51,7 +49,6 @@ impl TypeConverter {
     /// Convert midnight Fp (base field) to ICICLE BaseField
     #[inline]
     fn fp_to_icicle_base(fp: &Fp) -> IcicleBaseField {
-        use ff::PrimeField;
         let bytes = fp.to_repr();
         IcicleBaseField::from_bytes_le(bytes.as_ref())
     }
@@ -60,7 +57,6 @@ impl TypeConverter {
     /// Extracts x,y coordinates and converts each field element
     #[inline]
     pub fn g1_affine_to_icicle(point: &G1Affine) -> IcicleG1Affine {
-        use group::prime::PrimeCurveAffine;
         
         // Get coordinates as Fp elements
         let coords = point.coordinates().unwrap();
@@ -78,7 +74,6 @@ impl TypeConverter {
     /// Convert ICICLE BaseField back to midnight Fp
     #[inline]
     fn icicle_base_to_fp(icicle: &IcicleBaseField) -> Option<Fp> {
-        use ff::PrimeField;
         let bytes = icicle.to_bytes_le();
         let byte_array: [u8; 48] = bytes.as_slice().try_into().ok()?;
         Fp::from_bytes_le(&byte_array).into_option()
@@ -87,8 +82,6 @@ impl TypeConverter {
     /// Convert ICICLE G1Projective back to midnight G1Projective
     /// Converts to affine first (ICICLE provides to_affine), then reconstructs point
     pub fn icicle_to_g1_projective(icicle: &IcicleG1Projective) -> G1Projective {
-        use group::prime::PrimeCurveAffine;
-        
         // Convert to affine coordinates
         let affine = icicle.to_affine();
         
@@ -104,7 +97,7 @@ impl TypeConverter {
             .expect("Invalid point from ICICLE");
         
         // Convert to projective
-        midnight_affine.to_curve()
+        G1Projective::from(midnight_affine)
     }
 }
 
