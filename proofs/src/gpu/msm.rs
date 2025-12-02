@@ -50,8 +50,7 @@ impl From<GpuError> for MsmError {
 #[cfg(feature = "gpu")]
 #[derive(Debug)]
 pub struct GpuMsmBackend {
-    #[allow(dead_code)]
-    backend: GpuBackend,
+    pub(crate) backend: GpuBackend,
 }
 
 #[cfg(feature = "gpu")]
@@ -210,12 +209,10 @@ impl MsmExecutor {
         self.cpu_backend.compute_msm(scalars, points)
     }
     
-    /// Execute MSM using pre-uploaded GPU bases (zero-copy, following ingonyama-zk pattern)
+    /// Execute MSM using pre-uploaded GPU bases (zero-copy optimization)
     /// 
-    /// This eliminates the per-call conversion and upload overhead by using bases
-    /// that are already cached in GPU memory.
-    /// 
-    /// Expected improvement: 1.5-2x over regular execute() for GPU MSMs
+    /// Eliminates per-call conversion and upload overhead by using bases
+    /// cached in GPU memory. Primary optimization for GPU-accelerated commitments.
     #[cfg(feature = "gpu")]
     pub fn execute_with_device_bases(
         &self,
@@ -226,15 +223,21 @@ impl MsmExecutor {
         use icicle_core::ecntt::Projective; // For zero() method
         use icicle_runtime::memory::{DeviceVec, HostSlice, HostOrDeviceSlice};
         use icicle_bls12_381::curve::G1Projective as IcicleG1Projective;
-        use icicle_runtime::{Device, set_device};
         
         if scalars.is_empty() {
             return Ok(G1Projective::identity());
         }
         
-        // Ensure we're using the same device where bases were allocated
-        let device = Device::new("CUDA", 0);
-        set_device(&device).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Failed to set device: {:?}", e))))?;
+        // CRITICAL: Must set device context in multi-threaded environment
+        // Cached GPU bases require active device context to access memory
+        // Use backend's cached device to avoid creating new device (which triggers backend reload)
+        use icicle_runtime::set_device;
+        if let Some(ref gpu_backend) = self.gpu_backend {
+            set_device(gpu_backend.backend.device())
+                .map_err(|e| MsmError::GpuError(GpuError::DeviceSetFailed(format!("{:?}", e))))?;
+        } else {
+            return Err(MsmError::GpuError(GpuError::NotAvailable));
+        }
         
         if scalars.len() > device_bases.len() {
             return Err(MsmError::InvalidInput(format!(
@@ -245,28 +248,32 @@ impl MsmExecutor {
         }
         
         #[cfg(feature = "trace-msm")]
-        eprintln!("   [GPU] Using pre-uploaded bases (zero-copy MSM)");
+        eprintln!("   [GPU] Using pre-uploaded bases (zero-copy MSM) - {} points", scalars.len());
         
         // Convert scalars to ICICLE format (only conversion, no bases conversion!)
         let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
         
         // Allocate device result buffer
         let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Device malloc failed: {:?}", e))))?;
         
         // Execute MSM directly on device bases (no upload!)
         let cfg = MSMConfig::default();
+        
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [GPU] Calling ICICLE msm() with {} scalars, slice range 0..{}", icicle_scalars.len(), scalars.len());
+        
         msm(
             HostSlice::from_slice(&icicle_scalars),
             &device_bases[..scalars.len()],  // Use slice of pre-uploaded bases
             &cfg,
             &mut device_result[..]
-        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("MSM operation failed: {:?}", e))))?;
         
         // Copy result back to host
         let mut host_result = vec![IcicleG1Projective::zero(); 1];
         device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Copy to host failed: {:?}", e))))?;
         
         // Convert back to midnight types
         Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))

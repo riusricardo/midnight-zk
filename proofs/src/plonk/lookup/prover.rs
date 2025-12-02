@@ -124,6 +124,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         };
 
         // Parallelize the two independent MSM operations for input and table commitments
+        // With GPU feature, each commit uses cached GPU bases automatically
         #[cfg(feature = "trace-msm")]
         eprintln!("   [MSM-PARALLEL] Computing 2 lookup permuted commitments (input+table) in parallel");
         #[cfg(feature = "trace-msm")]

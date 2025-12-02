@@ -44,11 +44,13 @@
 //! ```
 
 pub mod backend;
+pub mod batch;
 pub mod config;
 pub mod msm;
 pub mod types;
 
 pub use backend::{GpuBackend, GpuError};
+pub use batch::MsmBatch;
 pub use config::{DeviceType, GpuConfig};
 pub use msm::{MsmBackend, MsmExecutor};
 pub use types::TypeConverter;

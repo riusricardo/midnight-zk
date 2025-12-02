@@ -194,6 +194,11 @@ fn e2e_proof_benchmark() {
         (12, 20, "Medium circuit (CPU)"),
         (14, 30, "Large circuit (GPU threshold)"),
         (16, 40, "Very large circuit (GPU)"),
+        (18, 50, "Huge circuit (GPU)"),
+        (19, 60, "Massive circuit (GPU) - MAX TESTED"),
+        // K=20: Blocked by SRS size assertion (assert!(k <= 19) in plonk_api.rs)
+        // The Filecoin SRS only supports up to 2^19 constraints
+        // Note: K=19 works perfectly with GPU, no ICICLE bugs at this size!
     ];
     
     for (k, nb_hashes, description) in test_cases {

@@ -670,24 +670,13 @@ where
                 }
             }
 
-            // Parallelize commitment computation for independent polynomials
-            // This is safe because:
-            // 1. Each MSM operates on independent data
-            // 2. The order is preserved by par_iter (deterministic)
-            // 3. Transcript writes are still sequential below
-            #[cfg(feature = "trace-msm")]
-            eprintln!("   [MSM-PARALLEL] Computing {} advice commitments in parallel", advice_values.len());
-            #[cfg(feature = "trace-msm")]
-            let parallel_start = std::time::Instant::now();
-            
-            // Always use parallel execution for performance (no feature flag needed)
+            // Compute commitments to advice columns using parallel MSM with cached GPU bases
+            // Each column commits individually, but Rayon parallelizes across columns
+            // GPU optimization: Zero-copy MSM uses persistent cached bases
             let advice_commitments: Vec<_> =
                 advice_values.par_iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
-            
-            #[cfg(feature = "trace-msm")]
-            eprintln!("✓  [MSM-PARALLEL] {} commitments completed in {:?}", advice_commitments.len(), parallel_start.elapsed());
 
-            // Transcript writes must remain sequential to maintain Fiat-Shamir security
+            // Write commitments to transcript (must be sequential for Fiat-Shamir)
             for commitment in &advice_commitments {
                 transcript.write(commitment)?;
             }

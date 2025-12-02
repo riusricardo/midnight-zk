@@ -31,8 +31,8 @@ pub struct ParamsKZG<E: Engine> {
     pub(crate) g2: E::G2,
     pub(crate) s_g2: E::G2,
     
-    /// Cached GPU bases for coefficient form commitments (uploaded once, reused forever)
-    /// Following ingonyama-zk pattern: keep bases in GPU memory across all MSM calls
+    /// Cached GPU bases for coefficient form commitments (uploaded once, reused for all MSMs)
+    /// Persistent GPU memory eliminates conversion/upload overhead in MSM operations
     #[cfg(feature = "gpu")]
     pub(crate) g_gpu: Arc<OnceCell<DeviceVec<IcicleG1Affine>>>,
     
@@ -191,7 +191,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();
             
-            // Ensure GPU device is active (fix for multi-threaded environment)
+            // CRITICAL: Set device before allocating GPU memory
+            // This is needed because get_or_init() might be called from different thread contexts
             let device = Device::new("CUDA", 0);
             set_device(&device).expect("Failed to set GPU device");
             
@@ -236,7 +237,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();
             
-            // Ensure GPU device is active
+            // CRITICAL: Set device before allocating GPU memory
             let device = Device::new("CUDA", 0);
             set_device(&device).expect("Failed to set GPU device");
             
@@ -263,6 +264,94 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             
             device_bases
         })
+    }
+    
+    /// Batch commit multiple polynomials in Lagrange form
+    /// 
+    /// Accumulates MSMs and executes together for specialized use cases
+    #[cfg(feature = "gpu")]
+    pub fn commit_lagrange_batch(&self, polys: &[&[E::Fr]]) -> Vec<E::G1> {
+        use crate::gpu::batch::MsmBatch;
+        use crate::gpu::types::TypeConverter;
+        use group::Curve;
+        
+        // Create batch accumulator
+        let mut batch = MsmBatch::new(true); // use_gpu = true
+        
+        // Accumulate all polynomial commitments
+        for poly in polys {
+            let size = poly.len();
+            assert!(size.is_power_of_two());
+            
+            // Convert halo2 scalars to midnight-curves Fq (both are BLS12-381 Fr)
+            // Safety: Both types have same memory layout (32-byte Fr element)
+            let scalars_midnight: Vec<midnight_curves::Fq> = poly.iter()
+                .map(|s| {
+                    let bytes = s.to_repr();
+                    let bytes_slice: &[u8] = bytes.as_ref();
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes_slice);
+                    midnight_curves::Fq::from_repr(arr).unwrap()
+                })
+                .collect();
+            
+            // Add to batch (base range 0..size for Lagrange bases)
+            batch.add(scalars_midnight, 0..size);
+        }
+        
+        // Execute all MSMs at once with cached GPU bases
+        let device_bases = self.get_or_upload_gpu_lagrange_bases();
+        let results = batch.execute_all_gpu(device_bases)
+            .expect("Batched GPU MSM failed");
+        
+        // Convert midnight_curves::G1Projective to E::G1 (both are BLS12-381 G1)
+        // Safety: Both types have identical memory layout
+        results.into_iter()
+            .map(|r| unsafe { std::mem::transmute_copy::<midnight_curves::G1Projective, E::G1>(&r) })
+            .collect()
+    }
+    
+    /// Batch commit multiple polynomials in coefficient form
+    #[cfg(feature = "gpu")]
+    pub fn commit_batch(&self, polys: &[&[E::Fr]]) -> Vec<E::G1> {
+        use crate::gpu::batch::MsmBatch;
+        use crate::gpu::types::TypeConverter;
+        use group::Curve;
+        
+        // Create batch accumulator
+        let mut batch = MsmBatch::new(true); // use_gpu = true
+        
+        // Accumulate all polynomial commitments
+        for poly in polys {
+            let size = poly.len();
+            assert!(size.is_power_of_two());
+            
+            // Convert halo2 scalars to midnight-curves Fq (both are BLS12-381 Fr)
+            // Safety: Both types have same memory layout (32-byte Fr element)
+            let scalars_midnight: Vec<midnight_curves::Fq> = poly.iter()
+                .map(|s| {
+                    let bytes = s.to_repr();
+                    let bytes_slice: &[u8] = bytes.as_ref();
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(bytes_slice);
+                    midnight_curves::Fq::from_repr(arr).unwrap()
+                })
+                .collect();
+            
+            // Add to batch (base range 0..size for coefficient bases)
+            batch.add(scalars_midnight, 0..size);
+        }
+        
+        // Execute all MSMs at once with cached GPU bases
+        let device_bases = self.get_or_upload_gpu_bases();
+        let results = batch.execute_all_gpu(device_bases)
+            .expect("Batched GPU MSM failed");
+        
+        // Convert midnight_curves::G1Projective to E::G1 (both are BLS12-381 G1)
+        // Safety: Both types have identical memory layout
+        results.into_iter()
+            .map(|r| unsafe { std::mem::transmute_copy::<midnight_curves::G1Projective, E::G1>(&r) })
+            .collect()
     }
 
     /// Writes parameters to buffer
