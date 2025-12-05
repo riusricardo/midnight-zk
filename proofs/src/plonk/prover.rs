@@ -147,7 +147,8 @@ where
                 })
                 .collect()
         })
-        .collect::<Result<Vec<_>, _>>()))?;
+        .collect::<Result<Vec<_>, _>>()
+    )?;
 
     // Sample beta challenge
     let beta: F = transcript.squeeze_challenge();
@@ -222,7 +223,7 @@ where
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = bench_and_run!(_group;
         ref transcript; ; "Commit vanishing random poly";
-        |t| vanishing::Argument::<F, CS>::commit(params, domain, &mut rng, t))?
+        |t| vanishing::Argument::<F, CS>::commit(params, domain, &mut rng, t))?;
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: F = transcript.squeeze_challenge();
@@ -276,6 +277,7 @@ pub(crate) fn finalise_proof<'a, F, CS: PolynomialCommitmentScheme<F>, T: Transc
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -378,7 +380,7 @@ where
         .map(|lookups| -> Result<Vec<_>, _> {
             lookups
                 .into_iter()
-                .map(|p| p.evaluate(pk, x, transcript))
+                .map(|p| p.evaluate(pk, x, t))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>())?;
