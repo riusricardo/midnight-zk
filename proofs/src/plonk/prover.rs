@@ -147,7 +147,7 @@ where
                 })
                 .collect()
         })
-        .collect::<Result<Vec<_>, _>>())?;
+        .collect::<Result<Vec<_>, _>>()))?;
 
     // Sample beta challenge
     let beta: F = transcript.squeeze_challenge();
@@ -222,7 +222,7 @@ where
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = bench_and_run!(_group;
         ref transcript; ; "Commit vanishing random poly";
-        |t| vanishing::Argument::<F, CS>::commit(params, domain, &mut rng, t))?;
+        |t| vanishing::Argument::<F, CS>::commit(params, domain, &mut rng, t))?
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: F = transcript.squeeze_challenge();
@@ -276,7 +276,6 @@ pub(crate) fn finalise_proof<'a, F, CS: PolynomialCommitmentScheme<F>, T: Transc
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
-    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -290,11 +289,7 @@ where
     #[cfg(feature = "trace-phases")]
     let finalise_start = std::time::Instant::now();
     #[cfg(feature = "trace-phases")]
-    eprintln!("\n{}", "=".repeat(100));
-    #[cfg(feature = "trace-phases")]
-    eprintln!("📐 [FINALISE] Starting proof finalization (quotient polynomial phase)");
-    #[cfg(feature = "trace-phases")]
-    eprintln!("{}", "=".repeat(100));
+    eprintln!("{}" , "=".repeat(100));
 
     let domain = pk.get_vk().get_domain();
 
@@ -348,9 +343,7 @@ where
         t,
     ))?;
 
-    let vanishing = bench_and_run!(_group; ref transcript; own vanishing; "Evaluate vanishing";
-        |t, vanishing: vanishing::prover::Constructed<F>| vanishing.evaluate(x, domain, t)
-    )?;
+    let vanishing = vanishing.evaluate(x, domain, transcript)?;
 
     // Evaluate common permutation data
     bench_and_run!(_group; ref transcript; ; "Evaluate permutation data"; |t|
@@ -385,7 +378,7 @@ where
         .map(|lookups| -> Result<Vec<_>, _> {
             lookups
                 .into_iter()
-                .map(|p| p.evaluate(pk, x, &mut *t))
+                .map(|p| p.evaluate(pk, x, transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>())?;
@@ -445,6 +438,9 @@ where
 /// parameters `params` and the proving key [`ProvingKey`] that was
 /// generated previously for the same circuit. The provided `instances`
 /// are zero-padded internally.
+//
+// NOTE: Any change here must be mirrored in src/plonk/bench/prover.rs
+// to ensure the benchmarks remain aligned with the real prover.
 pub fn create_proof<
     F,
     CS: PolynomialCommitmentScheme<F>,
@@ -478,8 +474,6 @@ where
         instances,
         rng,
         transcript,
-        #[cfg(all(test, feature = "bench-internal"))]
-        _group,
     )?;
     finalise_proof(
         params,
@@ -488,12 +482,10 @@ where
         nb_committed_instances,
         trace,
         transcript,
-        #[cfg(all(test, feature = "bench-internal"))]
-        _group,
     )
 }
 
-fn compute_instances<F, CS, T>(
+pub(super) fn compute_instances<F, CS, T>(
     params: &CS::Parameters,
     pk: &ProvingKey<F, CS>,
     instances: &[&[&[F]]],
@@ -561,7 +553,7 @@ where
 }
 
 #[allow(clippy::type_complexity)]
-fn parse_advices<F, CS, ConcreteCircuit, T>(
+pub(super) fn parse_advices<F, CS, ConcreteCircuit, T>(
     params: &CS::Parameters,
     pk: &ProvingKey<F, CS>,
     circuits: &[ConcreteCircuit],
@@ -701,7 +693,7 @@ where
     Ok((advice, challenges))
 }
 
-fn compute_h_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>>(
+pub(super) fn compute_h_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>>(
     pk: &ProvingKey<F, CS>,
     trace: &ProverTrace<F>,
 ) -> Polynomial<F, ExtendedLagrangeCoeff> {
@@ -803,7 +795,7 @@ fn compute_h_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F
     )
 }
 
-fn write_evals_to_transcript<F, CS, T>(
+pub(super) fn write_evals_to_transcript<F, CS, T>(
     pk: &ProvingKey<F, CS>,
     nb_committed_instances: usize,
     instance_polys: &[Vec<Polynomial<F, Coeff>>],
@@ -865,7 +857,11 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn compute_queries<'a, F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>>(
+pub(super) fn compute_queries<
+    'a,
+    F: WithSmallOrderMulGroup<3>,
+    CS: PolynomialCommitmentScheme<F>,
+>(
     pk: &'a ProvingKey<F, CS>,
     nb_committed_instances: usize,
     instance_polys: &'a [Vec<Polynomial<F, Coeff>>],
@@ -921,13 +917,14 @@ fn compute_queries<'a, F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentSch
         .collect::<Vec<_>>()
 }
 
-struct InstanceSingle<F: PrimeField> {
+#[derive(Clone)]
+pub(super) struct InstanceSingle<F: PrimeField> {
     pub instance_values: Vec<Polynomial<F, LagrangeCoeff>>,
     pub instance_polys: Vec<Polynomial<F, Coeff>>,
 }
 
 #[derive(Clone)]
-struct AdviceSingle<F: PrimeField, B: PolynomialRepresentation> {
+pub(super) struct AdviceSingle<F: PrimeField, B: PolynomialRepresentation> {
     pub advice_polys: Vec<Polynomial<F, B>>,
 }
 
