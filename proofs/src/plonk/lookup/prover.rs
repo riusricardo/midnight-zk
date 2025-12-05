@@ -136,7 +136,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
             .collect();
         
         #[cfg(feature = "trace-msm")]
-        eprintln!("✓  [MSM-PARALLEL] 2 lookup commitments completed in {:?}", parallel_start.elapsed());
+        eprintln!("[MSM-PARALLEL] 2 lookup commitments completed in {:?}", parallel_start.elapsed());
         
         let (permuted_input_poly, permuted_input_commitment) = results[0].clone();
         let (permuted_table_poly, permuted_table_commitment) = results[1].clone();

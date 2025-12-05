@@ -186,7 +186,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             use icicle_runtime::{Device, set_device};
             
             #[cfg(feature = "trace-msm")]
-            eprintln!("🔄 [GPU] Uploading {} SRS bases to GPU (one-time cost)...", self.g.len());
+            eprintln!("[GPU] Uploading {} SRS bases to GPU (one-time cost)...", self.g.len());
             
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();
@@ -232,7 +232,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             use icicle_runtime::{Device, set_device};
             
             #[cfg(feature = "trace-msm")]
-            eprintln!("🔄 [GPU] Uploading {} Lagrange bases to GPU (one-time cost)...", self.g_lagrange.len());
+            eprintln!("[GPU] Uploading {} Lagrange bases to GPU (one-time cost)...", self.g_lagrange.len());
             
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();

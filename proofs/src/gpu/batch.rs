@@ -122,7 +122,7 @@ impl MsmBatch {
         }
         
         #[cfg(feature = "trace-msm")]
-        eprintln!("🔢 [MSM-BATCH] Executing {} MSMs in single GPU call", self.operations.len());
+        eprintln!("[MSM-BATCH] Executing {} MSMs in single GPU call", self.operations.len());
         
         #[cfg(feature = "trace-msm")]
         let start = std::time::Instant::now();
@@ -178,7 +178,7 @@ impl MsmBatch {
         }
         
         #[cfg(feature = "trace-msm")]
-        eprintln!("✓  [MSM-BATCH] Completed {} MSMs in {:?} (buffer reuse enabled)", self.operations.len(), start.elapsed());
+        eprintln!("[MSM-BATCH] Completed {} MSMs in {:?} (buffer reuse enabled)", self.operations.len(), start.elapsed());
         
         Ok(results)
     }

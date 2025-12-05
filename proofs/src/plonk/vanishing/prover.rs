@@ -125,7 +125,7 @@ impl<F: WithSmallOrderMulGroup<3>> Committed<F> {
             h_pieces.par_iter().map(|h_piece| CS::commit(params, h_piece)).collect();
         
         #[cfg(feature = "trace-msm")]
-        eprintln!("✓  [MSM-PARALLEL] {} quotient commitments completed in {:?}", h_commitments.len(), parallel_start.elapsed());
+        eprintln!("[MSM-PARALLEL] {} quotient commitments completed in {:?}", h_commitments.len(), parallel_start.elapsed());
 
         // Hash each h(X) piece - must remain sequential for Fiat-Shamir
         for c in h_commitments {

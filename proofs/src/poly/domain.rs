@@ -241,10 +241,10 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         #[cfg(feature = "trace-fft")]
         let start = std::time::Instant::now();
         #[cfg(feature = "trace-fft")]
-        eprintln!("🌊 [FFT] coeff_to_lagrange: Starting FFT with {} elements (K={})", a.values.len(), self.k);
+        eprintln!("[FFT] coeff_to_lagrange: Starting FFT with {} elements (K={})", a.values.len(), self.k);
         best_fft(&mut a.values, self.omega, self.k);
         #[cfg(feature = "trace-fft")]
-        eprintln!("✓  [FFT] coeff_to_lagrange: Completed in {:?}", start.elapsed());
+        eprintln!("[FFT] coeff_to_lagrange: Completed in {:?}", start.elapsed());
 
         Polynomial {
             values: a.values,
@@ -263,14 +263,14 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         #[cfg(feature = "trace-fft")]
         let start = std::time::Instant::now();
         #[cfg(feature = "trace-fft")]
-        eprintln!("🌊 [FFT] coeff_to_extended: Starting extended domain FFT");
+        eprintln!("[FFT] coeff_to_extended: Starting extended domain FFT");
         #[cfg(feature = "trace-fft")]
         eprintln!("   [FFT] Input size: {}, Extended size: {} (K={})", a.values.len(), self.extended_len(), self.extended_k);
         self.distribute_powers_zeta(&mut a.values, true);
         a.values.resize(self.extended_len(), F::ZERO);
         best_fft(&mut a.values, self.extended_omega, self.extended_k);
         #[cfg(feature = "trace-fft")]
-        eprintln!("✓  [FFT] coeff_to_extended: Completed in {:?}", start.elapsed());
+        eprintln!("[FFT] coeff_to_extended: Completed in {:?}", start.elapsed());
 
         Polynomial {
             values: a.values,
@@ -289,7 +289,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         #[cfg(feature = "trace-fft")]
         let start = std::time::Instant::now();
         #[cfg(feature = "trace-fft")]
-        eprintln!("🌊 [IFFT] extended_to_coeff: Starting inverse FFT with {} elements", a.values.len());
+        eprintln!("[IFFT] extended_to_coeff: Starting inverse FFT with {} elements", a.values.len());
         // Inverse FFT
         Self::ifft(
             &mut a.values,
@@ -298,7 +298,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             self.extended_ifft_divisor,
         );
         #[cfg(feature = "trace-fft")]
-        eprintln!("✓  [IFFT] extended_to_coeff: IFFT completed in {:?}", start.elapsed());
+        eprintln!("[IFFT] extended_to_coeff: IFFT completed in {:?}", start.elapsed());
 
         // Distribute powers to move from coset; opposite from the
         // transformation we performed earlier.
@@ -328,13 +328,13 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         #[cfg(feature = "trace-fft")]
         let fft_start = std::time::Instant::now();
         #[cfg(feature = "trace-fft")]
-        eprintln!("🌊 [FFT] lagrange_to_coeff: Final FFT step");
+        eprintln!("[FFT] lagrange_to_coeff: Final FFT step");
         a.values.truncate(self.n as usize);
         self.distribute_powers_zeta(&mut a.values, false);
 
         best_fft(&mut a.values, self.omega, self.k);
         #[cfg(feature = "trace-fft")]
-        eprintln!("✓  [FFT] lagrange_to_coeff: Completed in {:?}", fft_start.elapsed());
+        eprintln!("[FFT] lagrange_to_coeff: Completed in {:?}", fft_start.elapsed());
 
         Polynomial {
             values: a.values,

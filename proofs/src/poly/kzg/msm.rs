@@ -139,7 +139,7 @@ pub fn msm_with_cached_bases<C: CurveAffine>(
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
-    eprintln!("🔢 [MSM-CACHED] Starting with {} points (using pre-uploaded GPU bases)", coeffs.len());
+    eprintln!("[MSM-CACHED] Starting with {} points (using pre-uploaded GPU bases)", coeffs.len());
     
     // Verify we're using midnight_curves (BLS12-381)
     assert!(
@@ -185,7 +185,7 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
-    eprintln!("🔢 [MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
+    eprintln!("[MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
     
     // Verify we're using midnight_curves (BLS12-381 with BLST)
     assert!(

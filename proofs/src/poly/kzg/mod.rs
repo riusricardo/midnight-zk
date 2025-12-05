@@ -79,7 +79,7 @@ where
         #[cfg(feature = "trace-kzg")]
         let start = std::time::Instant::now();
         #[cfg(feature = "trace-kzg")]
-        eprintln!("📍 [KZG::commit] Committing to polynomial of degree {}", polynomial.len());
+        eprintln!("[KZG::commit] Committing to polynomial of degree {}", polynomial.len());
         let mut scalars = Vec::<E::Fr>::with_capacity(polynomial.len());
         scalars.extend(polynomial.iter());
         let size = scalars.len();
@@ -110,7 +110,7 @@ where
         #[cfg(feature = "trace-kzg")]
         let start = std::time::Instant::now();
         #[cfg(feature = "trace-kzg")]
-        eprintln!("📍 [KZG::commit_lagrange] Committing to Lagrange polynomial of size {}", poly.len());
+        eprintln!("[KZG::commit_lagrange] Committing to Lagrange polynomial of size {}", poly.len());
         let mut scalars = Vec::with_capacity(poly.len());
         scalars.extend(poly.iter());
         let size = scalars.len();
