@@ -10,6 +10,55 @@ use tracing::{debug, error, info, warn};
 #[cfg(feature = "gpu")]
 use icicle_runtime::{Device, load_backend_from_env_or_default, set_device};
 
+/// Global singleton for ICICLE backend initialization
+/// Ensures the backend is loaded exactly once across all threads
+#[cfg(feature = "gpu")]
+static BACKEND_INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Ensure the ICICLE backend is loaded (called exactly once)
+/// 
+/// This function is safe to call from multiple threads - only the first
+/// call will actually load the backend, subsequent calls return immediately.
+/// 
+/// Returns Ok(()) if backend is loaded, Err with message if loading failed.
+#[cfg(feature = "gpu")]
+pub fn ensure_backend_loaded() -> Result<(), GpuError> {
+    let result = BACKEND_INITIALIZED.get_or_init(|| {
+        // Get backend path from environment or use default
+        let backend_path = std::env::var("ICICLE_BACKEND_INSTALL_DIR")
+            .unwrap_or_else(|_| "/opt/icicle/lib/backend".to_string());
+        
+        // Set environment variable for ICICLE
+        std::env::set_var("ICICLE_BACKEND_INSTALL_DIR", &backend_path);
+        
+        debug!("Loading ICICLE backend from {}", backend_path);
+        
+        match load_backend_from_env_or_default() {
+            Ok(_) => {
+                info!("ICICLE backend loaded successfully from {}", backend_path);
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to load ICICLE backend: {:?}", e);
+                Err(format!("{:?}", e))
+            }
+        }
+    });
+    
+    result.clone().map_err(GpuError::BackendLoadFailed)
+}
+
+/// Check if GPU is available (backend loaded successfully)
+#[cfg(feature = "gpu")]
+pub fn is_gpu_available() -> bool {
+    ensure_backend_loaded().is_ok()
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn is_gpu_available() -> bool {
+    false
+}
+
 /// Errors that can occur during GPU operations
 #[derive(Debug)]
 pub enum GpuError {
@@ -55,24 +104,14 @@ impl GpuBackend {
     /// Create a new GPU backend with the given configuration
     ///
     /// This will:
-    /// 1. Load the ICICLE CUDA backend from the configured path
+    /// 1. Load the ICICLE CUDA backend from the configured path (once globally)
     /// 2. Initialize the specified device
     /// 3. Run warmup iterations to ensure GPU is ready
     pub fn new(config: GpuConfig) -> Result<Self, GpuError> {
         info!("Initializing GPU backend with config: {:?}", config);
         
-        // Set environment variable for backend path
-        std::env::set_var("ICICLE_BACKEND_INSTALL_DIR", &config.backend_path);
-        
-        // Load backend
-        debug!("Loading ICICLE backend from {:?}", config.backend_path);
-        load_backend_from_env_or_default()
-            .map_err(|e| {
-                error!("Failed to load ICICLE backend: {:?}", e);
-                GpuError::BackendLoadFailed(format!("{:?}", e))
-            })?;
-        
-        info!("ICICLE backend loaded successfully");
+        // Ensure backend is loaded (singleton - only loads once)
+        ensure_backend_loaded()?;
         
         // Determine device type
         let device_type_str = match config.device_type {
@@ -199,22 +238,6 @@ pub fn initialize_gpu(config: GpuConfig) -> Result<(), GpuError> {
 /// Get the global GPU backend (returns None if not initialized or failed)
 pub fn get_gpu_backend() -> Option<&'static GpuBackend> {
     GPU_BACKEND.get().and_then(|b| b.as_ref())
-}
-
-/// Check if GPU is available at runtime
-pub fn is_gpu_available() -> bool {
-    #[cfg(feature = "gpu")]
-    {
-        // Try to initialize if not already done
-        if GPU_BACKEND.get().is_none() {
-            let _ = initialize_gpu(GpuConfig::default());
-        }
-        get_gpu_backend().is_some()
-    }
-    #[cfg(not(feature = "gpu"))]
-    {
-        false
-    }
 }
 
 #[cfg(test)]

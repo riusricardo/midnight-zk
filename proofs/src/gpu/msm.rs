@@ -2,10 +2,12 @@
 //!
 //! This module provides GPU-accelerated MSM with automatic CPU fallback.
 
-use crate::gpu::{GpuBackend, GpuConfig, GpuError, TypeConverter};
+use crate::gpu::{DeviceType, GpuBackend, GpuConfig, GpuError, TypeConverter};
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
+use ff::Field;
 use group::Group; // For identity() method
-use tracing::{debug, warn};
+use group::prime::PrimeCurveAffine; // For generator() method
+use tracing::{debug, info, warn};
 
 /// Trait for MSM backend implementations
 pub trait MsmBackend {
@@ -183,17 +185,23 @@ impl MsmExecutor {
     
     /// Execute MSM with automatic backend selection based on size
     /// 
-    /// For K >= 14 (16384+ points): Use GPU
-    /// For K < 14: Use CPU
+    /// Decision is based on config.device_type and config.min_gpu_size.
+    /// Override via MIDNIGHT_DEVICE and MIDNIGHT_GPU_MIN_K environment variables.
     pub fn execute(
         &self,
         scalars: &[Scalar],
         points: &[G1Affine],
     ) -> Result<G1Projective, MsmError> {
-        if self.should_use_gpu(scalars.len()) {
+        let size = scalars.len();
+        let k = (size as f64).log2().ceil() as u8;
+        
+        if self.should_use_gpu(size) {
             #[cfg(feature = "gpu")]
             if let Some(gpu) = &self.gpu_backend {
-                debug!("Using GPU for MSM with {} points (K >= 14)", scalars.len());
+                debug!(
+                    "Using GPU for MSM: {} points (K={}), device_type={:?}",
+                    size, k, self.config.device_type
+                );
                 return gpu.compute_msm(scalars, points);
             }
             
@@ -205,7 +213,10 @@ impl MsmExecutor {
             }
         }
         
-        debug!("Using CPU for MSM with {} points (K < 14)", scalars.len());
+        debug!(
+            "Using CPU for MSM: {} points (K={}), device_type={:?}, min_size={}",
+            size, k, self.config.device_type, self.config.min_gpu_size
+        );
         self.cpu_backend.compute_msm(scalars, points)
     }
     
@@ -280,9 +291,24 @@ impl MsmExecutor {
     }
     
     /// Determine if GPU should be used for the given problem size
-    fn should_use_gpu(&self, size: usize) -> bool {
+    /// 
+    /// Decision logic:
+    /// 1. If MIDNIGHT_DEVICE=cpu, always use CPU
+    /// 2. If MIDNIGHT_DEVICE=gpu, always use GPU (if available)
+    /// 3. If MIDNIGHT_DEVICE=auto (default), use GPU for size >= min_gpu_size
+    pub fn should_use_gpu(&self, size: usize) -> bool {
         #[cfg(feature = "gpu")]
         {
+            // Check device type override first
+            if self.config.device_type.is_cpu_forced() {
+                return false;
+            }
+            
+            if self.config.device_type.is_gpu_forced() {
+                return self.gpu_backend.is_some();
+            }
+            
+            // Auto mode: use GPU for large problems
             self.gpu_backend.is_some() && size >= self.config.min_gpu_size
         }
         #[cfg(not(feature = "gpu"))]
@@ -296,6 +322,71 @@ impl MsmExecutor {
 impl Default for MsmExecutor {
     fn default() -> Self {
         Self::new(GpuConfig::default())
+    }
+}
+
+impl MsmExecutor {
+    /// Warmup the MSM executor by running a small MSM operation
+    /// 
+    /// This should be called at application startup to:
+    /// 1. Initialize the ICICLE CUDA backend
+    /// 2. Allocate GPU memory
+    /// 3. Run initial CUDA context setup
+    /// 
+    /// Without warmup, the first proof request pays ~500-1000ms initialization cost.
+    pub fn warmup(&self) -> Result<std::time::Duration, MsmError> {
+        use std::time::Instant;
+        
+        let start = Instant::now();
+        
+        #[cfg(feature = "gpu")]
+        if let Some(gpu) = &self.gpu_backend {
+            info!("GPU warmup: initializing ICICLE backend...");
+            
+            // Run a small MSM to trigger full GPU initialization
+            // Size 1024 is enough to initialize without being slow
+            let warmup_size = 1024;
+            let scalars: Vec<Scalar> = (0..warmup_size)
+                .map(|i| {
+                    use ff::Field;
+                    let mut s = Scalar::ONE;
+                    for _ in 0..i % 10 {
+                        s = s.double();
+                    }
+                    s
+                })
+                .collect();
+            let points: Vec<G1Affine> = (0..warmup_size)
+                .map(|_| G1Affine::generator())
+                .collect();
+            
+            // Force GPU execution regardless of size threshold
+            let _ = gpu.compute_msm(&scalars, &points)?;
+            
+            let elapsed = start.elapsed();
+            info!("GPU warmup complete in {:?}", elapsed);
+            return Ok(elapsed);
+        }
+        
+        debug!("GPU warmup skipped (no GPU backend available)");
+        Ok(start.elapsed())
+    }
+    
+    /// Check if GPU backend is available
+    pub fn has_gpu(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.gpu_backend.is_some()
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+    
+    /// Get the current device type configuration
+    pub fn device_type(&self) -> DeviceType {
+        self.config.device_type
     }
 }
 

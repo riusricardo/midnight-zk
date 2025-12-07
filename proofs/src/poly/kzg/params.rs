@@ -164,6 +164,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_bases(&self) -> &DeviceVec<IcicleG1Affine> {
         use crate::gpu::types::TypeConverter;
+        use crate::gpu::backend::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_gpu.get_or_init(|| {
@@ -174,6 +175,9 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();
+            
+            // Ensure ICICLE backend is loaded (singleton - only loads once globally)
+            ensure_backend_loaded().expect("Failed to load ICICLE backend");
             
             // CRITICAL: Set device before allocating GPU memory
             // This is needed because get_or_init() might be called from different thread contexts
@@ -209,6 +213,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_lagrange_bases(&self) -> &DeviceVec<IcicleG1Affine> {
         use crate::gpu::types::TypeConverter;
+        use crate::gpu::backend::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_lagrange_gpu.get_or_init(|| {
@@ -219,6 +224,9 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             
             #[cfg(feature = "trace-msm")]
             let start = std::time::Instant::now();
+            
+            // Ensure ICICLE backend is loaded (singleton - only loads once globally)
+            ensure_backend_loaded().expect("Failed to load ICICLE backend");
             
             // CRITICAL: Set device before allocating GPU memory
             let device = Device::new("CUDA", 0);

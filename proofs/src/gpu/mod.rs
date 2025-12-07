@@ -49,7 +49,9 @@ pub mod config;
 pub mod msm;
 pub mod types;
 
-pub use backend::{GpuBackend, GpuError};
+pub use backend::{GpuBackend, GpuError, is_gpu_available};
+#[cfg(feature = "gpu")]
+pub use backend::ensure_backend_loaded;
 pub use batch::MsmBatch;
 pub use config::{DeviceType, GpuConfig};
 pub use msm::{MsmBackend, MsmExecutor};
@@ -58,15 +60,57 @@ pub use types::TypeConverter;
 /// Check if GPU support is compiled in
 pub const GPU_SUPPORT: bool = cfg!(feature = "gpu");
 
-/// Check if GPU is available at runtime
-pub fn is_gpu_available() -> bool {
+/// Initialize and warmup GPU backend for proof generation
+/// 
+/// Call this at application startup to avoid first-request latency.
+/// This function:
+/// 1. Initializes the ICICLE CUDA backend
+/// 2. Creates the global MSM executor
+/// 3. Runs a small MSM to trigger GPU memory allocation
+/// 
+/// Returns the warmup duration, or None if GPU is not available.
+/// 
+/// # Example
+/// ```rust,no_run
+/// use midnight_proofs::gpu::warmup_gpu;
+/// 
+/// #[tokio::main]
+/// async fn main() {
+///     // Warmup GPU before starting server
+///     if let Some(duration) = warmup_gpu() {
+///         println!("GPU ready in {:?}", duration);
+///     }
+///     
+///     // Start server...
+/// }
+/// ```
+pub fn warmup_gpu() -> Option<std::time::Duration> {
+    use tracing::info;
+    
     #[cfg(feature = "gpu")]
     {
-        backend::is_gpu_available()
+        info!("Warming up GPU backend...");
+        let executor = MsmExecutor::default();
+        
+        match executor.warmup() {
+            Ok(duration) => {
+                info!(
+                    "GPU warmup successful: backend={}, duration={:?}",
+                    if executor.has_gpu() { "CUDA" } else { "CPU" },
+                    duration
+                );
+                Some(duration)
+            }
+            Err(e) => {
+                tracing::warn!("GPU warmup failed: {:?}", e);
+                None
+            }
+        }
     }
+    
     #[cfg(not(feature = "gpu"))]
     {
-        false
+        None
     }
 }
 

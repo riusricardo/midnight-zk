@@ -1,6 +1,11 @@
 //! GPU backend configuration
+//!
+//! Environment variable overrides:
+//! - `MIDNIGHT_DEVICE`: Force device selection ("cpu", "gpu", "auto")
+//! - `MIDNIGHT_GPU_MIN_K`: Minimum K value for GPU usage (default: 14)
 
 use std::path::PathBuf;
+use tracing::{info, warn};
 
 /// Device type for computation
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,6 +19,23 @@ pub enum DeviceType {
 }
 
 impl DeviceType {
+    /// Parse device type from environment variable MIDNIGHT_DEVICE
+    pub fn from_env() -> Option<Self> {
+        std::env::var("MIDNIGHT_DEVICE").ok().and_then(|s| {
+            match s.to_lowercase().as_str() {
+                "cpu" => Some(DeviceType::Cpu),
+                "gpu" | "cuda" => Some(DeviceType::Cuda),
+                "auto" => Some(DeviceType::Auto),
+                other => {
+                    warn!("Unknown MIDNIGHT_DEVICE value '{}', ignoring", other);
+                    None
+                }
+            }
+        })
+    }
+}
+
+impl DeviceType {
     /// Get the string representation of the device type
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -21,6 +43,16 @@ impl DeviceType {
             DeviceType::Cuda => "CUDA",
             DeviceType::Cpu => "CPU",
         }
+    }
+    
+    /// Check if this device type forces CPU usage
+    pub fn is_cpu_forced(&self) -> bool {
+        matches!(self, DeviceType::Cpu)
+    }
+    
+    /// Check if this device type forces GPU usage
+    pub fn is_gpu_forced(&self) -> bool {
+        matches!(self, DeviceType::Cuda)
     }
 }
 
@@ -54,15 +86,33 @@ pub struct GpuConfig {
 
 impl Default for GpuConfig {
     fn default() -> Self {
+        // Check for environment variable overrides
+        let device_type = DeviceType::from_env().unwrap_or(DeviceType::Auto);
+        
+        // Parse MIDNIGHT_GPU_MIN_K for minimum K threshold
+        let min_gpu_size = std::env::var("MIDNIGHT_GPU_MIN_K")
+            .ok()
+            .and_then(|s| s.parse::<u8>().ok())
+            .map(|k| {
+                let size = 1usize << k;
+                info!("MIDNIGHT_GPU_MIN_K={} -> min_gpu_size={}", k, size);
+                size
+            })
+            .unwrap_or(16384); // Default: K >= 14 (2^14 = 16384 points)
+        
+        if device_type != DeviceType::Auto {
+            info!("Device type override from MIDNIGHT_DEVICE: {:?}", device_type);
+        }
+        
         Self {
             backend_path: std::env::var("ICICLE_BACKEND_INSTALL_DIR")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| PathBuf::from("/opt/icicle/lib/backend")),
-            device_type: DeviceType::Auto,
+            device_type,
             device_id: 0,
             warmup_iterations: 10,
             enable_fallback: false, // No automatic CPU fallback
-            min_gpu_size: 16384, // Use GPU for K >= 14 (2^14 = 16384 points)
+            min_gpu_size,
         }
     }
 }

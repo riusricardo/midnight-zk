@@ -200,21 +200,59 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     
     #[cfg(feature = "gpu")]
     {
-        // Convert projective bases to affine for GPU MSM
-        let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
-        
-        // Use GPU accelerated MSM via MsmExecutor
-        // Will automatically use GPU for K>=14, CPU for smaller sizes
+        use crate::gpu::config::{GpuConfig, DeviceType};
         use once_cell::sync::Lazy;
-        static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
         
-        #[cfg(feature = "trace-msm")]
-        let backend = if bases.len() >= 16384 { "GPU" } else { "CPU" };
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using {} backend ({} points)", backend, bases.len());
+        // Check environment-based decision BEFORE initializing GPU backend
+        // This avoids the ~700ms GPU initialization overhead for small MSMs
+        let config = GpuConfig::default();
+        let size = bases.len();
         
-        let res = MSM_EXECUTOR.execute(coeffs, &bases_affine)
-            .expect("MSM execution failed");
+        // Early exit: use BLST for small MSMs unless GPU is explicitly forced
+        let should_try_gpu = match config.device_type {
+            DeviceType::Cpu => false,
+            DeviceType::Cuda => true, // Forced GPU
+            DeviceType::Auto => size >= config.min_gpu_size,
+        };
+        
+        if should_try_gpu {
+            // Only now initialize the GPU executor (lazy)
+            static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
+            
+            // Check if GPU is actually available
+            if MSM_EXECUTOR.should_use_gpu(size) {
+                #[cfg(feature = "trace-msm")]
+                eprintln!("   [MSM] Using GPU backend ({} points)", size);
+                
+                // Convert projective bases to affine for GPU MSM
+                let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
+                
+                match MSM_EXECUTOR.execute(coeffs, &bases_affine) {
+                    Ok(res) => {
+                        let result = unsafe { std::mem::transmute_copy(&res) };
+                        
+                        #[cfg(feature = "trace-msm")]
+                        {
+                            let elapsed = start.elapsed();
+                            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+                        }
+                        
+                        return result;
+                    }
+                    Err(e) => {
+                        // GPU failed, fall back to BLST
+                        #[cfg(feature = "trace-msm")]
+                        eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", e);
+                    }
+                }
+            }
+        }
+        
+        // Use BLST directly for small MSMs - no conversion overhead
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using BLST multi_exp (size: {} points)", size);
+        
+        let res = G1Projective::multi_exp(bases, coeffs);
         let result = unsafe { std::mem::transmute_copy(&res) };
         
         #[cfg(feature = "trace-msm")]
