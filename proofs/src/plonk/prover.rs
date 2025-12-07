@@ -77,6 +77,7 @@ pub(crate) fn compute_trace<
 ) -> Result<ProverTrace<F>, Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -273,6 +274,7 @@ pub(crate) fn finalise_proof<'a, F, CS: PolynomialCommitmentScheme<F>, T: Transc
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>
@@ -392,6 +394,7 @@ pub fn create_proof<
 ) -> Result<(), Error>
 where
     CS::Commitment: Hashable<T::Hash>,
+    CS::Parameters: Sync,
     F: WithSmallOrderMulGroup<3>
         + Sampleable<T::Hash>
         + Hashable<T::Hash>

@@ -75,24 +75,63 @@ where
         params: &Self::Parameters,
         polynomial: &Polynomial<E::Fr, Coeff>,
     ) -> Self::Commitment {
+        #[cfg(feature = "trace-kzg")]
+        let start = std::time::Instant::now();
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("[KZG::commit] Committing to polynomial of degree {}", polynomial.len());
         let mut scalars = Vec::<E::Fr>::with_capacity(polynomial.len());
         scalars.extend(polynomial.iter());
         let size = scalars.len();
         assert!(params.g.len() >= size);
-        msm_specific::<E::G1Affine>(&scalars, &params.g[..size])
+        
+        // Use cached GPU bases when available (following ingonyama-zk pattern)
+        #[cfg(feature = "gpu")]
+        let result = if size >= 16384 {
+            use crate::poly::kzg::msm::msm_with_cached_bases;
+            let device_bases = params.get_or_upload_gpu_bases();
+            msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+        } else {
+            msm_specific::<E::G1Affine>(&scalars, &params.g[..size])
+        };
+        
+        #[cfg(not(feature = "gpu"))]
+        let result = msm_specific::<E::G1Affine>(&scalars, &params.g[..size]);
+        
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("✓  [KZG::commit] Total time: {:?}", start.elapsed());
+        result
     }
 
     fn commit_lagrange(
         params: &Self::Parameters,
         poly: &Polynomial<E::Fr, LagrangeCoeff>,
     ) -> E::G1 {
+        #[cfg(feature = "trace-kzg")]
+        let start = std::time::Instant::now();
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("[KZG::commit_lagrange] Committing to Lagrange polynomial of size {}", poly.len());
         let mut scalars = Vec::with_capacity(poly.len());
         scalars.extend(poly.iter());
         let size = scalars.len();
 
         assert!(params.g_lagrange.len() >= size);
 
-        msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size])
+        // Use cached GPU Lagrange bases when available
+        #[cfg(feature = "gpu")]
+        let result = if size >= 16384 {
+            use crate::poly::kzg::msm::msm_with_cached_bases;
+            let device_bases = params.get_or_upload_gpu_lagrange_bases();
+            msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+        } else {
+            msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size])
+        };
+        
+        #[cfg(not(feature = "gpu"))]
+        let result = msm_specific::<E::G1Affine>(&scalars, &params.g_lagrange[0..size]);
+        
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("✓  [KZG::commit_lagrange] Total time: {:?}", start.elapsed());
+        result
     }
 
     fn multi_open<T: Transcript>(

@@ -5,6 +5,15 @@ use group::{prime::PrimeCurveAffine, Curve, Group};
 use halo2curves::pairing::{Engine, MultiMillerLoop};
 use rand_core::RngCore;
 
+#[cfg(feature = "gpu")]
+use std::sync::Arc;
+#[cfg(feature = "gpu")]
+use once_cell::sync::OnceCell;
+#[cfg(feature = "gpu")]
+use icicle_runtime::memory::DeviceVec;
+#[cfg(feature = "gpu")]
+use icicle_bls12_381::curve::G1Affine as IcicleG1Affine;
+
 use crate::{
     poly::commitment::Params,
     utils::{
@@ -15,12 +24,32 @@ use crate::{
 };
 
 /// These are the public parameters for the polynomial commitment scheme.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParamsKZG<E: Engine> {
     pub(crate) g: Vec<E::G1>,
     pub(crate) g_lagrange: Vec<E::G1>,
     pub(crate) g2: E::G2,
     pub(crate) s_g2: E::G2,
+    
+    /// Cached GPU bases for coefficient form commitments (uploaded once, reused for all MSMs)
+    /// Persistent GPU memory eliminates conversion/upload overhead in MSM operations
+    #[cfg(feature = "gpu")]
+    pub(crate) g_gpu: Arc<OnceCell<DeviceVec<IcicleG1Affine>>>,
+    
+    /// Cached GPU bases for Lagrange form commitments
+    #[cfg(feature = "gpu")]
+    pub(crate) g_lagrange_gpu: Arc<OnceCell<DeviceVec<IcicleG1Affine>>>,
+}
+
+impl<E: Engine> Debug for ParamsKZG<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParamsKZG")
+            .field("g_len", &self.g.len())
+            .field("g_lagrange_len", &self.g_lagrange.len())
+            .field("g2", &self.g2)
+            .field("s_g2", &self.s_g2)
+            .finish()
+    }
 }
 
 impl<E: Engine> Params for ParamsKZG<E> {
@@ -94,6 +123,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g_lagrange,
             g2,
             s_g2,
+            #[cfg(feature = "gpu")]
+            g_gpu: Arc::new(OnceCell::new()),
+            #[cfg(feature = "gpu")]
+            g_lagrange_gpu: Arc::new(OnceCell::new()),
         }
     }
 
@@ -115,7 +148,105 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g,
             g2,
             s_g2,
+            #[cfg(feature = "gpu")]
+            g_gpu: Arc::new(OnceCell::new()),
+            #[cfg(feature = "gpu")]
+            g_lagrange_gpu: Arc::new(OnceCell::new()),
         }
+    }
+
+    /// Get or upload GPU bases for coefficient form (lazy initialization)
+    /// 
+    /// Following ingonyama-zk pattern: bases are uploaded ONCE and cached in GPU memory,
+    /// eliminating per-MSM conversion and upload overhead.
+    /// 
+    /// Expected improvement: 1.5-2x for GPU MSMs by avoiding repeated conversion
+    #[cfg(feature = "gpu")]
+    pub fn get_or_upload_gpu_bases(&self) -> &DeviceVec<IcicleG1Affine> {
+        use crate::gpu::types::TypeConverter;
+        use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
+        
+        self.g_gpu.get_or_init(|| {
+            use icicle_runtime::{Device, set_device};
+            
+            #[cfg(feature = "trace-msm")]
+            eprintln!("[GPU] Uploading {} SRS bases to GPU (one-time cost)...", self.g.len());
+            
+            #[cfg(feature = "trace-msm")]
+            let start = std::time::Instant::now();
+            
+            // CRITICAL: Set device before allocating GPU memory
+            // This is needed because get_or_init() might be called from different thread contexts
+            let device = Device::new("CUDA", 0);
+            set_device(&device).expect("Failed to set GPU device");
+            
+            // Convert G1Projective to G1Affine
+            let mut bases_affine = vec![E::G1Affine::identity(); self.g.len()];
+            E::G1::batch_normalize(&self.g, &mut bases_affine);
+            
+            // Convert to ICICLE format
+            let bases_midnight: Vec<midnight_curves::G1Affine> = unsafe {
+                std::mem::transmute(bases_affine)
+            };
+            let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(&bases_midnight);
+            
+            // Upload to GPU
+            let stream = IcicleStream::default();
+            let mut device_bases = DeviceVec::device_malloc_async(icicle_points.len(), &stream)
+                .expect("Failed to allocate GPU memory for bases");
+            device_bases.copy_from_host_async(HostSlice::from_slice(&icicle_points), &stream)
+                .expect("Failed to upload bases to GPU");
+            stream.synchronize().expect("Failed to synchronize GPU stream");
+            
+            #[cfg(feature = "trace-msm")]
+            eprintln!("✓  [GPU] Bases uploaded in {:?} (will be reused for all MSMs)", start.elapsed());
+            
+            device_bases
+        })
+    }
+    
+    /// Get or upload GPU bases for Lagrange form (lazy initialization)
+    #[cfg(feature = "gpu")]
+    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &DeviceVec<IcicleG1Affine> {
+        use crate::gpu::types::TypeConverter;
+        use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
+        
+        self.g_lagrange_gpu.get_or_init(|| {
+            use icicle_runtime::{Device, set_device};
+            
+            #[cfg(feature = "trace-msm")]
+            eprintln!("[GPU] Uploading {} Lagrange bases to GPU (one-time cost)...", self.g_lagrange.len());
+            
+            #[cfg(feature = "trace-msm")]
+            let start = std::time::Instant::now();
+            
+            // CRITICAL: Set device before allocating GPU memory
+            let device = Device::new("CUDA", 0);
+            set_device(&device).expect("Failed to set GPU device");
+            
+            // Convert G1Projective to G1Affine
+            let mut bases_affine = vec![E::G1Affine::identity(); self.g_lagrange.len()];
+            E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
+            
+            // Convert to ICICLE format
+            let bases_midnight: Vec<midnight_curves::G1Affine> = unsafe {
+                std::mem::transmute(bases_affine)
+            };
+            let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(&bases_midnight);
+            
+            // Upload to GPU
+            let stream = IcicleStream::default();
+            let mut device_bases = DeviceVec::device_malloc_async(icicle_points.len(), &stream)
+                .expect("Failed to allocate GPU memory for Lagrange bases");
+            device_bases.copy_from_host_async(HostSlice::from_slice(&icicle_points), &stream)
+                .expect("Failed to upload Lagrange bases to GPU");
+            stream.synchronize().expect("Failed to synchronize GPU stream");
+            
+            #[cfg(feature = "trace-msm")]
+            eprintln!("✓  [GPU] Lagrange bases uploaded in {:?} (will be reused)", start.elapsed());
+            
+            device_bases
+        })
     }
 
     /// Returns the committed lagrange polynomials of these KZG params.
@@ -224,6 +355,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g_lagrange,
             g2,
             s_g2,
+            #[cfg(feature = "gpu")]
+            g_gpu: Arc::new(OnceCell::new()),
+            #[cfg(feature = "gpu")]
+            g_lagrange_gpu: Arc::new(OnceCell::new()),
         })
     }
 }
