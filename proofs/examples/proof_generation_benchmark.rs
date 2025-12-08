@@ -129,7 +129,7 @@ fn benchmark_proof_generation(k: u32) -> Result<(), Box<dyn std::error::Error>> 
 
 fn main() {
     println!("╔════════════════════════════════════════════════════════════╗");
-    println!("║   PLONK Proof Generation Benchmark (Phase 3)              ║");
+    println!("║   PLONK Proof Generation Benchmark                        ║");
     println!("║   GPU Acceleration via ICICLE (K≥14)                      ║");
     println!("╚════════════════════════════════════════════════════════════╝");
     

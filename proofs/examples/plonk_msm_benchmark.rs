@@ -48,7 +48,7 @@ fn bench_msm_via_kzg(k: u32) {
 
 fn main() {
     println!("Benchmarking MSM through PLONK KZG interface");
-    println!("(Tests actual GPU integration in Phase 2)\n");
+    println!("(Tests GPU vs CPU routing based on problem size)\n");
     
     // CPU range (should use BLST)
     println!("CPU Path (K<14):");
