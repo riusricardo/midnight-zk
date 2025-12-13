@@ -1,0 +1,41 @@
+# Build directory
+build/
+
+# CMake generated files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+compile_commands.json
+
+# Compiled libraries
+*.so
+*.so.*
+*.a
+*.lib
+*.dll
+
+# Object files
+*.o
+*.obj
+*.cu.o
+
+# CUDA compiled files
+*.fatbin
+*.cubin
+*.ptx
+
+# Executables
+test_backend
+
+# Editor/IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
