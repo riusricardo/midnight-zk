@@ -140,6 +140,115 @@ __global__ void scale_kernel(
 }
 
 // =============================================================================
+// Coset NTT Support
+// =============================================================================
+
+/**
+ * @brief Multiply by coset generator powers: output[i] = input[i] * g^i
+ * 
+ * Used for coset FFT: evaluates polynomial at g*omega^i instead of omega^i
+ */
+template<typename F>
+__global__ void coset_mul_kernel(
+    F* output,
+    const F* input,
+    F coset_gen,      // The coset generator g
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    // Compute g^idx by repeated squaring
+    F power = F::one();
+    F base = coset_gen;
+    int exp = idx;
+    
+    while (exp > 0) {
+        if (exp & 1) {
+            power = power * base;
+        }
+        base = base * base;
+        exp >>= 1;
+    }
+    
+    output[idx] = input[idx] * power;
+}
+
+/**
+ * @brief Divide by coset generator powers: output[i] = input[i] * g^(-i)
+ * 
+ * Used after inverse coset FFT
+ */
+template<typename F>
+__global__ void coset_div_kernel(
+    F* output,
+    const F* input,
+    F coset_gen_inv,  // The inverse of coset generator: g^(-1)
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    // Compute g^(-idx) = (g^(-1))^idx
+    F power = F::one();
+    F base = coset_gen_inv;
+    int exp = idx;
+    
+    while (exp > 0) {
+        if (exp & 1) {
+            power = power * base;
+        }
+        base = base * base;
+        exp >>= 1;
+    }
+    
+    output[idx] = input[idx] * power;
+}
+
+/**
+ * @brief Precomputed coset powers for efficient coset multiplication
+ */
+template<typename F>
+__global__ void precompute_coset_powers_kernel(
+    F* powers,
+    F coset_gen,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    F power = F::one();
+    F base = coset_gen;
+    int exp = idx;
+    
+    while (exp > 0) {
+        if (exp & 1) {
+            power = power * base;
+        }
+        base = base * base;
+        exp >>= 1;
+    }
+    
+    powers[idx] = power;
+}
+
+/**
+ * @brief Fast coset multiplication using precomputed powers
+ */
+template<typename F>
+__global__ void coset_mul_precomputed_kernel(
+    F* output,
+    const F* input,
+    const F* coset_powers,
+    int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    output[idx] = input[idx] * coset_powers[idx];
+}
+
+// =============================================================================
 // Main NTT Entry Point
 // =============================================================================
 
@@ -154,6 +263,21 @@ eIcicleError ntt_cuda(
     const F* input,
     int size,
     NTTDir direction,
+    const NTTConfig& config,
+    F* output
+);
+
+/**
+ * @brief Coset NTT: evaluates at g*omega^i
+ * 
+ * Multiplies input by coset powers, then applies regular NTT
+ */
+template<typename F>
+eIcicleError coset_ntt_cuda(
+    const F* input,
+    int size,
+    NTTDir direction,
+    const F& coset_gen,
     const NTTConfig& config,
     F* output
 );
