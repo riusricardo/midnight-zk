@@ -194,7 +194,7 @@ struct alignas(64) Affine {
     __host__ __device__ Affine neg() const {
         Affine result;
         result.x = x;
-        field_neg(result.y, y);
+        result.y = -y;  // Use unary minus operator
         return result;
     }
     
@@ -537,6 +537,248 @@ __device__ __forceinline__ void g1_to_affine(G1Affine& result, const G1Projectiv
     field_mul(result.x, p.X, z_inv_sq);
     field_mul(result.y, p.Y, z_inv_sq);
     field_mul(result.y, result.y, z_inv);
+}
+
+// =============================================================================
+// G2 Point Operations
+// =============================================================================
+
+/**
+ * @brief Double a G2 projective point: result = 2 * P
+ * 
+ * Uses the doubling formula for y^2 = x^3 + b where b = 4(1+i) for G2.
+ * Cost: 1S + 5M + 8add (in Fq2)
+ */
+__device__ __forceinline__ void g2_double(G2Projective& result, const G2Projective& p) {
+    if (p.is_identity()) {
+        result = p;
+        return;
+    }
+
+    Fq2 t0, t1, t2, t3;
+    
+    // t0 = Y^2
+    fq2_sqr(t0, p.Y);
+    
+    // t1 = 4 * X * Y^2
+    fq2_mul(t1, p.X, t0);
+    fq2_add(t1, t1, t1);
+    fq2_add(t1, t1, t1);
+    
+    // t2 = 8 * Y^4
+    fq2_sqr(t2, t0);
+    fq2_add(t2, t2, t2);
+    fq2_add(t2, t2, t2);
+    fq2_add(t2, t2, t2);
+    
+    // t3 = 3 * X^2 (for a = 0)
+    fq2_sqr(t3, p.X);
+    Fq2 t3_2;
+    fq2_add(t3_2, t3, t3);
+    fq2_add(t3, t3_2, t3);
+    
+    // X3 = t3^2 - 2*t1
+    fq2_sqr(result.X, t3);
+    fq2_sub(result.X, result.X, t1);
+    fq2_sub(result.X, result.X, t1);
+    
+    // Y3 = t3 * (t1 - X3) - t2
+    fq2_sub(t0, t1, result.X);
+    fq2_mul(result.Y, t3, t0);
+    fq2_sub(result.Y, result.Y, t2);
+    
+    // Z3 = 2 * Y * Z
+    fq2_mul(result.Z, p.Y, p.Z);
+    fq2_add(result.Z, result.Z, result.Z);
+}
+
+/**
+ * @brief Add two G2 projective points: result = P + Q
+ */
+__device__ __forceinline__ void g2_add(G2Projective& result, const G2Projective& p, const G2Projective& q) {
+    if (p.is_identity()) {
+        result = q;
+        return;
+    }
+    if (q.is_identity()) {
+        result = p;
+        return;
+    }
+
+    Fq2 z1z1, z2z2, u1, u2, s1, s2, h, i, j, r, v;
+    
+    // Z1Z1 = Z1^2
+    fq2_sqr(z1z1, p.Z);
+    // Z2Z2 = Z2^2
+    fq2_sqr(z2z2, q.Z);
+    
+    // U1 = X1 * Z2Z2
+    fq2_mul(u1, p.X, z2z2);
+    // U2 = X2 * Z1Z1
+    fq2_mul(u2, q.X, z1z1);
+    
+    // S1 = Y1 * Z2 * Z2Z2
+    fq2_mul(s1, p.Y, q.Z);
+    fq2_mul(s1, s1, z2z2);
+    // S2 = Y2 * Z1 * Z1Z1
+    fq2_mul(s2, q.Y, p.Z);
+    fq2_mul(s2, s2, z1z1);
+    
+    // H = U2 - U1
+    fq2_sub(h, u2, u1);
+    
+    // Check for doubling case
+    if (h.is_zero()) {
+        Fq2 diff;
+        fq2_sub(diff, s2, s1);
+        if (diff.is_zero()) {
+            g2_double(result, p);
+            return;
+        } else {
+            result = G2Projective::identity();
+            return;
+        }
+    }
+    
+    // I = (2*H)^2
+    fq2_add(i, h, h);
+    fq2_sqr(i, i);
+    
+    // J = H * I
+    fq2_mul(j, h, i);
+    
+    // r = 2 * (S2 - S1)
+    fq2_sub(r, s2, s1);
+    fq2_add(r, r, r);
+    
+    // V = U1 * I
+    fq2_mul(v, u1, i);
+    
+    // X3 = r^2 - J - 2*V
+    fq2_sqr(result.X, r);
+    fq2_sub(result.X, result.X, j);
+    fq2_sub(result.X, result.X, v);
+    fq2_sub(result.X, result.X, v);
+    
+    // Y3 = r * (V - X3) - 2*S1*J
+    fq2_sub(v, v, result.X);
+    fq2_mul(result.Y, r, v);
+    fq2_mul(s1, s1, j);
+    fq2_add(s1, s1, s1);
+    fq2_sub(result.Y, result.Y, s1);
+    
+    // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
+    fq2_add(result.Z, p.Z, q.Z);
+    fq2_sqr(result.Z, result.Z);
+    fq2_sub(result.Z, result.Z, z1z1);
+    fq2_sub(result.Z, result.Z, z2z2);
+    fq2_mul(result.Z, result.Z, h);
+}
+
+/**
+ * @brief Mixed addition for G2: result = P + Q where Q is affine
+ */
+__device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Projective& p, const G2Affine& q) {
+    if (p.is_identity()) {
+        result = G2Projective::from_affine(q);
+        return;
+    }
+    if (q.is_identity()) {
+        result = p;
+        return;
+    }
+
+    Fq2 z1z1, u2, s2, h, hh, i, j, r, v;
+    
+    // Z1Z1 = Z1^2
+    fq2_sqr(z1z1, p.Z);
+    
+    // U2 = X2 * Z1Z1
+    fq2_mul(u2, q.x, z1z1);
+    
+    // S2 = Y2 * Z1 * Z1Z1
+    fq2_mul(s2, q.y, p.Z);
+    fq2_mul(s2, s2, z1z1);
+    
+    // H = U2 - X1
+    fq2_sub(h, u2, p.X);
+    
+    // Check for doubling case
+    if (h.is_zero()) {
+        Fq2 diff;
+        fq2_sub(diff, s2, p.Y);
+        if (diff.is_zero()) {
+            g2_double(result, p);
+            return;
+        } else {
+            result = G2Projective::identity();
+            return;
+        }
+    }
+    
+    // HH = H^2
+    fq2_sqr(hh, h);
+    
+    // I = 4 * HH
+    fq2_add(i, hh, hh);
+    fq2_add(i, i, i);
+    
+    // J = H * I
+    fq2_mul(j, h, i);
+    
+    // r = 2 * (S2 - Y1)
+    fq2_sub(r, s2, p.Y);
+    fq2_add(r, r, r);
+    
+    // V = X1 * I
+    fq2_mul(v, p.X, i);
+    
+    // X3 = r^2 - J - 2*V
+    fq2_sqr(result.X, r);
+    fq2_sub(result.X, result.X, j);
+    fq2_sub(result.X, result.X, v);
+    fq2_sub(result.X, result.X, v);
+    
+    // Y3 = r * (V - X3) - 2*Y1*J
+    Fq2 t;
+    fq2_sub(t, v, result.X);
+    fq2_mul(result.Y, r, t);
+    fq2_mul(t, p.Y, j);
+    fq2_add(t, t, t);
+    fq2_sub(result.Y, result.Y, t);
+    
+    // Z3 = (Z1 + H)^2 - Z1Z1 - HH
+    fq2_add(result.Z, p.Z, h);
+    fq2_sqr(result.Z, result.Z);
+    fq2_sub(result.Z, result.Z, z1z1);
+    fq2_sub(result.Z, result.Z, hh);
+}
+
+/**
+ * @brief Negate a G2 projective point
+ */
+__device__ __forceinline__ void g2_neg(G2Projective& result, const G2Projective& p) {
+    result.X = p.X;
+    fq2_neg(result.Y, p.Y);
+    result.Z = p.Z;
+}
+
+/**
+ * @brief Convert G2 projective to affine
+ */
+__device__ __forceinline__ void g2_to_affine(G2Affine& result, const G2Projective& p) {
+    if (p.is_identity()) {
+        result = G2Affine::identity();
+        return;
+    }
+    
+    Fq2 z_inv, z_inv_sq;
+    fq2_inv(z_inv, p.Z);
+    fq2_sqr(z_inv_sq, z_inv);
+    
+    fq2_mul(result.x, p.X, z_inv_sq);
+    fq2_mul(result.y, p.Y, z_inv_sq);
+    fq2_mul(result.y, result.y, z_inv);
 }
 
 } // namespace bls12_381

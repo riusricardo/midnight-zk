@@ -201,8 +201,128 @@ eIcicleError ntt_cuda_impl(
     }
 }
 
+/**
+ * @brief Kernel to compute field inverse (single element)
+ */
+template<typename F>
+__global__ void field_inv_kernel(F* out, const F* in) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        field_inv(*out, *in);
+    }
+}
+
+/**
+ * @brief Coset NTT implementation
+ * 
+ * Forward coset NTT: multiply by g^i, then NTT
+ * Inverse coset NTT: INTT, then divide by g^i
+ */
+template<typename F>
+eIcicleError coset_ntt_cuda_impl(
+    const F* input,
+    int size,
+    NTTDir direction,
+    const F& coset_gen,
+    const NTTConfig& config,
+    F* output
+) {
+    if (size == 0) return eIcicleError::SUCCESS;
+    if ((size & (size - 1)) != 0) return eIcicleError::INVALID_ARGUMENT;
+    
+    cudaStream_t stream = static_cast<cudaStream_t>(config.stream);
+    const int threads = 256;
+    const int blocks = (size + threads - 1) / threads;
+    
+    // Allocate temporary buffer
+    F* d_temp = nullptr;
+    cudaMalloc(&d_temp, size * sizeof(F));
+    
+    // Copy coset generator to device
+    F* d_coset_gen = nullptr;
+    cudaMalloc(&d_coset_gen, sizeof(F));
+    cudaMemcpy(d_coset_gen, &coset_gen, sizeof(F), cudaMemcpyHostToDevice);
+    
+    if (direction == NTTDir::kForward) {
+        // Step 1: Multiply by coset powers
+        F* d_input = nullptr;
+        bool need_alloc_input = !config.are_inputs_on_device;
+        
+        if (need_alloc_input) {
+            cudaMalloc(&d_input, size * sizeof(F));
+            cudaMemcpy(d_input, input, size * sizeof(F), cudaMemcpyHostToDevice);
+        } else {
+            d_input = const_cast<F*>(input);
+        }
+        
+        coset_mul_kernel<<<blocks, threads, 0, stream>>>(d_temp, d_input, coset_gen, size);
+        cudaStreamSynchronize(stream);
+        
+        if (need_alloc_input) {
+            cudaFree(d_input);
+        }
+        
+        // Step 2: Apply regular NTT
+        NTTConfig modified_config = config;
+        modified_config.are_inputs_on_device = true;
+        
+        eIcicleError err = ntt_forward_impl(d_temp, size, modified_config, output);
+        
+        cudaFree(d_temp);
+        cudaFree(d_coset_gen);
+        
+        return err;
+    } else {
+        // Inverse coset NTT
+        // Step 1: Apply inverse NTT
+        NTTConfig modified_config = config;
+        modified_config.are_outputs_on_device = true;
+        
+        eIcicleError err = ntt_inverse_impl(input, size, modified_config, d_temp);
+        if (err != eIcicleError::SUCCESS) {
+            cudaFree(d_temp);
+            cudaFree(d_coset_gen);
+            return err;
+        }
+        
+        // Step 2: Divide by coset powers (multiply by g^(-i))
+        // Compute g^(-1) on device
+        F* d_coset_gen_inv = nullptr;
+        cudaMalloc(&d_coset_gen_inv, sizeof(F));
+        field_inv_kernel<<<1, 1, 0, stream>>>(d_coset_gen_inv, d_coset_gen);
+        cudaStreamSynchronize(stream);
+        
+        // Copy inverse back to host for kernel
+        F coset_gen_inv;
+        cudaMemcpy(&coset_gen_inv, d_coset_gen_inv, sizeof(F), cudaMemcpyDeviceToHost);
+        cudaFree(d_coset_gen_inv);
+        
+        F* d_output = nullptr;
+        bool need_alloc_output = !config.are_outputs_on_device;
+        
+        if (need_alloc_output) {
+            cudaMalloc(&d_output, size * sizeof(F));
+        } else {
+            d_output = output;
+        }
+        
+        coset_div_kernel<<<blocks, threads, 0, stream>>>(d_output, d_temp, coset_gen_inv, size);
+        cudaStreamSynchronize(stream);
+        
+        if (need_alloc_output) {
+            cudaMemcpy(output, d_output, size * sizeof(F), cudaMemcpyDeviceToHost);
+            cudaFree(d_output);
+        }
+        
+        cudaFree(d_temp);
+        cudaFree(d_coset_gen);
+        
+        return eIcicleError::SUCCESS;
+    }
+}
+
 // Explicit instantiations
 template eIcicleError ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const NTTConfig&, Fr*);
+template eIcicleError coset_ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig&, Fr*);
 
 } // namespace ntt
 
@@ -392,6 +512,18 @@ eIcicleError ntt_cuda(
 }
 
 template<typename F>
+eIcicleError coset_ntt_cuda(
+    const F* input,
+    int size,
+    NTTDir direction,
+    const F& coset_gen,
+    const NTTConfig& config,
+    F* output
+) {
+    return coset_ntt_cuda_impl<F>(input, size, direction, coset_gen, config, output);
+}
+
+template<typename F>
 eIcicleError init_domain_cuda(
     const F& root_of_unity,
     const NTTInitDomainConfig& config
@@ -406,6 +538,7 @@ eIcicleError release_domain_cuda() {
 
 // Explicit instantiations for symbol export
 template eIcicleError ntt_cuda<Fr>(const Fr*, int, NTTDir, const NTTConfig&, Fr*);
+template eIcicleError coset_ntt_cuda<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig&, Fr*);
 template eIcicleError init_domain_cuda<Fr>(const Fr&, const NTTInitDomainConfig&);
 template eIcicleError release_domain_cuda<Fr>();
 

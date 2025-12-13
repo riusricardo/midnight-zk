@@ -2,12 +2,12 @@
  * @file curve_backend.cu
  * @brief Curve library exports for Icicle compatibility
  * 
- * 
- * Note: G2 operations are stubbed out for now - only G1 is fully implemented.
+ * Full implementation of G1 and G2 operations.
  */
 
 #include "field.cuh"
 #include "point.cuh"
+#include "msm_g2.cuh"
 #include "icicle_types.cuh"
 
 // MSM declarations - defined in msm.cu
@@ -92,7 +92,7 @@ eIcicleError bls12_381_g1_msm_cuda(
 }
 
 /**
- * @brief G2 MSM entry point (stub)
+ * @brief G2 MSM entry point
  */
 eIcicleError bls12_381_g2_msm_cuda(
     const Fr* scalars,
@@ -101,8 +101,8 @@ eIcicleError bls12_381_g2_msm_cuda(
     const MSMConfig* config,
     G2Projective* result
 ) {
-    // G2 MSM not yet implemented
-    return eIcicleError::INVALID_ARGUMENT;
+    cudaError_t err = msm_g2::g2_msm_cuda(scalars, bases, msm_size, *config, result);
+    return (err == cudaSuccess) ? eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
 }
 
 /**
