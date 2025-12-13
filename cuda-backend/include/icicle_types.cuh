@@ -1,0 +1,198 @@
+/**
+ * @file icicle_types.cuh
+ * @brief Icicle-compatible type definitions and interface
+ * 
+ * These types match the exact signatures expected by the Icicle Rust bindings.
+ */
+
+#pragma once
+
+#include "field.cuh"
+#include "point.cuh"
+#include <cuda_runtime.h>
+
+namespace icicle {
+
+// =============================================================================
+// Error codes (matching Icicle's eIcicleError)
+// =============================================================================
+
+enum class eIcicleError {
+    SUCCESS = 0,
+    INVALID_DEVICE = 1,
+    OUT_OF_MEMORY = 2,
+    INVALID_POINTER = 3,
+    ALLOCATION_FAILED = 4,
+    DEALLOCATION_FAILED = 5,
+    COPY_FAILED = 6,
+    SYNC_FAILED = 7,
+    STREAM_CREATE_FAILED = 8,
+    STREAM_DESTROY_FAILED = 9,
+    API_NOT_IMPLEMENTED = 10,
+    INVALID_ARGUMENT = 11,
+    BACKEND_LOAD_FAILED = 12,
+    LICENSE_CHECK_FAILED = 13,
+    UNKNOWN_ERROR = 999
+};
+
+// =============================================================================
+// Device context (matching Icicle's Device struct)
+// =============================================================================
+
+struct Device {
+    const char* type;
+    int id;
+};
+
+// =============================================================================
+// Stream handle
+// =============================================================================
+
+using IcicleStreamHandle = cudaStream_t;
+
+// =============================================================================
+// NTT Direction and Ordering
+// =============================================================================
+
+enum class NTTDir {
+    kForward = 0,
+    kInverse = 1
+};
+
+enum class Ordering {
+    kNN = 0,  // Natural-Natural
+    kNR = 1,  // Natural-Reversed
+    kRN = 2,  // Reversed-Natural
+    kRR = 3,  // Reversed-Reversed
+    kNM = 4,  // Mixed
+    kMN = 5   // Mixed
+};
+
+// =============================================================================
+// NTT Configuration (matching Icicle's NTTConfig)
+// =============================================================================
+
+struct NTTConfig {
+    void* stream;                   // IcicleStreamHandle
+    void* coset_gen;                // Pointer to coset generator (optional)
+    int batch_size;
+    int columns_batch;
+    Ordering ordering;
+    bool are_inputs_on_device;
+    bool are_outputs_on_device;
+    bool is_async;
+    void* ext;
+};
+
+// Default NTT configuration
+inline NTTConfig default_ntt_config() {
+    NTTConfig cfg;
+    cfg.stream = nullptr;
+    cfg.coset_gen = nullptr;
+    cfg.batch_size = 1;
+    cfg.columns_batch = 0;
+    cfg.ordering = Ordering::kNN;
+    cfg.are_inputs_on_device = false;
+    cfg.are_outputs_on_device = false;
+    cfg.is_async = false;
+    cfg.ext = nullptr;
+    return cfg;
+}
+
+// =============================================================================
+// NTT Init Domain Configuration
+// =============================================================================
+
+struct NTTInitDomainConfig {
+    void* stream;
+    int max_log_size;              // Maximum log size of domain to initialize
+    bool is_async;
+    void* ext;
+};
+
+inline NTTInitDomainConfig default_ntt_init_domain_config() {
+    NTTInitDomainConfig cfg;
+    cfg.stream = nullptr;
+    cfg.max_log_size = 0;          // Use default
+    cfg.is_async = false;
+    cfg.ext = nullptr;
+    return cfg;
+}
+
+// =============================================================================
+// MSM Configuration (matching Icicle's MSMConfig)
+// =============================================================================
+
+struct MSMConfig {
+    IcicleStreamHandle stream;
+    int precompute_factor;
+    int c;                          // Window size (0 = auto)
+    int bitsize;                    // Scalar bitsize (0 = use field size)
+    int large_bucket_factor;
+    int batch_size;
+    bool are_scalars_on_device;
+    bool are_scalars_montgomery_form;
+    bool are_points_on_device;
+    bool are_points_montgomery_form;
+    bool are_results_on_device;
+    bool is_async;
+    void* ext;                      // Extension config
+};
+
+// Default MSM configuration
+inline MSMConfig default_msm_config() {
+    MSMConfig cfg;
+    cfg.stream = nullptr;
+    cfg.precompute_factor = 1;
+    cfg.c = 0;
+    cfg.bitsize = 0;
+    cfg.large_bucket_factor = 10;
+    cfg.batch_size = 1;
+    cfg.are_scalars_on_device = false;
+    cfg.are_scalars_montgomery_form = false;
+    cfg.are_points_on_device = false;
+    cfg.are_points_montgomery_form = false;
+    cfg.are_results_on_device = false;
+    cfg.is_async = false;
+    cfg.ext = nullptr;
+    return cfg;
+}
+
+// =============================================================================
+// Vector operations configuration
+// =============================================================================
+
+struct VecOpsConfig {
+    IcicleStreamHandle stream;
+    bool is_a_on_device;
+    bool is_b_on_device;
+    bool is_result_on_device;
+    bool is_async;
+    void* ext;
+};
+
+} // namespace icicle
+
+// Make commonly used types available at global scope
+using eIcicleError = icicle::eIcicleError;
+using NTTDir = icicle::NTTDir;
+using NTTConfig = icicle::NTTConfig;
+using NTTInitDomainConfig = icicle::NTTInitDomainConfig;
+using MSMConfig = icicle::MSMConfig;
+using VecOpsConfig = icicle::VecOpsConfig;
+using Ordering = icicle::Ordering;
+
+// =============================================================================
+// Type mappings for BLS12-381 to match Icicle symbol names
+// =============================================================================
+
+namespace bls12_381 {
+
+// These are the exact type names used in the Icicle library symbol names
+using scalar_t = Fr;
+using point_t = G1Projective;
+using affine_t = G1Affine;
+using g2_point_t = G2Projective;
+using g2_affine_t = G2Affine;
+
+} // namespace bls12_381
