@@ -97,3 +97,19 @@ set_target_properties(test_backend PROPERTIES
 )
 
 add_test(NAME backend_tests COMMAND test_backend)
+
+# Comprehensive test suite with profiling
+add_executable(test_vectors
+    tests/test_vectors.cu
+    src/params.cu
+)
+target_link_libraries(test_vectors
+    icicle_backend_cuda_curve_bls12_381
+    icicle_backend_cuda_field_bls12_381
+    CUDA::cudart
+)
+set_target_properties(test_vectors PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+)
+
+add_test(NAME vector_tests COMMAND test_vectors)
