@@ -130,6 +130,70 @@
 #define G1_GEN_Y_L5    0x0bbc3efc5008a26aULL
 
 /* ============================================================================
+ * G2 Curve Parameters
+ * ============================================================================
+ * G2: y^2 = x^3 + 4(u+1) over Fq2, where Fq2 = Fq[u]/(u^2+1)
+ * 
+ * Each G2 coordinate is an Fq2 element: c0 + c1*u
+ * ============================================================================ */
+
+/* Curve coefficient b' = 4(1+u) in Montgomery form
+ * b'.c0 = 4 in Montgomery form (same as G1_B)
+ * b'.c1 = 4 in Montgomery form (same as G1_B) */
+#define G2_B_C0_L0     0xaa270000000cfff3ULL
+#define G2_B_C0_L1     0x53cc0032fc34000aULL
+#define G2_B_C0_L2     0x478fe97a6b0a807fULL
+#define G2_B_C0_L3     0xb1d37ebee6ba24d7ULL
+#define G2_B_C0_L4     0x8ec9733bbf78ab2fULL
+#define G2_B_C0_L5     0x09d645513d83de7eULL
+
+#define G2_B_C1_L0     0xaa270000000cfff3ULL
+#define G2_B_C1_L1     0x53cc0032fc34000aULL
+#define G2_B_C1_L2     0x478fe97a6b0a807fULL
+#define G2_B_C1_L3     0xb1d37ebee6ba24d7ULL
+#define G2_B_C1_L4     0x8ec9733bbf78ab2fULL
+#define G2_B_C1_L5     0x09d645513d83de7eULL
+
+/* Generator point G2 - x coordinate (Fq2 element)
+ * x = x.c0 + x.c1 * u
+ * Values from BLST/Arkworks in Montgomery form */
+
+/* x.c0 */
+#define G2_GEN_X_C0_L0 0xf5f28fa202940a10ULL
+#define G2_GEN_X_C0_L1 0xb3f5fb2687b4961aULL
+#define G2_GEN_X_C0_L2 0xa1a893b53e2ae580ULL
+#define G2_GEN_X_C0_L3 0x9894999d1a3caee9ULL
+#define G2_GEN_X_C0_L4 0x6f67b7631863366bULL
+#define G2_GEN_X_C0_L5 0x058191924350bcd7ULL
+
+/* x.c1 */
+#define G2_GEN_X_C1_L0 0xa5a9c0759e23f606ULL
+#define G2_GEN_X_C1_L1 0xaaa0c59dbccd60c3ULL
+#define G2_GEN_X_C1_L2 0x3bb17e18e2867806ULL
+#define G2_GEN_X_C1_L3 0x1b1ab6cc8541b367ULL
+#define G2_GEN_X_C1_L4 0xc2b6ed0ef2158547ULL
+#define G2_GEN_X_C1_L5 0x11922a097360edf3ULL
+
+/* Generator point G2 - y coordinate (Fq2 element)
+ * y = y.c0 + y.c1 * u */
+
+/* y.c0 */
+#define G2_GEN_Y_C0_L0 0x4c730af860494c4aULL
+#define G2_GEN_Y_C0_L1 0x597cfa1f5e369c5aULL
+#define G2_GEN_Y_C0_L2 0xe7e6856caa0a635aULL
+#define G2_GEN_Y_C0_L3 0xbbefb5e96e0d495fULL
+#define G2_GEN_Y_C0_L4 0x07d3a975f0ef25a2ULL
+#define G2_GEN_Y_C0_L5 0x0083fd8e7e80dae5ULL
+
+/* y.c1 */
+#define G2_GEN_Y_C1_L0 0xadc0fc92df64b05dULL
+#define G2_GEN_Y_C1_L1 0x18aa270a2b1461dcULL
+#define G2_GEN_Y_C1_L2 0x86adac6a3be4eba0ULL
+#define G2_GEN_Y_C1_L3 0x79495c4ec93da33aULL
+#define G2_GEN_Y_C1_L4 0xe7175850a43ccaedULL
+#define G2_GEN_Y_C1_L5 0x0b2bc2a163de1bf2ULL
+
+/* ============================================================================
  * Convenience Macros for Array Initialization
  * ============================================================================ */
 
@@ -157,5 +221,23 @@
 
 #define G1_GEN_Y_LIMBS    { G1_GEN_Y_L0, G1_GEN_Y_L1, G1_GEN_Y_L2, \
                             G1_GEN_Y_L3, G1_GEN_Y_L4, G1_GEN_Y_L5 }
+
+/* G2 coefficient b' = 4(1+u) components */
+#define G2_B_C0_LIMBS     { G2_B_C0_L0, G2_B_C0_L1, G2_B_C0_L2, \
+                            G2_B_C0_L3, G2_B_C0_L4, G2_B_C0_L5 }
+#define G2_B_C1_LIMBS     { G2_B_C1_L0, G2_B_C1_L1, G2_B_C1_L2, \
+                            G2_B_C1_L3, G2_B_C1_L4, G2_B_C1_L5 }
+
+/* G2 generator x coordinate (Fq2 element) */
+#define G2_GEN_X_C0_LIMBS { G2_GEN_X_C0_L0, G2_GEN_X_C0_L1, G2_GEN_X_C0_L2, \
+                            G2_GEN_X_C0_L3, G2_GEN_X_C0_L4, G2_GEN_X_C0_L5 }
+#define G2_GEN_X_C1_LIMBS { G2_GEN_X_C1_L0, G2_GEN_X_C1_L1, G2_GEN_X_C1_L2, \
+                            G2_GEN_X_C1_L3, G2_GEN_X_C1_L4, G2_GEN_X_C1_L5 }
+
+/* G2 generator y coordinate (Fq2 element) */
+#define G2_GEN_Y_C0_LIMBS { G2_GEN_Y_C0_L0, G2_GEN_Y_C0_L1, G2_GEN_Y_C0_L2, \
+                            G2_GEN_Y_C0_L3, G2_GEN_Y_C0_L4, G2_GEN_Y_C0_L5 }
+#define G2_GEN_Y_C1_LIMBS { G2_GEN_Y_C1_L0, G2_GEN_Y_C1_L1, G2_GEN_Y_C1_L2, \
+                            G2_GEN_Y_C1_L3, G2_GEN_Y_C1_L4, G2_GEN_Y_C1_L5 }
 
 #endif /* BLS12_381_CONSTANTS_H */
