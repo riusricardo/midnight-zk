@@ -18,10 +18,31 @@ set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 100 120)
 # Find CUDA toolkit
 find_package(CUDAToolkit REQUIRED)
 
+# =============================================================================
+# Redistributable Build Configuration
+# =============================================================================
+# Use static CUDA runtime for redistributability
+# This embeds the CUDA runtime into the library, removing the need for
+# users to have a specific CUDA version installed.
+option(CUDA_STATIC_RUNTIME "Use static CUDA runtime" ON)
+
+if(CUDA_STATIC_RUNTIME)
+    set(CUDA_RUNTIME_LIB CUDA::cudart_static)
+    message(STATUS "Using static CUDA runtime for redistributability")
+else()
+    set(CUDA_RUNTIME_LIB CUDA::cudart)
+    message(STATUS "Using dynamic CUDA runtime")
+endif()
+
 # Compiler flags
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 --use_fast_math")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3")
+
+# For static runtime, we need to link pthread and dl
+if(CUDA_STATIC_RUNTIME)
+    find_package(Threads REQUIRED)
+endif()
 
 # Include directories
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
@@ -35,8 +56,9 @@ set(FIELD_SOURCES
 )
 
 # Source files for curve library  
+# Note: src/params.cu provides device constants, shared with field library
 set(CURVE_SOURCES
-    src/curve/params.cu
+    src/params.cu
     src/curve/point_ops.cu
     src/curve/msm.cu
     src/curve/ecntt.cu
@@ -54,23 +76,37 @@ endif()
 
 # Field library
 add_library(icicle_backend_cuda_field_bls12_381 SHARED ${FIELD_SOURCES})
-target_link_libraries(icicle_backend_cuda_field_bls12_381 CUDA::cudart)
+target_link_libraries(icicle_backend_cuda_field_bls12_381 
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+)
 set_target_properties(icicle_backend_cuda_field_bls12_381 PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
     POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME "icicle_backend_cuda_field_bls12_381"
+    # RPATH settings for redistributability
+    BUILD_WITH_INSTALL_RPATH ON
+    INSTALL_RPATH "$ORIGIN"
 )
 
 # Curve library
 add_library(icicle_backend_cuda_curve_bls12_381 SHARED ${CURVE_SOURCES})
 target_link_libraries(icicle_backend_cuda_curve_bls12_381 
     icicle_backend_cuda_field_bls12_381
-    CUDA::cudart
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
 )
 set_target_properties(icicle_backend_cuda_curve_bls12_381 PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
     POSITION_INDEPENDENT_CODE ON
     OUTPUT_NAME "icicle_backend_cuda_curve_bls12_381"
+    # RPATH settings for redistributability
+    BUILD_WITH_INSTALL_RPATH ON
+    INSTALL_RPATH "$ORIGIN"
 )
 
 # Installation
@@ -90,10 +126,13 @@ add_executable(test_backend
 target_link_libraries(test_backend 
     icicle_backend_cuda_curve_bls12_381
     icicle_backend_cuda_field_bls12_381
-    CUDA::cudart
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
 )
 set_target_properties(test_backend PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
 )
 
 add_test(NAME backend_tests COMMAND test_backend)
@@ -106,10 +145,13 @@ add_executable(test_vectors
 target_link_libraries(test_vectors
     icicle_backend_cuda_curve_bls12_381
     icicle_backend_cuda_field_bls12_381
-    CUDA::cudart
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
 )
 set_target_properties(test_vectors PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
 )
 
 add_test(NAME vector_tests COMMAND test_vectors)
