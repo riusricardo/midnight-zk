@@ -1282,6 +1282,201 @@ bool test_g1_add_identity() {
 }
 
 // =============================================================================
+// G2 Curve Tests
+// =============================================================================
+
+/**
+ * @brief Kernel: G2 point doubling with affine input
+ */
+__global__ void g2_double_from_affine_kernel(const G2Affine* p_affine, G2Projective* out) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        G2Projective p = G2Projective::from_affine(*p_affine);
+        g2_double(*out, p);
+    }
+}
+
+/**
+ * @brief Kernel: G2 point addition with affine input (P + P)
+ */
+__global__ void g2_add_self_from_affine_kernel(const G2Affine* p_affine, G2Projective* out) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        G2Projective p = G2Projective::from_affine(*p_affine);
+        g2_add(*out, p, p);
+    }
+}
+
+/**
+ * @brief Kernel: G2 identity + P
+ */
+__global__ void g2_add_identity_kernel(const G2Affine* p_affine, G2Projective* out) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        G2Projective p = G2Projective::from_affine(*p_affine);
+        G2Projective identity = G2Projective::identity();
+        g2_add(*out, identity, p);
+    }
+}
+
+/**
+ * @brief Kernel: Copy projective point from affine for G2
+ */
+__global__ void g2_from_affine_kernel(const G2Affine* p_affine, G2Projective* out) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        *out = G2Projective::from_affine(*p_affine);
+    }
+}
+
+/**
+ * @brief Test: 2P (double) = P + P (add) for G2
+ * 
+ * All point operations happen on GPU.
+ */
+bool test_g2_double_vs_add() {
+    std::cout << "  [CURVE] G2: 2P = P + P... " << std::flush;
+    
+    // Prepare affine G2 generator point on host
+    // G2 coordinates are Fq2 elements (c0 + c1*u)
+    G2Affine gen;
+    memcpy(gen.x.c0.limbs, G2_GENERATOR_X_C0, sizeof(G2_GENERATOR_X_C0));
+    memcpy(gen.x.c1.limbs, G2_GENERATOR_X_C1, sizeof(G2_GENERATOR_X_C1));
+    memcpy(gen.y.c0.limbs, G2_GENERATOR_Y_C0, sizeof(G2_GENERATOR_Y_C0));
+    memcpy(gen.y.c1.limbs, G2_GENERATOR_Y_C1, sizeof(G2_GENERATOR_Y_C1));
+    
+    // Allocate GPU memory
+    G2Affine* d_gen;
+    G2Projective *d_double, *d_add;
+    cudaError_t err;
+    
+    err = cudaMalloc(&d_gen, sizeof(G2Affine));
+    if (err != cudaSuccess) {
+        std::cout << "FAILED (malloc d_gen: " << cudaGetErrorString(err) << ")" << std::endl;
+        return false;
+    }
+    
+    err = cudaMalloc(&d_double, sizeof(G2Projective));
+    if (err != cudaSuccess) {
+        cudaFree(d_gen);
+        std::cout << "FAILED (malloc d_double: " << cudaGetErrorString(err) << ")" << std::endl;
+        return false;
+    }
+    
+    err = cudaMalloc(&d_add, sizeof(G2Projective));
+    if (err != cudaSuccess) {
+        cudaFree(d_gen);
+        cudaFree(d_double);
+        std::cout << "FAILED (malloc d_add: " << cudaGetErrorString(err) << ")" << std::endl;
+        return false;
+    }
+    
+    // Copy affine coordinates to device
+    err = cudaMemcpy(d_gen, &gen, sizeof(G2Affine), cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        std::cout << "FAILED (memcpy: " << cudaGetErrorString(err) << ")" << std::endl;
+        cudaFree(d_gen); cudaFree(d_double); cudaFree(d_add);
+        return false;
+    }
+    
+    // Launch kernels
+    g2_double_from_affine_kernel<<<1, 1>>>(d_gen, d_double);
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cout << "FAILED (double kernel: " << cudaGetErrorString(err) << ")" << std::endl;
+        cudaFree(d_gen); cudaFree(d_double); cudaFree(d_add);
+        return false;
+    }
+    
+    g2_add_self_from_affine_kernel<<<1, 1>>>(d_gen, d_add);
+    err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+        std::cout << "FAILED (add kernel: " << cudaGetErrorString(err) << ")" << std::endl;
+        cudaFree(d_gen); cudaFree(d_double); cudaFree(d_add);
+        return false;
+    }
+    
+    // Copy results back
+    G2Projective double_result, add_result;
+    cudaMemcpy(&double_result, d_double, sizeof(G2Projective), cudaMemcpyDeviceToHost);
+    cudaMemcpy(&add_result, d_add, sizeof(G2Projective), cudaMemcpyDeviceToHost);
+    
+    cudaFree(d_gen);
+    cudaFree(d_double);
+    cudaFree(d_add);
+    
+    // Compare projective coordinates (Fq2 elements have c0 and c1)
+    bool match = limbs_equal(double_result.X.c0.limbs, add_result.X.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(double_result.X.c1.limbs, add_result.X.c1.limbs, Fq::LIMBS) &&
+                 limbs_equal(double_result.Y.c0.limbs, add_result.Y.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(double_result.Y.c1.limbs, add_result.Y.c1.limbs, Fq::LIMBS) &&
+                 limbs_equal(double_result.Z.c0.limbs, add_result.Z.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(double_result.Z.c1.limbs, add_result.Z.c1.limbs, Fq::LIMBS);
+    
+    if (!match) {
+        std::cout << "FAILED" << std::endl;
+        std::cout << "    Double and add produced different results" << std::endl;
+        return false;
+    }
+    
+    std::cout << "PASSED" << std::endl;
+    return true;
+}
+
+/**
+ * @brief Test: Identity + P = P for G2
+ */
+bool test_g2_add_identity() {
+    std::cout << "  [CURVE] G2: O + P = P... " << std::flush;
+    
+    // Prepare G2 generator
+    G2Affine gen;
+    memcpy(gen.x.c0.limbs, G2_GENERATOR_X_C0, sizeof(G2_GENERATOR_X_C0));
+    memcpy(gen.x.c1.limbs, G2_GENERATOR_X_C1, sizeof(G2_GENERATOR_X_C1));
+    memcpy(gen.y.c0.limbs, G2_GENERATOR_Y_C0, sizeof(G2_GENERATOR_Y_C0));
+    memcpy(gen.y.c1.limbs, G2_GENERATOR_Y_C1, sizeof(G2_GENERATOR_Y_C1));
+    
+    // Allocate GPU memory
+    G2Affine* d_gen;
+    G2Projective *d_out, *d_p;
+    
+    CHECK_CUDA(cudaMalloc(&d_gen, sizeof(G2Affine)));
+    CHECK_CUDA(cudaMalloc(&d_out, sizeof(G2Projective)));
+    CHECK_CUDA(cudaMalloc(&d_p, sizeof(G2Projective)));
+    
+    CHECK_CUDA(cudaMemcpy(d_gen, &gen, sizeof(G2Affine), cudaMemcpyHostToDevice));
+    
+    // Test O + P = P
+    g2_add_identity_kernel<<<1, 1>>>(d_gen, d_out);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    // Get P directly for comparison
+    g2_from_affine_kernel<<<1, 1>>>(d_gen, d_p);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    // Copy results back
+    G2Projective result, p;
+    CHECK_CUDA(cudaMemcpy(&result, d_out, sizeof(G2Projective), cudaMemcpyDeviceToHost));
+    CHECK_CUDA(cudaMemcpy(&p, d_p, sizeof(G2Projective), cudaMemcpyDeviceToHost));
+    
+    cudaFree(d_gen);
+    cudaFree(d_out);
+    cudaFree(d_p);
+    
+    // Compare
+    bool match = limbs_equal(result.X.c0.limbs, p.X.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(result.X.c1.limbs, p.X.c1.limbs, Fq::LIMBS) &&
+                 limbs_equal(result.Y.c0.limbs, p.Y.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(result.Y.c1.limbs, p.Y.c1.limbs, Fq::LIMBS) &&
+                 limbs_equal(result.Z.c0.limbs, p.Z.c0.limbs, Fq::LIMBS) &&
+                 limbs_equal(result.Z.c1.limbs, p.Z.c1.limbs, Fq::LIMBS);
+    
+    if (!match) {
+        std::cout << "FAILED" << std::endl;
+        return false;
+    }
+    
+    std::cout << "PASSED" << std::endl;
+    return true;
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -1338,6 +1533,13 @@ int main(int argc, char** argv) {
     suite.record(test_g1_double_vs_add());
     std::cout.flush();
     suite.record(test_g1_add_identity());
+    std::cout.flush();
+    
+    std::cout << std::endl << "--- G2 Curve Tests ---" << std::endl;
+    std::cout.flush();
+    suite.record(test_g2_double_vs_add());
+    std::cout.flush();
+    suite.record(test_g2_add_identity());
     std::cout.flush();
     
     suite.print_summary();
