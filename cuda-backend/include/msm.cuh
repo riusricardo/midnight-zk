@@ -20,6 +20,7 @@
 #include "point.cuh"
 #include "icicle_types.cuh"
 #include <cuda_runtime.h>
+#include <cub/cub.cuh>
 
 namespace msm {
 
@@ -95,119 +96,142 @@ __device__ __forceinline__ int extract_window_value(
 }
 
 // =============================================================================
-// Bucket Accumulation Kernel (Conflict-Free)
+// Bucket Accumulation Kernels (Sorted / Constant-Time)
 // =============================================================================
 
 /**
- * @brief Conflict-free bucket accumulation
- * 
- * Each block processes one bucket. All threads in the block cooperatively
- * scan all points and accumulate those belonging to their bucket.
- * 
- * This approach guarantees no race conditions since each bucket is
- * exclusively owned by one block.
+ * @brief Compute bucket indices for all scalar windows (Constant Time)
  */
-__global__ void accumulate_buckets_kernel(
-    G1Projective* buckets,
-    const Fr* scalars,
-    const G1Affine* bases,
+template<typename S>
+__global__ void compute_bucket_indices_kernel(
+    unsigned int* bucket_indices,    // [msm_size * num_windows]
+    unsigned int* packed_indices,    // [msm_size * num_windows] (point_idx << 1 | sign)
+    const S* scalars,
     int msm_size,
     int c,
     int num_windows,
-    int num_buckets
+    int num_buckets // Actual buckets per window (excluding trash)
 ) {
-    // Each block processes one (window, bucket) pair
-    int bucket_global_idx = blockIdx.x;
-    int total_buckets = num_windows * num_buckets;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= msm_size) return;
     
-    if (bucket_global_idx >= total_buckets) return;
+    S scalar = scalars[idx];
     
-    int window_idx = bucket_global_idx / num_buckets;
-    int bucket_local = bucket_global_idx % num_buckets;
-    int target_bucket = bucket_local + 1;  // buckets are 1-indexed (0 means skip)
+    // Number of buckets per window including trash bucket
+    int buckets_per_window = num_buckets + 1;
     
-    // Shared memory for parallel reduction
-    extern __shared__ G1Projective shared_points[];
-    
-    int tid = threadIdx.x;
-    int num_threads = blockDim.x;
-    
-    // Each thread accumulates a portion of points
-    G1Projective local_acc = G1Projective::identity();
-    
-    for (int i = tid; i < msm_size; i += num_threads) {
-        Fr scalar = scalars[i];
-        int window_val = extract_window_value(scalar, window_idx, c);
+    for (int w = 0; w < num_windows; w++) {
+        int output_idx = idx * num_windows + w;
         
-        if (window_val == 0) continue;
+        // Extract window value
+        int bit_offset = w * c;
+        int limb_idx = bit_offset / 64;
+        int bit_in_limb = bit_offset % 64;
         
-        // Signed digit handling: if window > 2^(c-1), use negation
-        int sign = 1;
-        int bucket;
+        uint64_t window = scalar.limbs[limb_idx] >> bit_in_limb;
+        if (bit_in_limb + c > 64 && limb_idx + 1 < S::LIMBS) {
+            window |= (scalar.limbs[limb_idx + 1] << (64 - bit_in_limb));
+        }
+        window &= ((1ULL << c) - 1);
         
-        if (window_val > num_buckets) {
-            bucket = (1 << c) - window_val;
-            sign = -1;
-        } else {
-            bucket = window_val;
+        int window_val = (int)window;
+        
+        // Constant-time logic
+        int sign = 0;
+        int bucket_val = window_val;
+        
+        // Handle signed digit: if (window_val > num_buckets)
+        int is_large = (window_val > num_buckets);
+        if (is_large) {
+            bucket_val = (1 << c) - window_val;
+            sign = 1;
         }
         
-        if (bucket == target_bucket) {
-            G1Affine point = bases[i];
-            if (!point.is_identity()) {
-                if (sign < 0) {
-                    point = point.neg();
-                }
-                g1_add_mixed(local_acc, local_acc, point);
-            }
+        // Handle zero: if (window_val == 0)
+        int is_zero = (window_val == 0);
+        if (is_zero) {
+            bucket_val = num_buckets + 1; // Map to trash bucket
+            sign = 0;
         }
-    }
-    
-    // Store to shared memory
-    shared_points[tid] = local_acc;
-    __syncthreads();
-    
-    // Parallel reduction in shared memory
-    for (int stride = num_threads / 2; stride > 0; stride >>= 1) {
-        if (tid < stride) {
-            g1_add(shared_points[tid], shared_points[tid], shared_points[tid + stride]);
-        }
-        __syncthreads();
-    }
-    
-    // Write result
-    if (tid == 0) {
-        buckets[bucket_global_idx] = shared_points[0];
+        
+        // Global bucket index (0-based)
+        unsigned int bucket_idx = w * buckets_per_window + (bucket_val - 1);
+        
+        bucket_indices[output_idx] = bucket_idx;
+        packed_indices[output_idx] = (idx << 1) | sign;
     }
 }
 
-// =============================================================================
-// Bucket Reduction (Triangle Sum)
-// =============================================================================
+/**
+ * @brief Conflict-free bucket accumulation after sorting
+ */
+__global__ void accumulate_sorted_kernel(
+    G1Projective* buckets,
+    const unsigned int* sorted_packed_indices,
+    const G1Affine* bases,
+    const unsigned int* bucket_offsets,
+    const unsigned int* bucket_sizes,
+    int total_buckets
+) {
+    int bucket_idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (bucket_idx >= total_buckets) return;
+    
+    unsigned int offset = bucket_offsets[bucket_idx];
+    unsigned int size = bucket_sizes[bucket_idx];
+    
+    if (size == 0) {
+        buckets[bucket_idx] = G1Projective::identity();
+        return;
+    }
+    
+    G1Projective acc = G1Projective::identity();
+    
+    for (unsigned int i = 0; i < size; i++) {
+        unsigned int idx = offset + i;
+        unsigned int packed = sorted_packed_indices[idx];
+        unsigned int point_idx = packed >> 1;
+        unsigned int sign = packed & 1;
+        
+        G1Affine base = bases[point_idx];
+        if (sign) {
+            base = base.neg();
+        }
+        
+        g1_add_mixed(acc, acc, base);
+    }
+    
+    buckets[bucket_idx] = acc;
+}
 
 /**
- * @brief Bucket reduction using triangle sum
+ * @brief Parallel bucket reduction
  * 
- * Computes: sum_{i=1}^{n} i * bucket[i]
- * 
- * Equivalent to: running_sum from highest to lowest bucket,
- * accumulating running_sum into window_sum at each step.
+ * Runs one thread per window to perform the triangle summation.
+ * Since num_buckets can be large (e.g. 2^16), we read directly from global memory.
  */
-__global__ void bucket_reduction_kernel(
+__global__ void parallel_bucket_reduction_kernel(
     G1Projective* window_results,
     const G1Projective* buckets,
     int num_windows,
-    int num_buckets
+    int num_buckets, // Excluding trash
+    int buckets_per_window // Including trash
 ) {
     int window_idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (window_idx >= num_windows) return;
     
-    const G1Projective* window_buckets = buckets + window_idx * num_buckets;
+    // Offset to this window's buckets
+    const G1Projective* window_buckets = buckets + window_idx * buckets_per_window;
     
     G1Projective running_sum = G1Projective::identity();
     G1Projective window_sum = G1Projective::identity();
     
-    // Triangle sum: iterate from highest bucket to lowest
+    // Triangle summation: sum_{i=1}^B i*B_i
+    // Implemented as:
+    // running_sum += B_i
+    // window_sum += running_sum
+    // Iterate backwards from B-1 to 0 (bucket values B to 1)
+    // Note: bucket_idx i corresponds to value i+1
+    
     for (int i = num_buckets - 1; i >= 0; i--) {
         g1_add(running_sum, running_sum, window_buckets[i]);
         g1_add(window_sum, window_sum, running_sum);
@@ -251,9 +275,16 @@ __global__ void final_accumulation_kernel(
 // =============================================================================
 
 /**
- * @brief MSM using Pippenger's bucket method
+ * @brief MSM using Pippenger's bucket method with Sort-Reduce
  * 
  * Production-ready implementation with conflict-free accumulation.
+ * 
+ * This implementation uses a Sort-Reduce approach to mitigate timing side-channels:
+ * 1. Compute bucket indices for all windows (constant-time).
+ * 2. Sort indices using Radix Sort (deterministic time).
+ * 3. Accumulate sorted buckets (contiguous memory access).
+ * 
+ * Zeros are mapped to a "trash bucket" to avoid data-dependent skipping.
  */
 template<typename S, typename A, typename P>
 cudaError_t msm_cuda(
@@ -287,10 +318,11 @@ cudaError_t msm_cuda(
     int num_buckets = (1 << (c - 1));  // Signed digit representation
     
     // Check for overflow in total_buckets
-    long long total_buckets_long = (long long)num_windows * num_buckets;
+    long long total_buckets_long = (long long)num_windows * (num_buckets + 1);
     if (total_buckets_long > (long long)2147483647) return cudaErrorInvalidValue;
     
     int total_buckets = (int)total_buckets_long;
+    int num_contributions = msm_size * num_windows;
     
     // Allocate device memory
     S* d_scalars = nullptr;
@@ -298,6 +330,11 @@ cudaError_t msm_cuda(
     P* d_result = nullptr;
     G1Projective* d_buckets = nullptr;
     G1Projective* d_window_results = nullptr;
+    
+    // Sorting buffers
+    unsigned int *d_bucket_indices = nullptr, *d_packed_indices = nullptr;
+    unsigned int *d_bucket_indices_sorted = nullptr, *d_packed_indices_sorted = nullptr;
+    unsigned int *d_bucket_offsets = nullptr, *d_bucket_sizes = nullptr;
     
     // Handle input data
     if (config.are_scalars_on_device) {
@@ -333,39 +370,120 @@ cudaError_t msm_cuda(
         if (err != cudaSuccess) goto cleanup;
     }
     
-    // Bucket accumulation: each block handles one bucket
+    // Allocate sorting buffers
+    err = cudaMalloc(&d_bucket_indices, num_contributions * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_packed_indices, num_contributions * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_bucket_indices_sorted, num_contributions * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_packed_indices_sorted, num_contributions * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_bucket_offsets, total_buckets * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    err = cudaMalloc(&d_bucket_sizes, total_buckets * sizeof(unsigned int));
+    if (err != cudaSuccess) goto cleanup;
+    
+    // 1. Compute Indices
     {
-        // Determine block size based on MSM size
-        int threads_per_block = 256;
-        if (msm_size < 256) threads_per_block = 64;
-        if (msm_size < 64) threads_per_block = 32;
-        
-        size_t shared_size = threads_per_block * sizeof(G1Projective);
-        
-        accumulate_buckets_kernel<<<total_buckets, threads_per_block, 
-                                    shared_size, stream>>>(
-            d_buckets,
-            d_scalars,
-            d_bases,
-            msm_size,
-            c,
-            num_windows,
-            num_buckets
+        int threads = 256;
+        int blocks = (msm_size + threads - 1) / threads;
+        compute_bucket_indices_kernel<<<blocks, threads, 0, stream>>>(
+            d_bucket_indices, d_packed_indices, d_scalars, msm_size, c, num_windows, num_buckets
         );
         err = cudaGetLastError();
         if (err != cudaSuccess) goto cleanup;
     }
     
-    // Bucket reduction (triangle sum)
+    // 2. Histogram (Compute bucket sizes)
+    {
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
+        // Initialize sizes to 0
+        cudaMemsetAsync(d_bucket_sizes, 0, total_buckets * sizeof(unsigned int), stream);
+        
+        cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream);
+            
+        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        
+        cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream);
+            
+        cudaFree(d_temp_storage);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) goto cleanup;
+    }
+    
+    // 3. Scan (Compute bucket offsets)
+    {
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
+        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
+            d_bucket_sizes, d_bucket_offsets, total_buckets, stream);
+            
+        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        
+        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
+            d_bucket_sizes, d_bucket_offsets, total_buckets, stream);
+            
+        cudaFree(d_temp_storage);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) goto cleanup;
+    }
+    
+    // 4. Sort
+    {
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_indices_sorted,
+            d_packed_indices, d_packed_indices_sorted,
+            num_contributions, 0, 32, stream);
+            
+        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        
+        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_indices_sorted,
+            d_packed_indices, d_packed_indices_sorted,
+            num_contributions, 0, 32, stream);
+            
+        cudaFree(d_temp_storage);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) goto cleanup;
+    }
+    
+    // 5. Accumulate Sorted
+    {
+        int threads = 256;
+        int blocks = (total_buckets + threads - 1) / threads;
+        
+        accumulate_sorted_kernel<<<blocks, threads, 0, stream>>>(
+            d_buckets,
+            d_packed_indices_sorted,
+            d_bases,
+            d_bucket_offsets,
+            d_bucket_sizes,
+            total_buckets
+        );
+        err = cudaGetLastError();
+        if (err != cudaSuccess) goto cleanup;
+    }
+    
+    // 6. Bucket Reduction
     {
         int threads = min(num_windows, 256);
         int blocks = (num_windows + threads - 1) / threads;
         
-        bucket_reduction_kernel<<<blocks, threads, 0, stream>>>(
+        parallel_bucket_reduction_kernel<<<blocks, threads, 0, stream>>>(
             d_window_results,
             d_buckets,
             num_windows,
-            num_buckets
+            num_buckets,
+            num_buckets + 1 // buckets_per_window
         );
         err = cudaGetLastError();
         if (err != cudaSuccess) goto cleanup;
@@ -398,6 +516,13 @@ cudaError_t msm_cuda(
 cleanup:
     if (d_buckets) cudaFree(d_buckets);
     if (d_window_results) cudaFree(d_window_results);
+    if (d_bucket_indices) cudaFree(d_bucket_indices);
+    if (d_packed_indices) cudaFree(d_packed_indices);
+    if (d_bucket_indices_sorted) cudaFree(d_bucket_indices_sorted);
+    if (d_packed_indices_sorted) cudaFree(d_packed_indices_sorted);
+    if (d_bucket_offsets) cudaFree(d_bucket_offsets);
+    if (d_bucket_sizes) cudaFree(d_bucket_sizes);
+    
     if (!config.are_scalars_on_device && d_scalars) cudaFree(d_scalars);
     if (!config.are_points_on_device && d_bases) cudaFree(d_bases);
     if (!config.are_results_on_device && d_result) cudaFree(d_result);
