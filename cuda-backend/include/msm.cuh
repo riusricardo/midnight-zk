@@ -278,10 +278,19 @@ cudaError_t msm_cuda(
     
     // Determine parameters
     int c = config.c > 0 ? config.c : get_optimal_c(msm_size);
+    
+    // Security check: prevent integer overflow and excessive memory usage
+    if (c > 24) return cudaErrorInvalidValue;
+
     int scalar_bits = config.bitsize > 0 ? config.bitsize : S::LIMBS * 64;
     int num_windows = get_num_windows(scalar_bits, c);
     int num_buckets = (1 << (c - 1));  // Signed digit representation
-    int total_buckets = num_windows * num_buckets;
+    
+    // Check for overflow in total_buckets
+    long long total_buckets_long = (long long)num_windows * num_buckets;
+    if (total_buckets_long > (long long)2147483647) return cudaErrorInvalidValue;
+    
+    int total_buckets = (int)total_buckets_long;
     
     // Allocate device memory
     S* d_scalars = nullptr;

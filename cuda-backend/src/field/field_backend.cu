@@ -16,8 +16,7 @@ using namespace bls12_381;
 // =============================================================================
 
 // Instantiate domain registry for Fr (scalar field)
-template<>
-ntt::Domain<Fr>* ntt::Domain<Fr>::domains[MAX_LOG_DOMAIN_SIZE] = {nullptr};
+// (Moved to header using inline static)
 
 // =============================================================================
 // NTT Core Implementation
@@ -54,25 +53,25 @@ eIcicleError ntt_forward_impl(
     bool need_alloc = !config.are_inputs_on_device;
     
     if (need_alloc) {
-        cudaMalloc(&d_data, size * sizeof(F));
-        cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMalloc(&d_data, size * sizeof(F)));
+        CUDA_CHECK(cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyHostToDevice));
     } else if (input != output) {
-        cudaMalloc(&d_data, size * sizeof(F));
-        cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMalloc(&d_data, size * sizeof(F)));
+        CUDA_CHECK(cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyDeviceToDevice));
     } else {
         d_data = const_cast<F*>(input);
     }
     
     // Bit reversal
     F* d_temp;
-    cudaMalloc(&d_temp, size * sizeof(F));
+    CUDA_CHECK(cudaMalloc(&d_temp, size * sizeof(F)));
     
     const int threads = 256;
     int blocks = (size + threads - 1) / threads;
     
     bit_reverse_kernel<<<blocks, threads, 0, stream>>>(d_temp, d_data, size, log_size);
-    cudaMemcpy(d_data, d_temp, size * sizeof(F), cudaMemcpyDeviceToDevice);
-    cudaFree(d_temp);
+    CUDA_CHECK(cudaMemcpy(d_data, d_temp, size * sizeof(F), cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaFree(d_temp));
     
     // Butterfly stages
     for (int s = 1; s <= log_size; s++) {
@@ -83,20 +82,20 @@ eIcicleError ntt_forward_impl(
         butterfly_kernel<<<blocks, threads, 0, stream>>>(
             d_data, domain->twiddles, size, m, half_m
         );
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
     
     // Copy output
     if (config.are_outputs_on_device) {
         if (d_data != output) {
-            cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToDevice);
+            CUDA_CHECK(cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToDevice));
         }
     } else {
-        cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToHost));
     }
     
     if (need_alloc || (input != output && config.are_inputs_on_device)) {
-        if (d_data != input) cudaFree(d_data);
+        if (d_data != input) CUDA_CHECK(cudaFree(d_data));
     }
     
     return eIcicleError::SUCCESS;
@@ -130,11 +129,11 @@ eIcicleError ntt_inverse_impl(
     bool need_alloc = !config.are_inputs_on_device;
     
     if (need_alloc) {
-        cudaMalloc(&d_data, size * sizeof(F));
-        cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMalloc(&d_data, size * sizeof(F)));
+        CUDA_CHECK(cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyHostToDevice));
     } else if (input != output) {
-        cudaMalloc(&d_data, size * sizeof(F));
-        cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyDeviceToDevice);
+        CUDA_CHECK(cudaMalloc(&d_data, size * sizeof(F)));
+        CUDA_CHECK(cudaMemcpy(d_data, input, size * sizeof(F), cudaMemcpyDeviceToDevice));
     } else {
         d_data = const_cast<F*>(input);
     }
@@ -150,12 +149,12 @@ eIcicleError ntt_inverse_impl(
         butterfly_kernel<<<blocks, threads, 0, stream>>>(
             d_data, domain->inv_twiddles, size, m, half_m
         );
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
     
     // Bit reversal
     F* d_temp;
-    cudaMalloc(&d_temp, size * sizeof(F));
+    CUDA_CHECK(cudaMalloc(&d_temp, size * sizeof(F)));
     
     int blocks = (size + threads - 1) / threads;
     bit_reverse_kernel<<<blocks, threads, 0, stream>>>(d_temp, d_data, size, log_size);
@@ -165,19 +164,19 @@ eIcicleError ntt_inverse_impl(
         d_data, d_temp, domain->domain_size_inv, size
     );
     
-    cudaFree(d_temp);
+    CUDA_CHECK(cudaFree(d_temp));
     
     // Copy output
     if (config.are_outputs_on_device) {
         if (d_data != output) {
-            cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToDevice);
+            CUDA_CHECK(cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToDevice));
         }
     } else {
-        cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(output, d_data, size * sizeof(F), cudaMemcpyDeviceToHost));
     }
     
     if (need_alloc || (input != output && config.are_inputs_on_device)) {
-        if (d_data != input) cudaFree(d_data);
+        if (d_data != input) CUDA_CHECK(cudaFree(d_data));
     }
     
     return eIcicleError::SUCCESS;
@@ -235,12 +234,12 @@ eIcicleError coset_ntt_cuda_impl(
     
     // Allocate temporary buffer
     F* d_temp = nullptr;
-    cudaMalloc(&d_temp, size * sizeof(F));
+    CUDA_CHECK(cudaMalloc(&d_temp, size * sizeof(F)));
     
     // Copy coset generator to device
     F* d_coset_gen = nullptr;
-    cudaMalloc(&d_coset_gen, sizeof(F));
-    cudaMemcpy(d_coset_gen, &coset_gen, sizeof(F), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(&d_coset_gen, sizeof(F)));
+    CUDA_CHECK(cudaMemcpy(d_coset_gen, &coset_gen, sizeof(F), cudaMemcpyHostToDevice));
     
     if (direction == NTTDir::kForward) {
         // Step 1: Multiply by coset powers
@@ -248,17 +247,17 @@ eIcicleError coset_ntt_cuda_impl(
         bool need_alloc_input = !config.are_inputs_on_device;
         
         if (need_alloc_input) {
-            cudaMalloc(&d_input, size * sizeof(F));
-            cudaMemcpy(d_input, input, size * sizeof(F), cudaMemcpyHostToDevice);
+            CUDA_CHECK(cudaMalloc(&d_input, size * sizeof(F)));
+            CUDA_CHECK(cudaMemcpy(d_input, input, size * sizeof(F), cudaMemcpyHostToDevice));
         } else {
             d_input = const_cast<F*>(input);
         }
         
         coset_mul_kernel<<<blocks, threads, 0, stream>>>(d_temp, d_input, coset_gen, size);
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
         if (need_alloc_input) {
-            cudaFree(d_input);
+            CUDA_CHECK(cudaFree(d_input));
         }
         
         // Step 2: Apply regular NTT
@@ -267,8 +266,8 @@ eIcicleError coset_ntt_cuda_impl(
         
         eIcicleError err = ntt_forward_impl(d_temp, size, modified_config, output);
         
-        cudaFree(d_temp);
-        cudaFree(d_coset_gen);
+        CUDA_CHECK(cudaFree(d_temp));
+        CUDA_CHECK(cudaFree(d_coset_gen));
         
         return err;
     } else {
@@ -279,42 +278,42 @@ eIcicleError coset_ntt_cuda_impl(
         
         eIcicleError err = ntt_inverse_impl(input, size, modified_config, d_temp);
         if (err != eIcicleError::SUCCESS) {
-            cudaFree(d_temp);
-            cudaFree(d_coset_gen);
+            CUDA_CHECK(cudaFree(d_temp));
+            CUDA_CHECK(cudaFree(d_coset_gen));
             return err;
         }
         
         // Step 2: Divide by coset powers (multiply by g^(-i))
         // Compute g^(-1) on device
         F* d_coset_gen_inv = nullptr;
-        cudaMalloc(&d_coset_gen_inv, sizeof(F));
+        CUDA_CHECK(cudaMalloc(&d_coset_gen_inv, sizeof(F)));
         field_inv_kernel<<<1, 1, 0, stream>>>(d_coset_gen_inv, d_coset_gen);
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Copy inverse back to host for kernel
         F coset_gen_inv;
-        cudaMemcpy(&coset_gen_inv, d_coset_gen_inv, sizeof(F), cudaMemcpyDeviceToHost);
-        cudaFree(d_coset_gen_inv);
+        CUDA_CHECK(cudaMemcpy(&coset_gen_inv, d_coset_gen_inv, sizeof(F), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(d_coset_gen_inv));
         
         F* d_output = nullptr;
         bool need_alloc_output = !config.are_outputs_on_device;
         
         if (need_alloc_output) {
-            cudaMalloc(&d_output, size * sizeof(F));
+            CUDA_CHECK(cudaMalloc(&d_output, size * sizeof(F)));
         } else {
             d_output = output;
         }
         
         coset_div_kernel<<<blocks, threads, 0, stream>>>(d_output, d_temp, coset_gen_inv, size);
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
         if (need_alloc_output) {
-            cudaMemcpy(output, d_output, size * sizeof(F), cudaMemcpyDeviceToHost);
-            cudaFree(d_output);
+            CUDA_CHECK(cudaMemcpy(output, d_output, size * sizeof(F), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaFree(d_output));
         }
         
-        cudaFree(d_temp);
-        cudaFree(d_coset_gen);
+        CUDA_CHECK(cudaFree(d_temp));
+        CUDA_CHECK(cudaFree(d_coset_gen));
         
         return eIcicleError::SUCCESS;
     }
@@ -411,8 +410,8 @@ eIcicleError init_domain_cuda_impl(
     
     // Copy root_of_unity to device
     F* d_root;
-    cudaMalloc(&d_root, sizeof(F));
-    cudaMemcpy(d_root, &root_of_unity, sizeof(F), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(&d_root, sizeof(F)));
+    CUDA_CHECK(cudaMemcpy(d_root, &root_of_unity, sizeof(F), cudaMemcpyHostToDevice));
     
     // Precompute twiddle factors for each domain size
     for (int log_size = 1; log_size <= max_log_size && log_size < MAX_LOG_DOMAIN_SIZE; log_size++) {
@@ -424,30 +423,30 @@ eIcicleError init_domain_cuda_impl(
         domain->size = size;
         
         // Allocate twiddle factor arrays
-        cudaMalloc(&domain->twiddles, size * sizeof(F));
-        cudaMalloc(&domain->inv_twiddles, size * sizeof(F));
+        CUDA_CHECK(cudaMalloc(&domain->twiddles, size * sizeof(F)));
+        CUDA_CHECK(cudaMalloc(&domain->inv_twiddles, size * sizeof(F)));
         
         // Compute omega = root_of_unity^(2^(max_log - log_size)) on GPU
         F* d_omega;
         F* d_omega_inv;
         F* d_size_inv;
-        cudaMalloc(&d_omega, sizeof(F));
-        cudaMalloc(&d_omega_inv, sizeof(F));
-        cudaMalloc(&d_size_inv, sizeof(F));
+        CUDA_CHECK(cudaMalloc(&d_omega, sizeof(F)));
+        CUDA_CHECK(cudaMalloc(&d_omega_inv, sizeof(F)));
+        CUDA_CHECK(cudaMalloc(&d_size_inv, sizeof(F)));
         
         int squarings = max_log_size - log_size;
         square_field_kernel<<<1, 1, 0, stream>>>(d_omega, d_root, squarings);
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Compute inverse and size_inv
         compute_inv_kernel<<<1, 1, 0, stream>>>(d_omega_inv, d_size_inv, d_omega, size);
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
         // Copy omega values back to host to pass to twiddle kernel
         F h_omega, h_omega_inv;
-        cudaMemcpy(&h_omega, d_omega, sizeof(F), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&h_omega_inv, d_omega_inv, sizeof(F), cudaMemcpyDeviceToHost);
-        cudaMemcpy(&domain->domain_size_inv, d_size_inv, sizeof(F), cudaMemcpyDeviceToHost);
+        CUDA_CHECK(cudaMemcpy(&h_omega, d_omega, sizeof(F), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&h_omega_inv, d_omega_inv, sizeof(F), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(&domain->domain_size_inv, d_size_inv, sizeof(F), cudaMemcpyDeviceToHost));
         
         // Compute all twiddles in parallel on GPU
         const int threads = 256;
@@ -455,17 +454,20 @@ eIcicleError init_domain_cuda_impl(
         compute_twiddles_kernel<<<blocks, threads, 0, stream>>>(
             domain->twiddles, domain->inv_twiddles, h_omega, h_omega_inv, size
         );
-        cudaStreamSynchronize(stream);
+        CUDA_CHECK(cudaStreamSynchronize(stream));
         
-        cudaFree(d_omega);
-        cudaFree(d_omega_inv);
-        cudaFree(d_size_inv);
-        
+        CUDA_CHECK(cudaFree(d_omega));
+        CUDA_CHECK(cudaFree(d_omega_inv));
+        CUDA_CHECK(cudaFree(d_size_inv));
+        {
+            std::lock_guard<std::mutex> lock(Domain<F>::domains_mutex);
+            Domain<F>::domains[log_size] = domain;
+        }
         // Register domain
         Domain<F>::domains[log_size] = domain;
     }
     
-    cudaFree(d_root);
+    CUDA_CHECK(cudaFree(d_root));
     
     return eIcicleError::SUCCESS;
 }
@@ -477,11 +479,12 @@ template eIcicleError init_domain_cuda_impl<Fr>(const Fr&, const NTTInitDomainCo
  */
 template<typename F>
 eIcicleError release_domain_cuda_impl() {
+    std::lock_guard<std::mutex> lock(Domain<F>::domains_mutex);
     for (int i = 0; i < MAX_LOG_DOMAIN_SIZE; i++) {
         Domain<F>* domain = Domain<F>::domains[i];
         if (domain) {
-            if (domain->twiddles) cudaFree(domain->twiddles);
-            if (domain->inv_twiddles) cudaFree(domain->inv_twiddles);
+            if (domain->twiddles) CUDA_CHECK(cudaFree(domain->twiddles));
+            if (domain->inv_twiddles) CUDA_CHECK(cudaFree(domain->inv_twiddles));
             delete domain;
             Domain<F>::domains[i] = nullptr;
         }

@@ -17,6 +17,12 @@ namespace icicle {
 // Error codes (matching Icicle's eIcicleError)
 // =============================================================================
 
+#define CUDA_CHECK(call) \
+    do { \
+        cudaError_t err = call; \
+        if (err != cudaSuccess) return eIcicleError::ALLOCATION_FAILED; \
+    } while(0)
+
 enum class eIcicleError {
     SUCCESS = 0,
     INVALID_DEVICE = 1,
