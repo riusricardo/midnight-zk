@@ -11,6 +11,7 @@
 #include "field.cuh"
 #include "icicle_types.cuh"
 #include <cuda_runtime.h>
+#include <mutex>
 
 namespace ntt {
 
@@ -36,7 +37,8 @@ public:
     size_t size;
     
     // Global domain registry
-    static Domain* domains[MAX_LOG_DOMAIN_SIZE];
+    static inline Domain* domains[MAX_LOG_DOMAIN_SIZE] = {nullptr};
+    static inline std::mutex domains_mutex;
     
     __host__ Domain() : twiddles(nullptr), inv_twiddles(nullptr), 
                         log_size(0), size(0) {}
@@ -51,6 +53,7 @@ public:
      */
     static Domain* get_domain(int log_size) {
         if (log_size >= MAX_LOG_DOMAIN_SIZE) return nullptr;
+        std::lock_guard<std::mutex> lock(domains_mutex);
         return domains[log_size];
     }
 };
