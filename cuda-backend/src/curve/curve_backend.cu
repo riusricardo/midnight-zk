@@ -123,11 +123,11 @@ eIcicleError bls12_381_g1_to_montgomery(
     bool need_alloc_output = !config->is_result_on_device;
     
     if (need_alloc_input) {
-        cudaMalloc((void**)&d_input, size * sizeof(G1Projective));
-        cudaMemcpy((void*)d_input, input, size * sizeof(G1Projective), cudaMemcpyHostToDevice);
+        CUDA_CHECK(cudaMalloc((void**)&d_input, size * sizeof(G1Projective)));
+        CUDA_CHECK(cudaMemcpyAsync((void*)d_input, input, size * sizeof(G1Projective), cudaMemcpyHostToDevice, stream));
     }
     if (need_alloc_output) {
-        cudaMalloc(&d_output, size * sizeof(G1Projective));
+        CUDA_CHECK(cudaMalloc(&d_output, size * sizeof(G1Projective)));
     }
     
     const int threads = 256;
@@ -135,13 +135,18 @@ eIcicleError bls12_381_g1_to_montgomery(
     montgomery::g1_to_montgomery_kernel<<<blocks, threads, 0, stream>>>(
         d_output, d_input, size
     );
+    CUDA_CHECK(cudaGetLastError());
     
     if (need_alloc_output) {
-        cudaMemcpy(output, d_output, size * sizeof(G1Projective), cudaMemcpyDeviceToHost);
-        cudaFree(d_output);
+        CUDA_CHECK(cudaMemcpyAsync(output, d_output, size * sizeof(G1Projective), cudaMemcpyDeviceToHost, stream));
+        CUDA_CHECK(cudaFree(d_output));
     }
     if (need_alloc_input) {
-        cudaFree((void*)d_input);
+        CUDA_CHECK(cudaFree((void*)d_input));
+    }
+    
+    if (!config->is_async) {
+        CUDA_CHECK(cudaStreamSynchronize(stream));
     }
     
     return eIcicleError::SUCCESS;

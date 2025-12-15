@@ -1,8 +1,9 @@
 /**
  * @file msm.cuh
  * @brief Multi-Scalar Multiplication (MSM) using Pippenger's bucket method
- * 
- * Production-ready implementation with:
+ *  with constant-time.
+ *
+ * Implementation:
  * - Conflict-free bucket accumulation (each bucket processed by single thread)
  * - Parallel point accumulation within buckets
  * - Optimal window size selection
@@ -276,8 +277,7 @@ __global__ void final_accumulation_kernel(
 
 /**
  * @brief MSM using Pippenger's bucket method with Sort-Reduce
- * 
- * Production-ready implementation with conflict-free accumulation.
+ * implementation with conflict-free accumulation.
  * 
  * This implementation uses a Sort-Reduce approach to mitigate timing side-channels:
  * 1. Compute bucket indices for all windows (constant-time).
@@ -335,54 +335,46 @@ cudaError_t msm_cuda(
     unsigned int *d_bucket_indices = nullptr, *d_packed_indices = nullptr;
     unsigned int *d_bucket_indices_sorted = nullptr, *d_packed_indices_sorted = nullptr;
     unsigned int *d_bucket_offsets = nullptr, *d_bucket_sizes = nullptr;
+
+    // Helper macro for error handling with cleanup
+    #define MSM_CUDA_CHECK(call) do { \
+        err = call; \
+        if (err != cudaSuccess) goto cleanup; \
+    } while(0)
     
     // Handle input data
     if (config.are_scalars_on_device) {
         d_scalars = const_cast<S*>(scalars);
     } else {
-        err = cudaMalloc(&d_scalars, msm_size * sizeof(S));
-        if (err != cudaSuccess) return err;
-        err = cudaMemcpyAsync(d_scalars, scalars, msm_size * sizeof(S), 
-                              cudaMemcpyHostToDevice, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_scalars, msm_size * sizeof(S)));
+        MSM_CUDA_CHECK(cudaMemcpyAsync(d_scalars, scalars, msm_size * sizeof(S), 
+                              cudaMemcpyHostToDevice, stream));
     }
     
     if (config.are_points_on_device) {
         d_bases = const_cast<A*>(bases);
     } else {
-        err = cudaMalloc(&d_bases, msm_size * sizeof(A));
-        if (err != cudaSuccess) goto cleanup;
-        err = cudaMemcpyAsync(d_bases, bases, msm_size * sizeof(A),
-                              cudaMemcpyHostToDevice, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_bases, msm_size * sizeof(A)));
+        MSM_CUDA_CHECK(cudaMemcpyAsync(d_bases, bases, msm_size * sizeof(A),
+                              cudaMemcpyHostToDevice, stream));
     }
     
-    err = cudaMalloc(&d_buckets, total_buckets * sizeof(G1Projective));
-    if (err != cudaSuccess) goto cleanup;
-    
-    err = cudaMalloc(&d_window_results, num_windows * sizeof(G1Projective));
-    if (err != cudaSuccess) goto cleanup;
+    MSM_CUDA_CHECK(cudaMalloc(&d_buckets, total_buckets * sizeof(G1Projective)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_window_results, num_windows * sizeof(G1Projective)));
     
     if (config.are_results_on_device) {
         d_result = result;
     } else {
-        err = cudaMalloc(&d_result, sizeof(P));
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_result, sizeof(P)));
     }
     
     // Allocate sorting buffers
-    err = cudaMalloc(&d_bucket_indices, num_contributions * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
-    err = cudaMalloc(&d_packed_indices, num_contributions * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
-    err = cudaMalloc(&d_bucket_indices_sorted, num_contributions * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
-    err = cudaMalloc(&d_packed_indices_sorted, num_contributions * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
-    err = cudaMalloc(&d_bucket_offsets, total_buckets * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
-    err = cudaMalloc(&d_bucket_sizes, total_buckets * sizeof(unsigned int));
-    if (err != cudaSuccess) goto cleanup;
+    MSM_CUDA_CHECK(cudaMalloc(&d_bucket_indices, num_contributions * sizeof(unsigned int)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_packed_indices, num_contributions * sizeof(unsigned int)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_bucket_indices_sorted, num_contributions * sizeof(unsigned int)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_packed_indices_sorted, num_contributions * sizeof(unsigned int)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_bucket_offsets, total_buckets * sizeof(unsigned int)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_bucket_sizes, total_buckets * sizeof(unsigned int)));
     
     // 1. Compute Indices
     {
@@ -391,8 +383,7 @@ cudaError_t msm_cuda(
         compute_bucket_indices_kernel<<<blocks, threads, 0, stream>>>(
             d_bucket_indices, d_packed_indices, d_scalars, msm_size, c, num_windows, num_buckets
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // 2. Histogram (Compute bucket sizes)
@@ -401,19 +392,17 @@ cudaError_t msm_cuda(
         size_t temp_storage_bytes = 0;
         
         // Initialize sizes to 0
-        cudaMemsetAsync(d_bucket_sizes, 0, total_buckets * sizeof(unsigned int), stream);
+        MSM_CUDA_CHECK(cudaMemsetAsync(d_bucket_sizes, 0, total_buckets * sizeof(unsigned int), stream));
         
-        cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
-            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream);
+        MSM_CUDA_CHECK(cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream));
             
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        MSM_CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
         
-        cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
-            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream);
+        MSM_CUDA_CHECK(cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream));
             
-        cudaFree(d_temp_storage);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaFree(d_temp_storage));
     }
     
     // 3. Scan (Compute bucket offsets)
@@ -421,17 +410,15 @@ cudaError_t msm_cuda(
         void* d_temp_storage = nullptr;
         size_t temp_storage_bytes = 0;
         
-        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-            d_bucket_sizes, d_bucket_offsets, total_buckets, stream);
+        MSM_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
+            d_bucket_sizes, d_bucket_offsets, total_buckets, stream));
             
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        MSM_CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
         
-        cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-            d_bucket_sizes, d_bucket_offsets, total_buckets, stream);
+        MSM_CUDA_CHECK(cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
+            d_bucket_sizes, d_bucket_offsets, total_buckets, stream));
             
-        cudaFree(d_temp_storage);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaFree(d_temp_storage));
     }
     
     // 4. Sort
@@ -439,21 +426,19 @@ cudaError_t msm_cuda(
         void* d_temp_storage = nullptr;
         size_t temp_storage_bytes = 0;
         
-        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+        MSM_CUDA_CHECK(cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
             d_bucket_indices, d_bucket_indices_sorted,
             d_packed_indices, d_packed_indices_sorted,
-            num_contributions, 0, 32, stream);
+            num_contributions, 0, 32, stream));
             
-        cudaMalloc(&d_temp_storage, temp_storage_bytes);
+        MSM_CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
         
-        cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
+        MSM_CUDA_CHECK(cub::DeviceRadixSort::SortPairs(d_temp_storage, temp_storage_bytes,
             d_bucket_indices, d_bucket_indices_sorted,
             d_packed_indices, d_packed_indices_sorted,
-            num_contributions, 0, 32, stream);
+            num_contributions, 0, 32, stream));
             
-        cudaFree(d_temp_storage);
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaFree(d_temp_storage));
     }
     
     // 5. Accumulate Sorted
@@ -469,8 +454,7 @@ cudaError_t msm_cuda(
             d_bucket_sizes,
             total_buckets
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // 6. Bucket Reduction
@@ -485,8 +469,7 @@ cudaError_t msm_cuda(
             num_buckets,
             num_buckets + 1 // buckets_per_window
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // Final accumulation
@@ -497,20 +480,18 @@ cudaError_t msm_cuda(
             num_windows,
             c
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // Copy result back if needed
     if (!config.are_results_on_device) {
-        err = cudaMemcpyAsync(result, d_result, sizeof(P),
-                              cudaMemcpyDeviceToHost, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMemcpyAsync(result, d_result, sizeof(P),
+                              cudaMemcpyDeviceToHost, stream));
     }
     
     // Synchronize if not async
     if (!config.is_async) {
-        err = cudaStreamSynchronize(stream);
+        MSM_CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 
 cleanup:
@@ -527,6 +508,7 @@ cleanup:
     if (!config.are_points_on_device && d_bases) cudaFree(d_bases);
     if (!config.are_results_on_device && d_result) cudaFree(d_result);
     
+    #undef MSM_CUDA_CHECK
     return err;
 }
 

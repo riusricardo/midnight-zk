@@ -222,38 +222,36 @@ inline cudaError_t g2_msm_cuda(
     G2Projective* d_result = nullptr;
     G2Projective* d_buckets = nullptr;
     G2Projective* d_window_results = nullptr;
+
+    // Helper macro for error handling with cleanup
+    #define MSM_CUDA_CHECK(call) do { \
+        err = call; \
+        if (err != cudaSuccess) goto cleanup; \
+    } while(0)
     
     if (config.are_scalars_on_device) {
         d_scalars = const_cast<Fr*>(scalars);
     } else {
-        err = cudaMalloc(&d_scalars, msm_size * sizeof(Fr));
-        if (err != cudaSuccess) return err;
-        err = cudaMemcpyAsync(d_scalars, scalars, msm_size * sizeof(Fr), 
-                              cudaMemcpyHostToDevice, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_scalars, msm_size * sizeof(Fr)));
+        MSM_CUDA_CHECK(cudaMemcpyAsync(d_scalars, scalars, msm_size * sizeof(Fr), 
+                              cudaMemcpyHostToDevice, stream));
     }
     
     if (config.are_points_on_device) {
         d_bases = const_cast<G2Affine*>(bases);
     } else {
-        err = cudaMalloc(&d_bases, msm_size * sizeof(G2Affine));
-        if (err != cudaSuccess) goto cleanup;
-        err = cudaMemcpyAsync(d_bases, bases, msm_size * sizeof(G2Affine),
-                              cudaMemcpyHostToDevice, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_bases, msm_size * sizeof(G2Affine)));
+        MSM_CUDA_CHECK(cudaMemcpyAsync(d_bases, bases, msm_size * sizeof(G2Affine),
+                              cudaMemcpyHostToDevice, stream));
     }
     
-    err = cudaMalloc(&d_buckets, total_buckets * sizeof(G2Projective));
-    if (err != cudaSuccess) goto cleanup;
-    
-    err = cudaMalloc(&d_window_results, num_windows * sizeof(G2Projective));
-    if (err != cudaSuccess) goto cleanup;
+    MSM_CUDA_CHECK(cudaMalloc(&d_buckets, total_buckets * sizeof(G2Projective)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_window_results, num_windows * sizeof(G2Projective)));
     
     if (config.are_results_on_device) {
         d_result = result;
     } else {
-        err = cudaMalloc(&d_result, sizeof(G2Projective));
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMalloc(&d_result, sizeof(G2Projective)));
     }
     
     // Bucket accumulation
@@ -274,8 +272,7 @@ inline cudaError_t g2_msm_cuda(
             num_windows,
             num_buckets
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // Bucket reduction
@@ -289,8 +286,7 @@ inline cudaError_t g2_msm_cuda(
             num_windows,
             num_buckets
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     // Final accumulation
@@ -301,18 +297,16 @@ inline cudaError_t g2_msm_cuda(
             num_windows,
             c
         );
-        err = cudaGetLastError();
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaGetLastError());
     }
     
     if (!config.are_results_on_device) {
-        err = cudaMemcpyAsync(result, d_result, sizeof(G2Projective),
-                              cudaMemcpyDeviceToHost, stream);
-        if (err != cudaSuccess) goto cleanup;
+        MSM_CUDA_CHECK(cudaMemcpyAsync(result, d_result, sizeof(G2Projective),
+                              cudaMemcpyDeviceToHost, stream));
     }
     
     if (!config.is_async) {
-        err = cudaStreamSynchronize(stream);
+        MSM_CUDA_CHECK(cudaStreamSynchronize(stream));
     }
 
 cleanup:
@@ -322,6 +316,7 @@ cleanup:
     if (!config.are_points_on_device && d_bases) cudaFree(d_bases);
     if (!config.are_results_on_device && d_result) cudaFree(d_result);
     
+    #undef MSM_CUDA_CHECK
     return err;
 }
 

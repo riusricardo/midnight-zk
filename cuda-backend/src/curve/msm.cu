@@ -1,6 +1,6 @@
 /**
  * @file msm.cu
- * @brief MSM implementation with production-ready optimizations
+ * @brief MSM implementation
  */
 
 #include "msm.cuh"
