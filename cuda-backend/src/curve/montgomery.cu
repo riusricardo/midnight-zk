@@ -1,8 +1,25 @@
 /**
  * @file montgomery.cu
- * @brief Montgomery form conversion utilities
+ * @brief Montgomery Form Conversion Utilities
  * 
- * Provides kernels for converting between standard and Montgomery representation.
+ * Provides kernels and API functions for converting between standard and
+ * Montgomery representation for field elements and curve points.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * This file is self-contained with its own kernels because CUDA static libraries
+ * require kernels to be defined in the same compilation unit that calls them.
+ * 
+ * Note: curve_backend.cu has similar G1 Projective Montgomery kernels - this is
+ * intentional duplication required by CUDA's linking model, not a bug.
+ * 
+ * Kernels defined here:
+ * - fr_to_montgomery_kernel / fr_from_montgomery_kernel (scalar field)
+ * - fq_to_montgomery_kernel / fq_from_montgomery_kernel (base field)
+ * - g1_affine_to/from_montgomery_kernel (G1 affine points)
+ * - g1_projective_to/from_montgomery_kernel (G1 projective points)
+ * 
+ * Montgomery form: a_mont = a * R mod p (where R = 2^256 for Fr, 2^384 for Fq)
  */
 
 #include "field.cuh"

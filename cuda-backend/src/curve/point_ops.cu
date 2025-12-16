@@ -1,8 +1,23 @@
 /**
  * @file point_ops.cu
- * @brief Point operations for BLS12-381 G1 and G2
+ * @brief Batch Point Operations for BLS12-381 G1 and G2
  * 
- * This file contains batch point operations and conversion utilities.
+ * Provides batch operations on elliptic curve points for efficient parallel processing.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * All kernels are defined in this file and called from this file only (self-contained).
+ * This is required by CUDA's static library linking model.
+ * 
+ * Operations provided:
+ * - Batch affine ↔ projective conversion
+ * - Batch point addition
+ * - Batch point doubling
+ * - Batch point negation
+ * - Batch scalar multiplication
+ * 
+ * Performance note: These kernels use naive per-element operations.
+ * For MSM, use the specialized Pippenger implementation in msm.cu.
  */
 
 #include "point.cuh"

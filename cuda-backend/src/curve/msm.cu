@@ -1,6 +1,28 @@
 /**
  * @file msm.cu
- * @brief MSM implementation
+ * @brief Multi-Scalar Multiplication (MSM) - Template Instantiation
+ * 
+ * This file provides template instantiation for MSM and non-template helpers.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * MSM kernels are defined in msm.cuh as templates. This is an exception to the
+ * "kernels in same .cu file" rule because:
+ * 
+ * 1. MSM kernels are templates parameterized by curve type (G1, G2)
+ * 2. Template kernels in headers get instantiated in each including .cu file
+ * 3. This file explicitly instantiates the G1 version
+ * 
+ * The msm.cuh header contains:
+ * - compute_bucket_indices_kernel: Decompose scalars into bucket indices
+ * - accumulate_sorted_kernel: Sort-Reduce accumulation (constant-time, secure)
+ * - parallel_bucket_reduction_kernel: Reduce bucket sums
+ * - final_accumulation_kernel: Combine window results
+ * 
+ * SECURITY:
+ * =========
+ * MSM uses Sort-Reduce pattern for constant-time bucket accumulation.
+ * This prevents timing side-channels that could leak scalar information.
  */
 
 #include "msm.cuh"

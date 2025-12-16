@@ -48,17 +48,16 @@ endif()
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 
 # Source files for field library
+# Note: ntt.cu was removed (all kernels were dead code, actual implementation is in field_backend.cu)
 set(FIELD_SOURCES
     src/params.cu
     src/field/vec_ops.cu
-    src/field/ntt.cu
     src/field/field_backend.cu
 )
 
 # Source files for curve library  
-# Note: src/params.cu provides device constants, shared with field library
+# Note: params.cu is already in field library, don't duplicate
 set(CURVE_SOURCES
-    src/params.cu
     src/curve/point_ops.cu
     src/curve/msm.cu
     src/curve/ecntt.cu
@@ -74,8 +73,8 @@ if(CUB_FOUND)
     message(STATUS "CUB found, enabling optimized MSM kernels")
 endif()
 
-# Field library
-add_library(icicle_backend_cuda_field_bls12_381 SHARED ${FIELD_SOURCES})
+# Field library - use STATIC for proper CUDA device code linking
+add_library(icicle_backend_cuda_field_bls12_381 STATIC ${FIELD_SOURCES})
 target_link_libraries(icicle_backend_cuda_field_bls12_381 
     ${CUDA_RUNTIME_LIB}
     $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
@@ -91,8 +90,8 @@ set_target_properties(icicle_backend_cuda_field_bls12_381 PROPERTIES
     INSTALL_RPATH "$ORIGIN"
 )
 
-# Curve library
-add_library(icicle_backend_cuda_curve_bls12_381 SHARED ${CURVE_SOURCES})
+# Curve library - use STATIC for proper CUDA device code linking
+add_library(icicle_backend_cuda_curve_bls12_381 STATIC ${CURVE_SOURCES})
 target_link_libraries(icicle_backend_cuda_curve_bls12_381 
     icicle_backend_cuda_field_bls12_381
     ${CUDA_RUNTIME_LIB}
@@ -121,7 +120,6 @@ enable_testing()
 
 add_executable(test_backend 
     tests/test_backend.cu
-    src/params.cu  # Need device constants for separable compilation
 )
 target_link_libraries(test_backend 
     icicle_backend_cuda_curve_bls12_381
@@ -140,7 +138,6 @@ add_test(NAME backend_tests COMMAND test_backend)
 # Comprehensive test suite with profiling
 add_executable(test_vectors
     tests/test_vectors.cu
-    src/params.cu
 )
 target_link_libraries(test_vectors
     icicle_backend_cuda_curve_bls12_381
@@ -155,3 +152,37 @@ set_target_properties(test_vectors PROPERTIES
 )
 
 add_test(NAME vector_tests COMMAND test_vectors)
+
+# Custom NTT Test
+add_executable(test_ntt_custom
+    tests/test_ntt_custom.cu
+)
+target_link_libraries(test_ntt_custom
+    icicle_backend_cuda_curve_bls12_381
+    icicle_backend_cuda_field_bls12_381
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+)
+set_target_properties(test_ntt_custom PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
+)
+
+add_test(NAME ntt_custom_tests COMMAND test_ntt_custom)
+
+# NTT Debug Test
+add_executable(test_ntt_debug
+    tests/test_ntt_debug.cu
+)
+target_link_libraries(test_ntt_debug
+    icicle_backend_cuda_curve_bls12_381
+    icicle_backend_cuda_field_bls12_381
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+)
+set_target_properties(test_ntt_debug PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
+)

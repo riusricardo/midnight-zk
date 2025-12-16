@@ -1,19 +1,40 @@
 /**
  * @file msm.cuh
- * @brief Multi-Scalar Multiplication (MSM) using Pippenger's bucket method
- *  with constant-time.
- *
- * Implementation:
- * - Conflict-free bucket accumulation (each bucket processed by single thread)
- * - Parallel point accumulation within buckets
- * - Optimal window size selection
- * - Signed digit representation for bucket reduction
+ * @brief Multi-Scalar Multiplication (MSM) - Pippenger's Algorithm
  * 
- * Algorithm:
- * 1. Split scalars into windows of size c bits
- * 2. Each bucket is handled by one block - threads scan all points
- * 3. Triangle sum for weighted bucket summation
- * 4. Combine windows with doublings
+ * Computes: R = Σᵢ sᵢ × Pᵢ for scalars s and points P
+ * 
+ * ARCHITECTURE:
+ * =============
+ * MSM kernels are templates defined in this header. This is an exception to
+ * the "kernels in .cu files" rule because MSM is parameterized by curve type.
+ * Template instantiation happens in msm.cu.
+ * 
+ * ALGORITHM (Pippenger's Bucket Method):
+ * ======================================
+ * 1. Decompose scalars into windows of c bits each
+ * 2. For each window, accumulate points into 2^c buckets
+ * 3. Compute weighted sum: Σⱼ j × bucket[j] (triangle sum)
+ * 4. Combine windows: R = Σ 2^(c*w) × window_sum[w]
+ * 
+ * SECURITY (Constant-Time Implementation):
+ * ========================================
+ * Uses Sort-Reduce pattern for bucket accumulation:
+ * - Sort (bucket_idx, point) pairs by bucket
+ * - Reduce consecutive points for same bucket
+ * This prevents timing side-channels that could leak scalar information.
+ * 
+ * PERFORMANCE:
+ * ============
+ * - Optimal c selected based on MSM size (larger MSM → larger window)
+ * - Signed digit representation for smaller bucket count
+ * - CUB library for efficient parallel sorting
+ * 
+ * Kernels:
+ * - compute_bucket_indices_kernel: Decompose scalars into bucket indices
+ * - accumulate_sorted_kernel: Sort-Reduce bucket accumulation
+ * - parallel_bucket_reduction_kernel: Compute weighted bucket sums
+ * - final_accumulation_kernel: Combine window results
  */
 
 #pragma once
