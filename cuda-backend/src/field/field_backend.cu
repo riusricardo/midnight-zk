@@ -1500,3 +1500,44 @@ template eIcicleError init_domain_cuda<Fr>(const Fr&, const NTTInitDomainConfig&
 template eIcicleError release_domain_cuda<Fr>();
 
 } // namespace ntt
+
+// =============================================================================
+// Icicle-Compatible C API Exports
+// =============================================================================
+
+extern "C" {
+
+eIcicleError bls12_381_ntt_cuda(
+    const bls12_381::Fr* input,
+    int size,
+    NTTDir dir,
+    const NTTConfig* config,
+    bls12_381::Fr* output)
+{
+    return ntt::ntt_cuda<bls12_381::Fr>(input, size, dir, *config, output);
+}
+
+eIcicleError bls12_381_ntt_init_domain_cuda(
+    const bls12_381::Fr* root_of_unity,
+    const NTTInitDomainConfig* config)
+{
+    return ntt::init_domain_cuda<bls12_381::Fr>(*root_of_unity, *config);
+}
+
+eIcicleError bls12_381_ntt_release_domain_cuda()
+{
+    return ntt::release_domain_cuda<bls12_381::Fr>();
+}
+
+eIcicleError bls12_381_coset_ntt_cuda(
+    const bls12_381::Fr* input,
+    int size,
+    NTTDir dir,
+    const bls12_381::Fr* coset_gen,
+    const NTTConfig* config,
+    bls12_381::Fr* output)
+{
+    return ntt::coset_ntt_cuda<bls12_381::Fr>(input, size, dir, *coset_gen, *config, output);
+}
+
+} // extern "C"
