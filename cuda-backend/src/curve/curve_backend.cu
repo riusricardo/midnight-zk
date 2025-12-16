@@ -26,7 +26,7 @@
 
 #include "field.cuh"
 #include "point.cuh"
-#include "msm_g2.cuh"
+#include "msm_fwd.cuh"  // Use forward declarations for templated MSM
 #include "icicle_types.cuh"
 
 // MSM declarations - defined in msm.cu
@@ -112,6 +112,11 @@ eIcicleError bls12_381_g1_msm_cuda(
 
 /**
  * @brief G2 MSM entry point
+ * 
+ * Now uses the same templated MSM implementation as G1, ensuring:
+ * - Constant-time Sort-Reduce algorithm (security)
+ * - Consistent behavior across G1 and G2
+ * - Proper Fq2 field arithmetic via point_add, point_double overloads
  */
 eIcicleError bls12_381_g2_msm_cuda(
     const Fr* scalars,
@@ -120,7 +125,9 @@ eIcicleError bls12_381_g2_msm_cuda(
     const MSMConfig* config,
     G2Projective* result
 ) {
-    cudaError_t err = msm_g2::g2_msm_cuda(scalars, bases, msm_size, *config, result);
+    cudaError_t err = msm::msm_cuda<Fr, G2Affine, G2Projective>(
+        scalars, bases, msm_size, *config, result
+    );
     return (err == cudaSuccess) ? eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
 }
 

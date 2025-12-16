@@ -26,14 +26,22 @@ cudaError_t msm_cuda(
     P* result
 );
 
-// Explicit instantiation declaration for BLS12-381 G1
-// This tells the compiler the instantiation exists elsewhere (in msm.cu)
+// Explicit instantiation declarations for BLS12-381 G1 and G2
+// These tell the compiler the instantiations exist elsewhere (in msm.cu)
 extern template cudaError_t msm_cuda<bls12_381::Fr, bls12_381::G1Affine, bls12_381::G1Projective>(
     const bls12_381::Fr* scalars,
     const bls12_381::G1Affine* bases,
     int msm_size,
     const MSMConfig& config,
     bls12_381::G1Projective* result
+);
+
+extern template cudaError_t msm_cuda<bls12_381::Fr, bls12_381::G2Affine, bls12_381::G2Projective>(
+    const bls12_381::Fr* scalars,
+    const bls12_381::G2Affine* bases,
+    int msm_size,
+    const MSMConfig& config,
+    bls12_381::G2Projective* result
 );
 
 } // namespace msm

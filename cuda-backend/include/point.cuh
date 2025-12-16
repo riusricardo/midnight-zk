@@ -642,19 +642,27 @@ __device__ __forceinline__ void g2_double(G2Projective& result, const G2Projecti
     fq2_add(t3_2, t3, t3);
     fq2_add(t3, t3_2, t3);
     
+    // Compute all outputs to temporaries first (for in-place safety)
+    Fq2 new_X, new_Y, new_Z;
+    
     // X3 = t3^2 - 2*t1
-    fq2_sqr(result.X, t3);
-    fq2_sub(result.X, result.X, t1);
-    fq2_sub(result.X, result.X, t1);
+    fq2_sqr(new_X, t3);
+    fq2_sub(new_X, new_X, t1);
+    fq2_sub(new_X, new_X, t1);
     
     // Y3 = t3 * (t1 - X3) - t2
-    fq2_sub(t0, t1, result.X);
-    fq2_mul(result.Y, t3, t0);
-    fq2_sub(result.Y, result.Y, t2);
+    fq2_sub(t0, t1, new_X);
+    fq2_mul(new_Y, t3, t0);
+    fq2_sub(new_Y, new_Y, t2);
     
-    // Z3 = 2 * Y * Z
-    fq2_mul(result.Z, p.Y, p.Z);
-    fq2_add(result.Z, result.Z, result.Z);
+    // Z3 = 2 * Y * Z (must use original p.Y and p.Z!)
+    fq2_mul(new_Z, p.Y, p.Z);
+    fq2_add(new_Z, new_Z, new_Z);
+    
+    // Now write to result
+    result.X = new_X;
+    result.Y = new_Y;
+    result.Z = new_Z;
 }
 
 /**
@@ -719,25 +727,39 @@ __device__ __forceinline__ void g2_add(G2Projective& result, const G2Projective&
     // V = U1 * I
     fq2_mul(v, u1, i);
     
+    // Save values that will be needed after we start writing to result
+    // (for in-place safety)
+    Fq2 saved_Z1 = p.Z;
+    Fq2 saved_Z2 = q.Z;
+    Fq2 saved_S1 = s1;
+    
+    // Compute to temporaries
+    Fq2 new_X, new_Y, new_Z;
+    
     // X3 = r^2 - J - 2*V
-    fq2_sqr(result.X, r);
-    fq2_sub(result.X, result.X, j);
-    fq2_sub(result.X, result.X, v);
-    fq2_sub(result.X, result.X, v);
+    fq2_sqr(new_X, r);
+    fq2_sub(new_X, new_X, j);
+    fq2_sub(new_X, new_X, v);
+    fq2_sub(new_X, new_X, v);
     
     // Y3 = r * (V - X3) - 2*S1*J
-    fq2_sub(v, v, result.X);
-    fq2_mul(result.Y, r, v);
-    fq2_mul(s1, s1, j);
-    fq2_add(s1, s1, s1);
-    fq2_sub(result.Y, result.Y, s1);
+    fq2_sub(v, v, new_X);
+    fq2_mul(new_Y, r, v);
+    fq2_mul(saved_S1, saved_S1, j);
+    fq2_add(saved_S1, saved_S1, saved_S1);
+    fq2_sub(new_Y, new_Y, saved_S1);
     
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
-    fq2_add(result.Z, p.Z, q.Z);
-    fq2_sqr(result.Z, result.Z);
-    fq2_sub(result.Z, result.Z, z1z1);
-    fq2_sub(result.Z, result.Z, z2z2);
-    fq2_mul(result.Z, result.Z, h);
+    fq2_add(new_Z, saved_Z1, saved_Z2);
+    fq2_sqr(new_Z, new_Z);
+    fq2_sub(new_Z, new_Z, z1z1);
+    fq2_sub(new_Z, new_Z, z2z2);
+    fq2_mul(new_Z, new_Z, h);
+    
+    // Write results
+    result.X = new_X;
+    result.Y = new_Y;
+    result.Z = new_Z;
 }
 
 /**
@@ -798,25 +820,37 @@ __device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Proje
     // V = X1 * I
     fq2_mul(v, p.X, i);
     
+    // Save p.Y and p.Z before we potentially overwrite them (for in-place safety)
+    Fq2 saved_Y = p.Y;
+    Fq2 saved_Z = p.Z;
+    
+    // Compute to temporaries for in-place safety
+    Fq2 new_X, new_Y, new_Z;
+    
     // X3 = r^2 - J - 2*V
-    fq2_sqr(result.X, r);
-    fq2_sub(result.X, result.X, j);
-    fq2_sub(result.X, result.X, v);
-    fq2_sub(result.X, result.X, v);
+    fq2_sqr(new_X, r);
+    fq2_sub(new_X, new_X, j);
+    fq2_sub(new_X, new_X, v);
+    fq2_sub(new_X, new_X, v);
     
     // Y3 = r * (V - X3) - 2*Y1*J
     Fq2 t;
-    fq2_sub(t, v, result.X);
-    fq2_mul(result.Y, r, t);
-    fq2_mul(t, p.Y, j);
+    fq2_sub(t, v, new_X);
+    fq2_mul(new_Y, r, t);
+    fq2_mul(t, saved_Y, j);
     fq2_add(t, t, t);
-    fq2_sub(result.Y, result.Y, t);
+    fq2_sub(new_Y, new_Y, t);
     
     // Z3 = (Z1 + H)^2 - Z1Z1 - HH
-    fq2_add(result.Z, p.Z, h);
-    fq2_sqr(result.Z, result.Z);
-    fq2_sub(result.Z, result.Z, z1z1);
-    fq2_sub(result.Z, result.Z, hh);
+    fq2_add(new_Z, saved_Z, h);
+    fq2_sqr(new_Z, new_Z);
+    fq2_sub(new_Z, new_Z, z1z1);
+    fq2_sub(new_Z, new_Z, hh);
+    
+    // Write results
+    result.X = new_X;
+    result.Y = new_Y;
+    result.Z = new_Z;
 }
 
 /**

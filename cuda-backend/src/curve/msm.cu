@@ -87,6 +87,15 @@ template cudaError_t msm_cuda<Fr, G1Affine, G1Projective>(
     G1Projective* result
 );
 
+// Template instantiation for G2
+template cudaError_t msm_cuda<Fr, G2Affine, G2Projective>(
+    const Fr* scalars,
+    const G2Affine* bases,
+    int msm_size,
+    const MSMConfig& config,
+    G2Projective* result
+);
+
 } // namespace msm
 
 // =============================================================================
