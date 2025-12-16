@@ -54,11 +54,15 @@ __device__ void ecntt_butterfly(
     G1Projective base = p1;
     
     Fr scalar = omega;
-    for (int i = 0; i < 255; i++) {
+    // Process all 256 bits for safety (top bits will be 0 for properly reduced scalars)
+    for (int i = 0; i < 256; i++) {
         if ((scalar.limbs[i / 64] >> (i % 64)) & 1) {
             g1_add(temp, temp, base);
         }
-        g1_double(base, base);
+        // Don't double after processing the last bit
+        if (i < 255) {
+            g1_double(base, base);
+        }
     }
     
     // p0' = p0 + temp
@@ -127,9 +131,10 @@ __global__ void ecntt_bit_reverse_kernel(
 }
 
 /**
- * @brief Forward EC-NTT
+ * @brief Forward EC-NTT with error handling
+ * @return cudaSuccess on success, error code on failure
  */
-void ecntt_forward(
+cudaError_t ecntt_forward(
     G1Projective* d_data,
     const Fr* d_twiddles,
     int size,
@@ -139,15 +144,29 @@ void ecntt_forward(
     int log_size = 0;
     while ((1 << log_size) < size) log_size++;
     
+    cudaError_t err;
+    
     // Bit reversal
     G1Projective* d_temp;
-    cudaMalloc(&d_temp, size * sizeof(G1Projective));
+    err = cudaMalloc(&d_temp, size * sizeof(G1Projective));
+    if (err != cudaSuccess) return err;
     
     int blocks = (size + threads - 1) / threads;
     ecntt_bit_reverse_kernel<<<blocks, threads, 0, stream>>>(
         d_temp, d_data, size, log_size
     );
-    cudaMemcpy(d_data, d_temp, size * sizeof(G1Projective), cudaMemcpyDeviceToDevice);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        cudaFree(d_temp);
+        return err;
+    }
+    
+    err = cudaMemcpyAsync(d_data, d_temp, size * sizeof(G1Projective), 
+                          cudaMemcpyDeviceToDevice, stream);
+    if (err != cudaSuccess) {
+        cudaFree(d_temp);
+        return err;
+    }
     cudaFree(d_temp);
     
     // Butterfly stages
@@ -162,14 +181,21 @@ void ecntt_forward(
             d_data, d_twiddles, size, step, half_step
         );
         
-        cudaStreamSynchronize(stream);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+        
+        err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) return err;
     }
+    
+    return cudaSuccess;
 }
 
 /**
- * @brief Inverse EC-NTT
+ * @brief Inverse EC-NTT with error handling
+ * @return cudaSuccess on success, error code on failure
  */
-void ecntt_inverse(
+cudaError_t ecntt_inverse(
     G1Projective* d_data,
     const Fr* d_inv_twiddles,
     const Fr& inv_size,
@@ -179,6 +205,8 @@ void ecntt_inverse(
     const int threads = 256;
     int log_size = 0;
     while ((1 << log_size) < size) log_size++;
+    
+    cudaError_t err;
     
     // Similar to forward, but with inverse twiddles and final scaling
     // Butterfly stages in reverse order
@@ -193,22 +221,39 @@ void ecntt_inverse(
             d_data, d_inv_twiddles, size, step, half_step
         );
         
-        cudaStreamSynchronize(stream);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) return err;
+        
+        err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) return err;
     }
     
     // Bit reversal
     G1Projective* d_temp;
-    cudaMalloc(&d_temp, size * sizeof(G1Projective));
+    err = cudaMalloc(&d_temp, size * sizeof(G1Projective));
+    if (err != cudaSuccess) return err;
     
     int blocks = (size + threads - 1) / threads;
     ecntt_bit_reverse_kernel<<<blocks, threads, 0, stream>>>(
         d_temp, d_data, size, log_size
     );
-    cudaMemcpy(d_data, d_temp, size * sizeof(G1Projective), cudaMemcpyDeviceToDevice);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        cudaFree(d_temp);
+        return err;
+    }
+    
+    err = cudaMemcpyAsync(d_data, d_temp, size * sizeof(G1Projective), 
+                          cudaMemcpyDeviceToDevice, stream);
+    if (err != cudaSuccess) {
+        cudaFree(d_temp);
+        return err;
+    }
     cudaFree(d_temp);
     
     // Final scaling by 1/n would require scalar multiplication
     // This is handled by the caller
+    return cudaSuccess;
 }
 
 } // namespace ecntt
@@ -271,22 +316,35 @@ eIcicleError ecntt_impl(
         return eIcicleError::INVALID_ARGUMENT;
     }
     
+    // Validate domain is fully initialized
+    if (!domain->twiddles || !domain->inv_twiddles) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     // Perform EC-NTT
+    cudaError_t err;
     if (direction == NTTDir::kForward) {
-        ecntt::ecntt_forward(
+        err = ecntt::ecntt_forward(
             d_data,
             domain->twiddles,
             size,
             stream
         );
     } else {
-        ecntt::ecntt_inverse(
+        err = ecntt::ecntt_inverse(
             d_data,
             domain->inv_twiddles,
             domain->domain_size_inv,
             size,
             stream
         );
+    }
+    
+    if (err != cudaSuccess) {
+        if (need_alloc || (input != output && config.are_inputs_on_device)) {
+            cudaFree(d_data);
+        }
+        return eIcicleError::UNKNOWN_ERROR;
     }
     
     // Copy result
