@@ -467,6 +467,11 @@ eIcicleError ntt_forward_impl(
         return eIcicleError::INVALID_ARGUMENT;
     }
     
+    // Validate domain is fully initialized (twiddles allocated)
+    if (!domain->twiddles || !domain->inv_twiddles) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     // Allocate working buffer
     F* d_data = nullptr;
     bool need_alloc = !config.are_inputs_on_device;
@@ -486,7 +491,23 @@ eIcicleError ntt_forward_impl(
     // =========================================================================
     // OPTIMIZATION: Use shared memory kernel for small NTTs (size <= 1024)
     // =========================================================================
+    
+    // First, check if shared memory is available for small NTT optimization
+    bool use_shared_mem = false;
     if (size <= 1024) {
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        
+        size_t shared_mem_size = size * sizeof(F);
+        // Use shared memory only if it fits in device limits
+        if (shared_mem_size <= prop.sharedMemPerBlock) {
+            use_shared_mem = true;
+        }
+    }
+    
+    if (use_shared_mem) {
         // Shared memory approach: single kernel does bit-reversal + all butterflies
         size_t shared_mem_size = size * sizeof(F);
         ntt_shared_memory_kernel<<<1, size, shared_mem_size>>>(
@@ -577,6 +598,11 @@ eIcicleError ntt_inverse_impl(
         return eIcicleError::INVALID_ARGUMENT;
     }
     
+    // Validate domain is fully initialized (twiddles allocated)
+    if (!domain->twiddles || !domain->inv_twiddles) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     // Allocate working buffer
     F* d_data = nullptr;
     bool need_alloc = !config.are_inputs_on_device;
@@ -596,7 +622,23 @@ eIcicleError ntt_inverse_impl(
     // =========================================================================
     // OPTIMIZATION: Use shared memory kernel for small NTTs (size <= 1024)
     // =========================================================================
+    
+    // First, check if shared memory is available for small NTT optimization
+    bool use_shared_mem = false;
     if (size <= 1024) {
+        int device;
+        cudaGetDevice(&device);
+        cudaDeviceProp prop;
+        cudaGetDeviceProperties(&prop, device);
+        
+        size_t shared_mem_size = size * sizeof(F);
+        // Use shared memory only if it fits in device limits
+        if (shared_mem_size <= prop.sharedMemPerBlock) {
+            use_shared_mem = true;
+        }
+    }
+    
+    if (use_shared_mem) {
         // Shared memory approach: single kernel does all butterflies + bit-reversal + scaling
         size_t shared_mem_size = size * sizeof(F);
         intt_shared_memory_kernel<<<1, size, shared_mem_size>>>(
@@ -745,7 +787,23 @@ eIcicleError coset_ntt_cuda_impl(
         }
         
         coset_mul_kernel<<<blocks, threads, 0, stream>>>(d_temp, d_input, coset_gen, size);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        
+        // Check for kernel launch failure
+        cudaError_t kernelErr = cudaGetLastError();
+        if (kernelErr != cudaSuccess) {
+            if (need_alloc_input) cudaFree(d_input);
+            cudaFree(d_temp);
+            cudaFree(d_coset_gen);
+            return eIcicleError::UNKNOWN_ERROR;
+        }
+        
+        kernelErr = cudaStreamSynchronize(stream);
+        if (kernelErr != cudaSuccess) {
+            if (need_alloc_input) cudaFree(d_input);
+            cudaFree(d_temp);
+            cudaFree(d_coset_gen);
+            return eIcicleError::UNKNOWN_ERROR;
+        }
         
         if (need_alloc_input) {
             CUDA_CHECK(cudaFree(d_input));
@@ -796,7 +854,23 @@ eIcicleError coset_ntt_cuda_impl(
         }
         
         coset_div_kernel<<<blocks, threads, 0, stream>>>(d_output, d_temp, coset_gen_inv, size);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
+        
+        // Check for kernel launch failure
+        cudaError_t kernelErr = cudaGetLastError();
+        if (kernelErr != cudaSuccess) {
+            if (need_alloc_output) cudaFree(d_output);
+            cudaFree(d_temp);
+            cudaFree(d_coset_gen);
+            return eIcicleError::UNKNOWN_ERROR;
+        }
+        
+        kernelErr = cudaStreamSynchronize(stream);
+        if (kernelErr != cudaSuccess) {
+            if (need_alloc_output) cudaFree(d_output);
+            cudaFree(d_temp);
+            cudaFree(d_coset_gen);
+            return eIcicleError::UNKNOWN_ERROR;
+        }
         
         if (need_alloc_output) {
             CUDA_CHECK(cudaMemcpy(output, d_output, size * sizeof(F), cudaMemcpyDeviceToHost));
@@ -969,19 +1043,34 @@ template eIcicleError init_domain_cuda_impl<Fr>(const Fr&, const NTTInitDomainCo
 
 /**
  * @brief Release NTT domain resources
+ * 
+ * Uses a two-phase approach to avoid holding mutex during CUDA operations:
+ * 1. Collect pointers under lock and clear the domain array
+ * 2. Free resources outside the lock to avoid blocking other threads
  */
 template<typename F>
 eIcicleError release_domain_cuda_impl() {
-    std::lock_guard<std::mutex> lock(Domain<F>::domains_mutex);
+    // Collect pointers under lock, then free outside lock
+    Domain<F>* to_delete[MAX_LOG_DOMAIN_SIZE] = {nullptr};
+    
+    {
+        std::lock_guard<std::mutex> lock(Domain<F>::domains_mutex);
+        for (int i = 0; i < MAX_LOG_DOMAIN_SIZE; i++) {
+            to_delete[i] = Domain<F>::domains[i];
+            Domain<F>::domains[i] = nullptr;
+        }
+    }
+    
+    // Free outside lock to avoid blocking other threads
     for (int i = 0; i < MAX_LOG_DOMAIN_SIZE; i++) {
-        Domain<F>* domain = Domain<F>::domains[i];
+        Domain<F>* domain = to_delete[i];
         if (domain) {
             if (domain->twiddles) CUDA_CHECK(cudaFree(domain->twiddles));
             if (domain->inv_twiddles) CUDA_CHECK(cudaFree(domain->inv_twiddles));
             delete domain;
-            Domain<F>::domains[i] = nullptr;
         }
     }
+    
     return eIcicleError::SUCCESS;
 }
 

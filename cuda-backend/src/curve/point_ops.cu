@@ -136,12 +136,15 @@ __global__ void batch_scalar_mul_g1_kernel(
     G1Projective base = G1Projective::from_affine(bases[idx]);
     Fr scalar = scalars[idx];
     
-    // Double-and-add
-    for (int i = 0; i < 255; i++) {
+    // Double-and-add: process all 256 bits for safety
+    for (int i = 0; i < 256; i++) {
         if ((scalar.limbs[i / 64] >> (i % 64)) & 1) {
             g1_add(result, result, base);
         }
-        g1_double(base, base);
+        // Don't double after processing the last bit
+        if (i < 255) {
+            g1_double(base, base);
+        }
     }
     
     output[idx] = result;

@@ -244,7 +244,8 @@ struct alignas(64) Projective {
     BaseField Z;
 
     __host__ __device__ Projective() : X(), Y(), Z() {
-        // Identity point has Z = 0
+        // Proper identity point is (0:1:0) in projective coordinates
+        Y = BaseField::one();
     }
 
     __host__ __device__ Projective(const BaseField& x, const BaseField& y, const BaseField& z)
