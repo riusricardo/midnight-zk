@@ -202,6 +202,7 @@ cudaError_t ecntt_inverse(
     int size,
     cudaStream_t stream
 ) {
+    (void)inv_size;  // TODO: Apply size normalization after inverse NTT
     const int threads = 256;
     int log_size = 0;
     while ((1 << log_size) < size) log_size++;
@@ -401,6 +402,7 @@ eIcicleError ecntt_g2_cuda(
     bls12_381::G2Projective* output
 ) {
     // G2 ECNTT not yet implemented
+    (void)input; (void)size; (void)direction; (void)config; (void)output;
     return eIcicleError::INVALID_ARGUMENT;
 }
 

@@ -186,3 +186,21 @@ set_target_properties(test_ntt_debug PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
 )
+
+# Roundtrip and Stress Tests
+add_executable(test_roundtrip
+    tests/test_roundtrip.cu
+)
+target_link_libraries(test_roundtrip
+    icicle_backend_cuda_curve_bls12_381
+    icicle_backend_cuda_field_bls12_381
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+)
+set_target_properties(test_roundtrip PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
+)
+
+add_test(NAME roundtrip_tests COMMAND test_roundtrip)
