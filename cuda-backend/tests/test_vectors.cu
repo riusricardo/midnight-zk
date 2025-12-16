@@ -1493,8 +1493,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     
+    // Use current device instead of hardcoding 0
+    int device;
+    cudaGetDevice(&device);
     cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, 0);
+    cudaGetDeviceProperties(&prop, device);
     std::cout << "GPU: " << prop.name << std::endl;
     std::cout << "Compute: " << prop.major << "." << prop.minor << std::endl;
     std::cout << "SM Count: " << prop.multiProcessorCount << std::endl;
