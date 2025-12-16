@@ -328,8 +328,6 @@ __device__ __forceinline__ G2Projective g2_affine_to_projective(const G2Affine& 
  * 
  * Uses the doubling formula for short Weierstrass curves y^2 = x^3 + b
  * Cost: 1S + 5M + 8add
- * 
- * NOTE: This function is safe for in-place operation (result == p)
  */
 __device__ __forceinline__ void g1_double(G1Projective& result, const G1Projective& p) {
     if (p.is_identity()) {
@@ -359,34 +357,25 @@ __device__ __forceinline__ void g1_double(G1Projective& result, const G1Projecti
     field_add(t3_2, t3, t3);
     field_add(t3, t3_2, t3);
     
-    // Compute all outputs to temporaries first (for in-place safety)
-    Fq new_X, new_Y, new_Z;
-    
     // X3 = t3^2 - 2*t1
-    field_sqr(new_X, t3);
-    field_sub(new_X, new_X, t1);
-    field_sub(new_X, new_X, t1);
+    field_sqr(result.X, t3);
+    field_sub(result.X, result.X, t1);
+    field_sub(result.X, result.X, t1);
     
     // Y3 = t3 * (t1 - X3) - t2
-    field_sub(t0, t1, new_X);
-    field_mul(new_Y, t3, t0);
-    field_sub(new_Y, new_Y, t2);
+    field_sub(t0, t1, result.X);
+    field_mul(result.Y, t3, t0);
+    field_sub(result.Y, result.Y, t2);
     
-    // Z3 = 2 * Y * Z (must use original p.Y and p.Z!)
-    field_mul(new_Z, p.Y, p.Z);
-    field_add(new_Z, new_Z, new_Z);
-    
-    // Now write to result
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Z3 = 2 * Y * Z
+    field_mul(result.Z, p.Y, p.Z);
+    field_add(result.Z, result.Z, result.Z);
 }
 
 /**
  * @brief Add two projective points: result = P + Q
  * 
  * Uses complete addition formula.
- * NOTE: This function is safe for in-place operation (result == p or result == q)
  */
 __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective& p, const G1Projective& q) {
     if (p.is_identity()) {
@@ -448,46 +437,31 @@ __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective&
     // V = U1 * I
     field_mul(v, u1, i);
     
-    // Save values that will be needed after we start writing to result
-    // (for in-place safety)
-    Fq saved_Z1 = p.Z;
-    Fq saved_Z2 = q.Z;
-    Fq saved_S1 = s1;
-    
-    // Compute to temporaries
-    Fq new_X, new_Y, new_Z;
-    
     // X3 = r^2 - J - 2*V
-    field_sqr(new_X, r);
-    field_sub(new_X, new_X, j);
-    field_sub(new_X, new_X, v);
-    field_sub(new_X, new_X, v);
+    field_sqr(result.X, r);
+    field_sub(result.X, result.X, j);
+    field_sub(result.X, result.X, v);
+    field_sub(result.X, result.X, v);
     
     // Y3 = r * (V - X3) - 2*S1*J
-    field_sub(v, v, new_X);
-    field_mul(new_Y, r, v);
-    field_mul(saved_S1, saved_S1, j);
-    field_add(saved_S1, saved_S1, saved_S1);
-    field_sub(new_Y, new_Y, saved_S1);
+    field_sub(v, v, result.X);
+    field_mul(result.Y, r, v);
+    field_mul(s1, s1, j);
+    field_add(s1, s1, s1);
+    field_sub(result.Y, result.Y, s1);
     
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
-    field_add(new_Z, saved_Z1, saved_Z2);
-    field_sqr(new_Z, new_Z);
-    field_sub(new_Z, new_Z, z1z1);
-    field_sub(new_Z, new_Z, z2z2);
-    field_mul(new_Z, new_Z, h);
-    
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    field_add(result.Z, p.Z, q.Z);
+    field_sqr(result.Z, result.Z);
+    field_sub(result.Z, result.Z, z1z1);
+    field_sub(result.Z, result.Z, z2z2);
+    field_mul(result.Z, result.Z, h);
 }
 
 /**
  * @brief Mixed addition: result = P + Q where Q is affine
  * 
  * More efficient than general addition when one point is affine.
- * NOTE: This function is safe for in-place operation (result == p)
  */
 __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Projective& p, const G1Affine& q) {
     if (p.is_identity()) {
@@ -544,37 +518,25 @@ __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Proje
     // V = X1 * I
     field_mul(v, p.X, i);
     
-    // Save p.Y before we potentially overwrite it (for in-place safety)
-    Fq saved_Y = p.Y;
-    Fq saved_Z = p.Z;
-    
-    // Compute to temporaries for in-place safety
-    Fq new_X, new_Y, new_Z;
-    
     // X3 = r^2 - J - 2*V
-    field_sqr(new_X, r);
-    field_sub(new_X, new_X, j);
-    field_sub(new_X, new_X, v);
-    field_sub(new_X, new_X, v);
+    field_sqr(result.X, r);
+    field_sub(result.X, result.X, j);
+    field_sub(result.X, result.X, v);
+    field_sub(result.X, result.X, v);
     
     // Y3 = r * (V - X3) - 2*Y1*J
     Fq t;
-    field_sub(t, v, new_X);
-    field_mul(new_Y, r, t);
-    field_mul(t, saved_Y, j);
+    field_sub(t, v, result.X);
+    field_mul(result.Y, r, t);
+    field_mul(t, p.Y, j);
     field_add(t, t, t);
-    field_sub(new_Y, new_Y, t);
+    field_sub(result.Y, result.Y, t);
     
     // Z3 = (Z1 + H)^2 - Z1Z1 - HH
-    field_add(new_Z, saved_Z, h);
-    field_sqr(new_Z, new_Z);
-    field_sub(new_Z, new_Z, z1z1);
-    field_sub(new_Z, new_Z, hh);
-    
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    field_add(result.Z, p.Z, h);
+    field_sqr(result.Z, result.Z);
+    field_sub(result.Z, result.Z, z1z1);
+    field_sub(result.Z, result.Z, hh);
 }
 
 /**
