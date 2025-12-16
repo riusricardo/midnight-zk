@@ -14,6 +14,16 @@
  * IMPORTANT: The type declarations here must produce the EXACT same
  * C++ mangled symbols as Icicle's core library. This means we need
  * to use the same namespaces, template names, and struct names.
+ * 
+ * G1 vs G2 REGISTRATION:
+ * ======================
+ * G1 and G2 require separate registration functions because they operate
+ * on different types:
+ * - G1: Uses Fq base field, G1Affine/G1Projective points
+ * - G2: Uses Fq2 extension field, G2Affine/G2Projective points
+ * 
+ * Icicle's dispatcher routes to the correct implementation based on
+ * the registered device type and curve type.
  */
 
 #pragma once
@@ -32,6 +42,7 @@ namespace bls12_381 {
     struct fp_config;  // Scalar field config
     struct fq_config;  // Base field config
     struct G1;         // G1 curve marker
+    struct G2;         // G2 curve marker
 }
 
 // Template declarations matching Icicle's templates
@@ -39,6 +50,9 @@ namespace bls12_381 {
 template<typename Config> class Field;
 template<typename BaseField> class Affine;
 template<typename BaseField, typename ScalarField, typename Gen> class Projective;
+
+// G2 extension field type (Fq2)
+template<typename BaseConfig, typename BaseField> class ComplexExtensionField;
 
 // =============================================================================
 // Registration Function Declarations
@@ -55,11 +69,21 @@ template<typename BaseField, typename ScalarField, typename Gen> class Projectiv
 
 namespace icicle {
 
-// Type aliases matching Icicle's internal types for BLS12-381
+// Type aliases matching Icicle's internal types for BLS12-381 G1
 using icicle_scalar_t = Field<bls12_381::fp_config>;
 using icicle_point_field_t = Field<bls12_381::fq_config>;
 using icicle_affine_t = Affine<icicle_point_field_t>;
 using icicle_projective_t = Projective<icicle_point_field_t, icicle_scalar_t, bls12_381::G1>;
+
+// Type aliases for G2 (uses Fq2 extension field)
+// Note: These may need adjustment based on actual Icicle symbol names
+using icicle_g2_field_t = ComplexExtensionField<bls12_381::fq_config, icicle_point_field_t>;
+using icicle_g2_affine_t = Affine<icicle_g2_field_t>;
+using icicle_g2_projective_t = Projective<icicle_g2_field_t, icicle_scalar_t, bls12_381::G2>;
+
+// =============================================================================
+// G1 MSM Registration
+// =============================================================================
 
 // MSM registration function types matching Icicle's exact signatures
 using MsmImpl = std::function<eIcicleError(
@@ -82,6 +106,31 @@ using MsmPreComputeImpl = std::function<eIcicleError(
 extern void register_msm(const std::string& deviceType, MsmImpl impl);
 extern void register_msm_precompute_bases(const std::string& deviceType, MsmPreComputeImpl impl);
 
+// =============================================================================
+// G2 MSM Registration
+// =============================================================================
+
+// G2 MSM registration function types
+using MsmG2Impl = std::function<eIcicleError(
+    const Device& device,
+    const icicle_scalar_t* scalars,
+    const icicle_g2_affine_t* bases,
+    int msm_size,
+    const MSMConfig& config,
+    icicle_g2_projective_t* results)>;
+
+using MsmG2PreComputeImpl = std::function<eIcicleError(
+    const Device& device,
+    const icicle_g2_affine_t* input_bases,
+    int bases_size,
+    const MSMConfig& config,
+    icicle_g2_affine_t* output_bases)>;
+
+// G2 registration functions (provided by libicicle_curve_bls12_381.so)
+// Note: These may need to match actual Icicle function names
+extern void register_msm_g2(const std::string& deviceType, MsmG2Impl impl);
+extern void register_msm_g2_precompute_bases(const std::string& deviceType, MsmG2PreComputeImpl impl);
+
 } // namespace icicle
 
 // =============================================================================
@@ -94,6 +143,7 @@ extern void register_msm_precompute_bases(const std::string& deviceType, MsmPreC
 #define ICICLE_CONCAT(a, b) ICICLE_CONCAT_INNER(a, b)
 #define ICICLE_UNIQUE(prefix) ICICLE_CONCAT(prefix, __COUNTER__)
 
+// G1 MSM Registration
 #define REGISTER_MSM_BACKEND(DEVICE_TYPE, FUNC)                    \
     namespace {                                                     \
         static bool ICICLE_UNIQUE(_reg_msm_) = []() -> bool {      \
@@ -109,3 +159,32 @@ extern void register_msm_precompute_bases(const std::string& deviceType, MsmPreC
             return true;                                            \
         }();                                                        \
     }
+
+// G2 MSM Registration
+// Note: These macros register G2 implementations. If Icicle doesn't
+// have G2 registration functions yet, comment these out and use
+// the G2 MSM through the C API directly.
+#ifdef ICICLE_HAS_G2_REGISTRATION
+#define REGISTER_MSM_G2_BACKEND(DEVICE_TYPE, FUNC)                 \
+    namespace {                                                     \
+        static bool ICICLE_UNIQUE(_reg_msm_g2_) = []() -> bool {   \
+            icicle::register_msm_g2(DEVICE_TYPE, FUNC);            \
+            return true;                                            \
+        }();                                                        \
+    }
+
+#define REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND(DEVICE_TYPE, FUNC) \
+    namespace {                                                      \
+        static bool ICICLE_UNIQUE(_reg_msm_g2_pre_) = []() -> bool { \
+            icicle::register_msm_g2_precompute_bases(DEVICE_TYPE, FUNC); \
+            return true;                                             \
+        }();                                                         \
+    }
+#else
+// Stub macros when Icicle doesn't have G2 registration
+// G2 MSM is still available through C API (bls12_381_g2_msm_cuda)
+#define REGISTER_MSM_G2_BACKEND(DEVICE_TYPE, FUNC) \
+    /* G2 Icicle registration disabled - use C API */
+#define REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND(DEVICE_TYPE, FUNC) \
+    /* G2 Icicle registration disabled - use C API */
+#endif

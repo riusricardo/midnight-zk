@@ -82,6 +82,49 @@ using namespace bls12_381;
 using namespace icicle;
 
 // =============================================================================
+// Generic Point Operation Dispatchers
+// =============================================================================
+// These allow the templated kernels to call the correct point operations
+// based on the point type (G1 or G2).
+//
+// IMPORTANT: G1 and G2 use different base fields:
+// - G1: Fq (381-bit prime field)
+// - G2: Fq2 = Fq[u]/(u²+1) (quadratic extension)
+//
+// Point sizes differ:
+// - G1Affine: 96 bytes, G1Projective: 144 bytes
+// - G2Affine: 192 bytes, G2Projective: 288 bytes
+//
+// Scalars (Fr) are the SAME for both curves.
+
+// --- Point Addition (Projective + Projective) ---
+__device__ __forceinline__ void point_add(G1Projective& result, const G1Projective& a, const G1Projective& b) {
+    g1_add(result, a, b);
+}
+
+__device__ __forceinline__ void point_add(G2Projective& result, const G2Projective& a, const G2Projective& b) {
+    g2_add(result, a, b);
+}
+
+// --- Mixed Addition (Projective + Affine) ---
+__device__ __forceinline__ void point_add_mixed(G1Projective& result, const G1Projective& a, const G1Affine& b) {
+    g1_add_mixed(result, a, b);
+}
+
+__device__ __forceinline__ void point_add_mixed(G2Projective& result, const G2Projective& a, const G2Affine& b) {
+    g2_add_mixed(result, a, b);
+}
+
+// --- Point Doubling ---
+__device__ __forceinline__ void point_double(G1Projective& result, const G1Projective& a) {
+    g1_double(result, a);
+}
+
+__device__ __forceinline__ void point_double(G2Projective& result, const G2Projective& a) {
+    g2_double(result, a);
+}
+
+// =============================================================================
 // MSM Configuration
 // =============================================================================
 
@@ -231,12 +274,17 @@ __global__ void compute_bucket_indices_kernel(
 }
 
 /**
- * @brief Conflict-free bucket accumulation after sorting
+ * @brief Conflict-free bucket accumulation after sorting (templated for G1/G2)
+ * 
+ * Template parameters:
+ * - A: Affine point type (G1Affine or G2Affine)
+ * - P: Projective point type (G1Projective or G2Projective)
  */
+template<typename A, typename P>
 __global__ void accumulate_sorted_kernel(
-    G1Projective* buckets,
+    P* buckets,
     const unsigned int* sorted_packed_indices,
-    const G1Affine* bases,
+    const A* bases,
     const unsigned int* bucket_offsets,
     const unsigned int* bucket_sizes,
     int total_buckets
@@ -248,11 +296,11 @@ __global__ void accumulate_sorted_kernel(
     unsigned int size = bucket_sizes[bucket_idx];
     
     if (size == 0) {
-        buckets[bucket_idx] = G1Projective::identity();
+        buckets[bucket_idx] = P::identity();
         return;
     }
     
-    G1Projective acc = G1Projective::identity();
+    P acc = P::identity();
     
     for (unsigned int i = 0; i < size; i++) {
         unsigned int idx = offset + i;
@@ -260,12 +308,13 @@ __global__ void accumulate_sorted_kernel(
         unsigned int point_idx = packed >> 1;
         unsigned int sign = packed & 1;
         
-        G1Affine base = bases[point_idx];
+        A base = bases[point_idx];
         if (sign) {
             base = base.neg();
         }
         
-        g1_add_mixed(acc, acc, base);
+        // Uses overloaded point_add_mixed for G1 or G2
+        point_add_mixed(acc, acc, base);
     }
     
     buckets[bucket_idx] = acc;
@@ -293,14 +342,18 @@ __global__ void histogram_atomic_kernel(
 }
 
 /**
- * @brief Parallel bucket reduction
+ * @brief Parallel bucket reduction (templated for G1/G2)
  * 
  * Runs one thread per window to perform the triangle summation.
  * Since num_buckets can be large (e.g. 2^16), we read directly from global memory.
+ * 
+ * Template parameters:
+ * - P: Projective point type (G1Projective or G2Projective)
  */
+template<typename P>
 __global__ void parallel_bucket_reduction_kernel(
-    G1Projective* window_results,
-    const G1Projective* buckets,
+    P* window_results,
+    const P* buckets,
     int num_windows,
     int num_buckets, // Excluding trash
     int buckets_per_window // Including trash
@@ -309,10 +362,10 @@ __global__ void parallel_bucket_reduction_kernel(
     if (window_idx >= num_windows) return;
     
     // Offset to this window's buckets
-    const G1Projective* window_buckets = buckets + window_idx * buckets_per_window;
+    const P* window_buckets = buckets + window_idx * buckets_per_window;
     
-    G1Projective running_sum = G1Projective::identity();
-    G1Projective window_sum = G1Projective::identity();
+    P running_sum = P::identity();
+    P window_sum = P::identity();
     
     // Triangle summation: sum_{i=1}^B i*B_i
     // Implemented as:
@@ -322,8 +375,9 @@ __global__ void parallel_bucket_reduction_kernel(
     // Note: bucket_idx i corresponds to value i+1
     
     for (int i = num_buckets - 1; i >= 0; i--) {
-        g1_add(running_sum, running_sum, window_buckets[i]);
-        g1_add(window_sum, window_sum, running_sum);
+        // Uses overloaded point_add for G1 or G2
+        point_add(running_sum, running_sum, window_buckets[i]);
+        point_add(window_sum, window_sum, running_sum);
     }
     
     window_results[window_idx] = window_sum;
@@ -335,25 +389,30 @@ __global__ void parallel_bucket_reduction_kernel(
 
 /**
  * @brief Combine window results: result = sum_{w} 2^{w*c} * window_result[w]
+ * 
+ * Template parameters:
+ * - P: Projective point type (G1Projective or G2Projective)
  */
+template<typename P>
 __global__ void final_accumulation_kernel(
-    G1Projective* result,
-    const G1Projective* window_results,
+    P* result,
+    const P* window_results,
     int num_windows,
     int c
 ) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     
-    G1Projective acc = window_results[num_windows - 1];
+    P acc = window_results[num_windows - 1];
     
     // Process windows from second-highest to lowest
     for (int w = num_windows - 2; w >= 0; w--) {
         // Double c times
         for (int i = 0; i < c; i++) {
-            g1_double(acc, acc);
+            // Uses overloaded point_double for G1 or G2
+            point_double(acc, acc);
         }
-        // Add window result
-        g1_add(acc, acc, window_results[w]);
+        // Add window result (uses overloaded point_add)
+        point_add(acc, acc, window_results[w]);
     }
     
     *result = acc;
@@ -416,8 +475,8 @@ cudaError_t msm_cuda(
     S* d_scalars = nullptr;
     A* d_bases = nullptr;
     P* d_result = nullptr;
-    G1Projective* d_buckets = nullptr;
-    G1Projective* d_window_results = nullptr;
+    P* d_buckets = nullptr;       // Use template P for bucket type
+    P* d_window_results = nullptr; // Use template P for window results
     
     // Sorting buffers
     unsigned int *d_bucket_indices = nullptr, *d_packed_indices = nullptr;
@@ -447,8 +506,8 @@ cudaError_t msm_cuda(
                               cudaMemcpyHostToDevice, stream));
     }
     
-    MSM_CUDA_CHECK(cudaMalloc(&d_buckets, total_buckets * sizeof(G1Projective)));
-    MSM_CUDA_CHECK(cudaMalloc(&d_window_results, num_windows * sizeof(G1Projective)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_buckets, total_buckets * sizeof(P)));
+    MSM_CUDA_CHECK(cudaMalloc(&d_window_results, num_windows * sizeof(P)));
     
     if (config.are_results_on_device) {
         d_result = result;
@@ -528,7 +587,8 @@ cudaError_t msm_cuda(
         int threads = 256;
         int blocks = (total_buckets + threads - 1) / threads;
         
-        accumulate_sorted_kernel<<<blocks, threads, 0, stream>>>(
+        // Template instantiation: A = Affine type, P = Projective type
+        accumulate_sorted_kernel<A, P><<<blocks, threads, 0, stream>>>(
             d_buckets,
             d_packed_indices_sorted,
             d_bases,
@@ -544,7 +604,8 @@ cudaError_t msm_cuda(
         int threads = min(num_windows, 256);
         int blocks = (num_windows + threads - 1) / threads;
         
-        parallel_bucket_reduction_kernel<<<blocks, threads, 0, stream>>>(
+        // Template instantiation: P = Projective type
+        parallel_bucket_reduction_kernel<P><<<blocks, threads, 0, stream>>>(
             d_window_results,
             d_buckets,
             num_windows,
@@ -556,7 +617,8 @@ cudaError_t msm_cuda(
     
     // Final accumulation
     {
-        final_accumulation_kernel<<<1, 1, 0, stream>>>(
+        // Template instantiation: P = Projective type
+        final_accumulation_kernel<P><<<1, 1, 0, stream>>>(
             d_result,
             d_window_results,
             num_windows,
