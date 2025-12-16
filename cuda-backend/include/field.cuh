@@ -1,9 +1,36 @@
 /**
  * @file field.cuh
- * @brief BLS12-381 Field element types and arithmetic
+ * @brief BLS12-381 Field Element Types and Arithmetic
  * 
  * Implements both Fq (base field, 381-bit) and Fr (scalar field, 255-bit)
  * using Montgomery representation for efficient modular arithmetic.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * This header defines:
+ * 
+ * 1. Field Configuration Traits (fp_config, fq_config):
+ *    - Constants as inline switch functions (CUDA device-compatible)
+ *    - Modulus, R, R², INV for Montgomery operations
+ * 
+ * 2. Field<Config> Template Class:
+ *    - Limb storage (4×64-bit for Fr, 6×64-bit for Fq)
+ *    - Montgomery arithmetic operators (+, -, *, inverse)
+ *    - Helper methods (one, zero, from_int)
+ * 
+ * 3. Inline __device__ Functions:
+ *    - Montgomery multiplication/reduction
+ *    - Field inversion via Fermat's little theorem
+ *    - Helper operations (neg, add, sub, mul)
+ * 
+ * Type Aliases:
+ * - Fr = Field<fp_config>: Scalar field (255-bit, for scalars/exponents)
+ * - Fq = Field<fq_config>: Base field (381-bit, for curve coordinates)
+ * 
+ * CUDA Compatibility:
+ * ===================
+ * All functions are marked __host__ __device__ for use on both CPU and GPU.
+ * Constants use switch statements instead of constexpr arrays for device compatibility.
  */
 
 #pragma once
@@ -25,21 +52,41 @@ struct fq_config;
 // Field configuration traits - using inline device functions for constants
 // =============================================================================
 
+// Use switch statements to avoid constexpr array issues in device code
 struct fp_config {
     static constexpr int LIMBS = FR_LIMBS_64;
     static constexpr int NBITS = 255;
     static constexpr uint64_t INV = FR_INV;
     
-    __device__ __forceinline__ static uint64_t modulus(int i) {
-        return FR_MODULUS[i];
+    // Use switch for device compatibility - each case is a compile-time constant
+    __host__ __device__ __forceinline__ static uint64_t modulus(int i) {
+        switch(i) {
+            case 0: return FR_MODULUS_L0;
+            case 1: return FR_MODULUS_L1;
+            case 2: return FR_MODULUS_L2;
+            case 3: return FR_MODULUS_L3;
+            default: return 0;
+        }
     }
     
-    __device__ __forceinline__ static uint64_t one(int i) {
-        return FR_ONE[i];
+    __host__ __device__ __forceinline__ static uint64_t one(int i) {
+        switch(i) {
+            case 0: return FR_ONE_L0;
+            case 1: return FR_ONE_L1;
+            case 2: return FR_ONE_L2;
+            case 3: return FR_ONE_L3;
+            default: return 0;
+        }
     }
     
-    __device__ __forceinline__ static uint64_t r2(int i) {
-        return FR_R2[i];
+    __host__ __device__ __forceinline__ static uint64_t r2(int i) {
+        switch(i) {
+            case 0: return FR_R2_L0;
+            case 1: return FR_R2_L1;
+            case 2: return FR_R2_L2;
+            case 3: return FR_R2_L3;
+            default: return 0;
+        }
     }
     
     __host__ static uint64_t modulus_host(int i) {
@@ -60,16 +107,40 @@ struct fq_config {
     static constexpr int NBITS = 381;
     static constexpr uint64_t INV = FQ_INV;
     
-    __device__ __forceinline__ static uint64_t modulus(int i) {
-        return FQ_MODULUS[i];
+    __host__ __device__ __forceinline__ static uint64_t modulus(int i) {
+        switch(i) {
+            case 0: return FQ_MODULUS_L0;
+            case 1: return FQ_MODULUS_L1;
+            case 2: return FQ_MODULUS_L2;
+            case 3: return FQ_MODULUS_L3;
+            case 4: return FQ_MODULUS_L4;
+            case 5: return FQ_MODULUS_L5;
+            default: return 0;
+        }
     }
     
-    __device__ __forceinline__ static uint64_t one(int i) {
-        return FQ_ONE[i];
+    __host__ __device__ __forceinline__ static uint64_t one(int i) {
+        switch(i) {
+            case 0: return FQ_ONE_L0;
+            case 1: return FQ_ONE_L1;
+            case 2: return FQ_ONE_L2;
+            case 3: return FQ_ONE_L3;
+            case 4: return FQ_ONE_L4;
+            case 5: return FQ_ONE_L5;
+            default: return 0;
+        }
     }
     
-    __device__ __forceinline__ static uint64_t r2(int i) {
-        return FQ_R2[i];
+    __host__ __device__ __forceinline__ static uint64_t r2(int i) {
+        switch(i) {
+            case 0: return FQ_R2_L0;
+            case 1: return FQ_R2_L1;
+            case 2: return FQ_R2_L2;
+            case 3: return FQ_R2_L3;
+            case 4: return FQ_R2_L4;
+            case 5: return FQ_R2_L5;
+            default: return 0;
+        }
     }
     
     __host__ static uint64_t modulus_host(int i) {

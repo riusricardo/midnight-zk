@@ -4,6 +4,20 @@
  * 
  * Applies NTT-like operations on elliptic curve points.
  * Used in multi-scalar multiplication and polynomial commitment schemes.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * All EC-NTT kernels are defined and called in this file (self-contained).
+ * 
+ * Unlike field NTT which uses field multiplication, EC-NTT uses:
+ * - Point addition instead of field addition
+ * - Scalar multiplication instead of field multiplication
+ * 
+ * Kernels defined here:
+ * - ecntt_butterfly_kernel: EC butterfly operation
+ * - ecntt_bit_reverse_kernel: Bit-reversal permutation for points
+ * 
+ * Use case: Accelerating polynomial commitment schemes like KZG.
  */
 
 #include "point.cuh"

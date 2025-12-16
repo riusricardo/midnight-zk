@@ -1,9 +1,25 @@
 /**
  * @file vec_ops.cu
- * @brief Vector operations for BLS12-381 scalar field
+ * @brief Vector Operations for BLS12-381 Scalar Field
  * 
- * This file provides vectorized field operations that are essential
- * for polynomial arithmetic in the prover.
+ * Provides vectorized field operations essential for polynomial arithmetic in ZK provers.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * All kernels are defined and called in this file (self-contained).
+ * This is required by CUDA's static library linking model.
+ * 
+ * Operations provided:
+ * - vec_add: Element-wise vector addition
+ * - vec_sub: Element-wise vector subtraction
+ * - vec_mul: Element-wise vector multiplication (Hadamard product)
+ * - scalar_vec_mul: Scalar-vector multiplication
+ * - vec_neg: Vector negation
+ * - vec_inv: Element-wise modular inversion
+ * - vec_sum: Parallel reduction to compute sum
+ * - inner_product: Parallel inner product
+ * 
+ * Performance: All operations use Montgomery form for efficient modular arithmetic.
  */
 
 #include "field.cuh"

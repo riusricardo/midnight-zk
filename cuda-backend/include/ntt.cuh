@@ -1,9 +1,25 @@
 /**
  * @file ntt.cuh
- * @brief Number Theoretic Transform (NTT) implementation
+ * @brief Number Theoretic Transform (NTT) - Header
  * 
- * Implements forward and inverse NTT over the BLS12-381 scalar field.
- * Uses Cooley-Tukey decimation-in-time algorithm.
+ * This header provides:
+ * - NTT Domain class for managing precomputed twiddle factors
+ * - API declarations for NTT functions (implementations in field_backend.cu)
+ * - Coset NTT helper kernels (template kernels used by coset operations)
+ * 
+ * ARCHITECTURE NOTE:
+ * ==================
+ * CUDA static libraries require kernels to be defined in the same compilation
+ * unit that calls them. Therefore:
+ * 
+ * - Core NTT kernels (bit-reverse, butterfly, scale) are defined in field_backend.cu
+ * - Only coset helper kernels are templates here (they get instantiated in field_backend.cu)
+ * - DO NOT add __global__ kernel implementations here unless they are templates
+ *   that will be instantiated by each .cu file that uses them
+ * 
+ * Algorithm: Cooley-Tukey decimation-in-time with optimizations:
+ * - Shared memory kernel for small sizes (≤ 1024)
+ * - Fused 2-stage butterfly for larger sizes (50% fewer kernel launches)
  */
 
 #pragma once
@@ -36,9 +52,9 @@ public:
     int log_size;
     size_t size;
     
-    // Global domain registry
-    static inline Domain* domains[MAX_LOG_DOMAIN_SIZE] = {nullptr};
-    static inline std::mutex domains_mutex;
+    // Global domain registry - declared extern, defined in field_backend.cu
+    static Domain* domains[MAX_LOG_DOMAIN_SIZE];
+    static std::mutex domains_mutex;
     
     __host__ Domain() : twiddles(nullptr), inv_twiddles(nullptr), 
                         log_size(0), size(0) {}
@@ -51,100 +67,20 @@ public:
     /**
      * @brief Get domain for given log size
      */
-    static Domain* get_domain(int log_size) {
-        if (log_size >= MAX_LOG_DOMAIN_SIZE) return nullptr;
-        std::lock_guard<std::mutex> lock(domains_mutex);
-        return domains[log_size];
-    }
+    static Domain* get_domain(int log_size);
+    
+    /**
+     * @brief Set domain for given log size
+     */
+    static void set_domain(int log_size, Domain* domain);
 };
 
 // =============================================================================
-// NTT Kernels
+// Coset NTT Helper Kernels (Template - instantiated in field_backend.cu)
 // =============================================================================
-
-/**
- * @brief Bit-reverse permutation kernel
- */
-template<typename F>
-__global__ void bit_reverse_kernel(
-    F* output,
-    const F* input,
-    int n,
-    int log_n
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    
-    if (idx >= n) return;
-    
-    // Compute bit-reversed index
-    unsigned int rev = 0;
-    unsigned int temp = idx;
-    for (int i = 0; i < log_n; i++) {
-        rev = (rev << 1) | (temp & 1);
-        temp >>= 1;
-    }
-    
-    output[rev] = input[idx];
-}
-
-/**
- * @brief Single butterfly stage kernel
- * 
- * Performs one stage of the Cooley-Tukey NTT butterfly.
- */
-template<typename F>
-__global__ void butterfly_kernel(
-    F* data,
-    const F* twiddles,
-    int n,
-    int m,           // Group size = 2^(stage+1)
-    int half_m       // Half group size = 2^stage
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int num_butterflies = n / 2;
-    
-    if (idx >= num_butterflies) return;
-    
-    // Determine which butterfly group and position within group
-    int group = idx / half_m;
-    int pos = idx % half_m;
-    
-    // Indices of the two elements in the butterfly
-    int i = group * m + pos;
-    int j = i + half_m;
-    
-    // Twiddle factor index
-    int twiddle_idx = pos * (n / m);
-    
-    F twiddle = twiddles[twiddle_idx];
-    
-    // Butterfly operation
-    F u = data[i];
-    F v = data[j] * twiddle;
-    
-    data[i] = u + v;
-    data[j] = u - v;
-}
-
-/**
- * @brief Scale by n^{-1} for inverse NTT
- */
-template<typename F>
-__global__ void scale_kernel(
-    F* output,
-    const F* input,
-    F scale_factor,
-    int n
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    
-    output[idx] = input[idx] * scale_factor;
-}
-
-// =============================================================================
-// Coset NTT Support
-// =============================================================================
+// NOTE: Core NTT kernels (bit-reverse, butterfly, scale, fused) are defined
+// directly in field_backend.cu to ensure proper CUDA device code linking.
+// Only these coset helpers need to be templates since coset_ntt_cuda uses them.
 
 /**
  * @brief Multiply by coset generator powers: output[i] = input[i] * g^i
@@ -180,7 +116,7 @@ __global__ void coset_mul_kernel(
 /**
  * @brief Divide by coset generator powers: output[i] = input[i] * g^(-i)
  * 
- * Used after inverse coset FFT
+ * Used after inverse coset FFT to convert back from coset domain
  */
 template<typename F>
 __global__ void coset_div_kernel(
@@ -208,51 +144,8 @@ __global__ void coset_div_kernel(
     output[idx] = input[idx] * power;
 }
 
-/**
- * @brief Precomputed coset powers for efficient coset multiplication
- */
-template<typename F>
-__global__ void precompute_coset_powers_kernel(
-    F* powers,
-    F coset_gen,
-    int n
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    
-    F power = F::one();
-    F base = coset_gen;
-    int exp = idx;
-    
-    while (exp > 0) {
-        if (exp & 1) {
-            power = power * base;
-        }
-        base = base * base;
-        exp >>= 1;
-    }
-    
-    powers[idx] = power;
-}
-
-/**
- * @brief Fast coset multiplication using precomputed powers
- */
-template<typename F>
-__global__ void coset_mul_precomputed_kernel(
-    F* output,
-    const F* input,
-    const F* coset_powers,
-    int n
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n) return;
-    
-    output[idx] = input[idx] * coset_powers[idx];
-}
-
 // =============================================================================
-// Main NTT Entry Point
+// NTT API Declarations (Implementations in field_backend.cu)
 // =============================================================================
 
 /**

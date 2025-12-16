@@ -1,8 +1,34 @@
 /**
  * @file point.cuh
- * @brief BLS12-381 Elliptic curve point types and operations
+ * @brief BLS12-381 Elliptic Curve Point Types and Operations
  * 
  * Implements G1 and G2 point operations in both affine and projective coordinates.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * This header defines:
+ * 
+ * 1. Point Types:
+ *    - Affine<F>: (x, y) coordinates, efficient storage
+ *    - Projective<F, S, Tag>: (X, Y, Z) coordinates, efficient arithmetic
+ *    - G1Affine/G1Projective: Points on E(Fq)
+ *    - G2Affine/G2Projective: Points on E'(Fq2)
+ * 
+ * 2. Extension Field:
+ *    - Fq2 = Fq[u]/(u² + 1): Complex extension for G2
+ *    - ComplexExtensionField template with arithmetic
+ * 
+ * 3. Inline __device__ Functions:
+ *    - Point addition (g1_add, g2_add)
+ *    - Point doubling (g1_double, g2_double)
+ *    - Point negation (g1_neg, g2_neg)
+ *    - Affine ↔ Projective conversion
+ * 
+ * Curve Equations:
+ * - G1: y² = x³ + 4 over Fq
+ * - G2: y² = x³ + 4(u + 1) over Fq2
+ * 
+ * All coordinate operations assume Montgomery form.
  */
 
 #pragma once

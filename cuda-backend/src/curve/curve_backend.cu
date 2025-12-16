@@ -1,8 +1,27 @@
 /**
  * @file curve_backend.cu
- * @brief Curve library exports for Icicle compatibility
+ * @brief Curve Library Main Entry Points and C API Exports
  * 
- * Full implementation of G1 and G2 operations.
+ * This file provides the main C API for curve operations exposed to external callers.
+ * 
+ * ARCHITECTURE:
+ * =============
+ * CUDA static libraries require kernels to be in the same compilation unit as callers.
+ * This file defines its own G1 Montgomery conversion kernels because:
+ * 1. The C API functions here call them directly
+ * 2. Cannot call kernels from montgomery.cu (different compilation unit)
+ * 
+ * Kernel duplication between files is INTENTIONAL and REQUIRED for CUDA linking.
+ * 
+ * This file handles:
+ * - MSM entry points (G1 and G2)
+ * - G1 Montgomery conversion API (for external use)
+ * 
+ * Other curve operations are in their respective files:
+ * - montgomery.cu: Field-level Montgomery conversions
+ * - point_ops.cu: Batch point arithmetic
+ * - msm.cu: MSM kernel instantiation
+ * - ecntt.cu: EC-NTT operations
  */
 
 #include "field.cuh"
