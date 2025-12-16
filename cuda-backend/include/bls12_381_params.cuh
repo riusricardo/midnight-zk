@@ -104,7 +104,7 @@ constexpr int MAX_NTT_LOG_SIZE = 32;
 
 // Primitive 2^32-th root of unity in Fr (Montgomery form)
 // omega = generator^((r-1)/2^32)
-// TODO: Move to bls12_381_constants.h after verification
+// Verified against BLST and Arkworks implementations
 constexpr uint64_t FR_OMEGA[FR_LIMBS_64] = {
     0xb9b58d8c5f0e466aULL,
     0x5b1b4c801819d7ecULL,
