@@ -95,3 +95,31 @@ fn test_executor_size_threshold() {
         Err(e) => println!("GPU MSM failed (expected on CPU-only systems): {}", e),
     }
 }
+#[test]
+fn test_gpu_msm_simple_identity() {
+    // Simple test: MSM with scalar=1 and generator should return generator
+    let generator = G1Affine::generator();
+    let scalars = vec![Scalar::ONE; 16384]; // Need >= 16384 to use GPU
+    let points = vec![generator; 16384];
+    
+    let executor = MsmExecutor::default();
+    
+    println!("Starting simple identity test with 16384 copies of (1 * G)");
+    
+    // This computes sum of 16384 generators = 16384 * G
+    let result = executor.execute(&scalars, &points);
+    
+    match result {
+        Ok(r) => {
+            // Expected: 16384 * G
+            let expected = G1Projective::from(generator) * Scalar::from(16384u64);
+            println!("Result: {:?}", r);
+            println!("Expected: {:?}", expected);
+            assert_eq!(r, expected, "MSM result should be 16384 * G");
+        }
+        Err(e) => {
+            println!("MSM failed: {}", e);
+            panic!("MSM should not fail");
+        }
+    }
+}

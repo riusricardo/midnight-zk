@@ -174,15 +174,6 @@ __global__ void compute_bucket_indices_kernel(
     // Number of buckets per window including trash bucket
     int buckets_per_window = num_buckets + 1;
     
-    // Signed window decomposition with carry propagation
-    // We use signed digits in range [-(2^(c-1)), 2^(c-1)]
-    // When window_val > num_buckets (2^(c-1)), we use negative form:
-    //   window_val = 2^c - bucket_val  =>  bucket_val = 2^c - window_val
-    // This means we're computing: -bucket_val * P + carry * 2^c * P
-    // The carry propagates to the next window.
-    
-    int carry = 0;
-    
     for (int w = 0; w < num_windows; w++) {
         int output_idx = idx * num_windows + w;
         
@@ -197,26 +188,21 @@ __global__ void compute_bucket_indices_kernel(
         }
         window &= ((1ULL << c) - 1);
         
-        // Add carry from previous window
-        int window_val = (int)window + carry;
-        carry = 0;
+        int window_val = (int)window;
         
         // Constant-time logic
         int sign = 0;
         int bucket_val = window_val;
         
         // Handle signed digit: if (window_val > num_buckets)
-        // Use negative representation: bucket_val = 2^c - window_val
-        // This generates a carry of +1 to the next window
         int is_large = (window_val > num_buckets);
         if (is_large) {
             bucket_val = (1 << c) - window_val;
             sign = 1;
-            carry = 1;  // Propagate carry to next window
         }
         
-        // Handle zero: if (bucket_val == 0 after adjustment)
-        int is_zero = (bucket_val == 0);
+        // Handle zero: if (window_val == 0)
+        int is_zero = (window_val == 0);
         if (is_zero) {
             bucket_val = num_buckets + 1; // Map to trash bucket
             sign = 0;
@@ -269,27 +255,6 @@ __global__ void accumulate_sorted_kernel(
     }
     
     buckets[bucket_idx] = acc;
-}
-
-/**
- * @brief Simple atomic histogram kernel
- * 
- * Each thread increments the count for its bucket index using atomics.
- * More reliable than CUB for large bucket counts.
- */
-__global__ void histogram_atomic_kernel(
-    unsigned int* histogram,
-    const unsigned int* indices,
-    int num_samples,
-    int num_buckets
-) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= num_samples) return;
-    
-    unsigned int bucket = indices[idx];
-    if (bucket < (unsigned int)num_buckets) {
-        atomicAdd(&histogram[bucket], 1);
-    }
 }
 
 /**
@@ -474,17 +439,23 @@ cudaError_t msm_cuda(
         MSM_CUDA_CHECK(cudaGetLastError());
     }
     
-    // 2. Histogram (Compute bucket sizes) using atomic kernel
+    // 2. Histogram (Compute bucket sizes)
     {
+        void* d_temp_storage = nullptr;
+        size_t temp_storage_bytes = 0;
+        
         // Initialize sizes to 0
         MSM_CUDA_CHECK(cudaMemsetAsync(d_bucket_sizes, 0, total_buckets * sizeof(unsigned int), stream));
         
-        // Use atomic histogram kernel instead of CUB (more reliable for large bucket counts)
-        int threads = 256;
-        int blocks = (num_contributions + threads - 1) / threads;
-        histogram_atomic_kernel<<<blocks, threads, 0, stream>>>(
-            d_bucket_sizes, d_bucket_indices, num_contributions, total_buckets);
-        MSM_CUDA_CHECK(cudaGetLastError());
+        MSM_CUDA_CHECK(cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream));
+            
+        MSM_CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+        
+        MSM_CUDA_CHECK(cub::DeviceHistogram::HistogramEven(d_temp_storage, temp_storage_bytes,
+            d_bucket_indices, d_bucket_sizes, total_buckets, 0, total_buckets, num_contributions, stream));
+            
+        MSM_CUDA_CHECK(cudaFree(d_temp_storage));
     }
     
     // 3. Scan (Compute bucket offsets)
