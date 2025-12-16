@@ -202,7 +202,11 @@ cudaError_t ecntt_inverse(
     int size,
     cudaStream_t stream
 ) {
-    (void)inv_size;  // TODO: Apply size normalization after inverse NTT
+    // TODO: Implement final scaling by inv_size
+    // NOTE: Size normalization (multiplying by 1/n) is not applied here.
+    // The caller is responsible for scaling the result if needed.
+    // This matches ICICLE's behavior where normalization is optional.
+    (void)inv_size;
     const int threads = 256;
     int log_size = 0;
     while ((1 << log_size) < size) log_size++;

@@ -114,58 +114,6 @@ __global__ void jacobian_to_standard_projective_kernel(G1Projective* result, int
 }
 
 // =============================================================================
-// Debug Kernels (temporary)
-// =============================================================================
-
-__global__ void debug_print_scalar(const Fr* scalar, const char* label) {
-    printf("[CUDA] %s: 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)scalar[0].limbs[0], (unsigned long long)scalar[0].limbs[1],
-           (unsigned long long)scalar[0].limbs[2], (unsigned long long)scalar[0].limbs[3]);
-}
-
-__global__ void debug_print_point(const G1Affine* point, const char* label) {
-    printf("[CUDA] %s.x: 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)point[0].x.limbs[0], (unsigned long long)point[0].x.limbs[1], 
-           (unsigned long long)point[0].x.limbs[2], (unsigned long long)point[0].x.limbs[3], 
-           (unsigned long long)point[0].x.limbs[4], (unsigned long long)point[0].x.limbs[5]);
-    printf("[CUDA] %s.y: 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)point[0].y.limbs[0], (unsigned long long)point[0].y.limbs[1], 
-           (unsigned long long)point[0].y.limbs[2], (unsigned long long)point[0].y.limbs[3], 
-           (unsigned long long)point[0].y.limbs[4], (unsigned long long)point[0].y.limbs[5]);
-}
-
-__global__ void debug_print_result(const G1Projective* point, const char* label) {
-    printf("[CUDA] %s.X: 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)point[0].X.limbs[0], (unsigned long long)point[0].X.limbs[1], 
-           (unsigned long long)point[0].X.limbs[2], (unsigned long long)point[0].X.limbs[3], 
-           (unsigned long long)point[0].X.limbs[4], (unsigned long long)point[0].X.limbs[5]);
-    printf("[CUDA] %s.Y: 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)point[0].Y.limbs[0], (unsigned long long)point[0].Y.limbs[1], 
-           (unsigned long long)point[0].Y.limbs[2], (unsigned long long)point[0].Y.limbs[3], 
-           (unsigned long long)point[0].Y.limbs[4], (unsigned long long)point[0].Y.limbs[5]);
-    printf("[CUDA] %s.Z: 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx 0x%016llx\n",
-           label,
-           (unsigned long long)point[0].Z.limbs[0], (unsigned long long)point[0].Z.limbs[1], 
-           (unsigned long long)point[0].Z.limbs[2], (unsigned long long)point[0].Z.limbs[3], 
-           (unsigned long long)point[0].Z.limbs[4], (unsigned long long)point[0].Z.limbs[5]);
-}
-
-// Print input BEFORE any conversion
-__global__ void debug_print_raw_input(const void* data, int size_bytes, const char* label) {
-    const unsigned char* bytes = (const unsigned char*)data;
-    printf("[CUDA] %s (first 32 bytes): ", label);
-    for (int i = 0; i < 32 && i < size_bytes; i++) {
-        printf("%02x", bytes[i]);
-    }
-    printf("\n");
-}
-
-// =============================================================================
 // MSM Implementation Wrapper  
 // =============================================================================
 
@@ -178,31 +126,6 @@ static icicle::eIcicleError msm_cuda_impl(
     icicle::icicle_projective_t* results)
 {
     (void)device; // Unused - we always use CUDA context
-    
-    // DEBUG: (disabled) Entry point logging
-    // printf("[CUDA MSM] Entry: msm_size=%d, scalars_on_device=%d, points_on_device=%d, results_on_device=%d\n",
-    //        msm_size, config.are_scalars_on_device, config.are_points_on_device, config.are_results_on_device);
-    // printf("[CUDA MSM] Montgomery flags: scalars_mont=%d, points_mont=%d\n",
-    //        config.are_scalars_montgomery_form, config.are_points_montgomery_form);
-    
-    // DEBUG: (disabled) Print raw input bytes (first scalar and first point)
-    // if (msm_size > 0) {
-    //     if (!config.are_scalars_on_device) {
-    //         const unsigned char* scalar_bytes = (const unsigned char*)scalars;
-    //         printf("[CUDA MSM] Raw scalar[0]: ");
-    //         for (int i = 0; i < 32; i++) printf("%02x", scalar_bytes[i]);
-    //         printf("\n");
-    //     }
-    //     if (!config.are_points_on_device) {
-    //         const unsigned char* point_bytes = (const unsigned char*)bases;
-    //         printf("[CUDA MSM] Raw point[0].x: ");
-    //         for (int i = 0; i < 48; i++) printf("%02x", point_bytes[i]);
-    //         printf("\n");
-    //         printf("[CUDA MSM] Raw point[0].y: ");
-    //         for (int i = 48; i < 96; i++) printf("%02x", point_bytes[i]);
-    //         printf("\n");
-    //     }
-    // }
     
     if (msm_size == 0) {
         return icicle::eIcicleError::SUCCESS;
@@ -288,11 +211,6 @@ static icicle::eIcicleError msm_cuda_impl(
     
     // --- Create modified config for internal MSM ---
     {
-        // DEBUG: (disabled) Print first scalar and point after conversion
-        // debug_print_scalar<<<1, 1, 0, stream>>>(d_scalars, "scalar[0] (standard form)");
-        // debug_print_point<<<1, 1, 0, stream>>>(d_bases, "bases[0] after to_mont");
-        // cudaStreamSynchronize(stream);
-        
         icicle::MSMConfig internal_cfg = config;
         internal_cfg.are_scalars_on_device = true;
         internal_cfg.are_points_on_device = true;
@@ -306,10 +224,6 @@ static icicle::eIcicleError msm_cuda_impl(
         err = msm::msm_cuda<Fr, G1Affine, G1Projective>(
             d_scalars, d_bases, msm_size, internal_cfg, d_result);
         if (err != cudaSuccess) goto cleanup;
-        
-        // DEBUG: (disabled) Print result after MSM (before conversion)
-        // debug_print_result<<<1, 1, 0, stream>>>(d_result, "result after MSM (Jacobian/mont)");
-        // cudaStreamSynchronize(stream);
     }
     
     // --- Convert result from Jacobian/Montgomery to Standard/Standard form ---
@@ -319,10 +233,6 @@ static icicle::eIcicleError msm_cuda_impl(
         jacobian_to_standard_projective_kernel<<<1, 1, 0, stream>>>(d_result, 1);
         err = cudaGetLastError();
         if (err != cudaSuccess) goto cleanup;
-        
-        // DEBUG: (disabled) Print result after conversion
-        // debug_print_result<<<1, 1, 0, stream>>>(d_result, "result after jacobian_to_standard");
-        // cudaStreamSynchronize(stream);
     }
     
     // --- Copy result back if needed ---
