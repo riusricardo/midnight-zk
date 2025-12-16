@@ -88,3 +88,44 @@ template cudaError_t msm_cuda<Fr, G1Affine, G1Projective>(
 );
 
 } // namespace msm
+
+// =============================================================================
+// Icicle-Compatible C API Exports
+// =============================================================================
+
+extern "C" {
+
+eIcicleError bls12_381_msm_cuda(
+    const bls12_381::Fr* scalars,
+    const bls12_381::G1Affine* bases,
+    int msm_size,
+    const MSMConfig* config,
+    bls12_381::G1Projective* result)
+{
+    cudaError_t err = msm::msm_cuda<bls12_381::Fr, bls12_381::G1Affine, bls12_381::G1Projective>(
+        scalars, bases, msm_size, *config, result
+    );
+    return (err == cudaSuccess) ? eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
+}
+
+eIcicleError bls12_381_msm_precompute_bases_cuda(
+    const bls12_381::G1Affine* input_bases,
+    int bases_size,
+    const MSMConfig* config,
+    bls12_381::G1Affine* output_bases)
+{
+    // Our MSM doesn't require precomputation - just copy if needed
+    if (output_bases != input_bases && config->are_points_on_device) {
+        cudaStream_t stream = config->stream;
+        cudaError_t err = cudaMemcpyAsync(
+            output_bases, input_bases, 
+            bases_size * sizeof(bls12_381::G1Affine),
+            cudaMemcpyDeviceToDevice, stream
+        );
+        if (!config->is_async) cudaStreamSynchronize(stream);
+        return (err == cudaSuccess) ? eIcicleError::SUCCESS : eIcicleError::COPY_FAILED;
+    }
+    return eIcicleError::SUCCESS;
+}
+
+} // extern "C"
