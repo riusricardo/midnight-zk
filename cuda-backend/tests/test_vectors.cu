@@ -1481,6 +1481,7 @@ bool test_g2_add_identity() {
 // =============================================================================
 
 int main(int argc, char** argv) {
+    (void)argc; (void)argv;  // Unused parameters
     std::cout << "========================================" << std::endl;
     std::cout << "BLS12-381 Production Test Suite" << std::endl;
     std::cout << "========================================" << std::endl;

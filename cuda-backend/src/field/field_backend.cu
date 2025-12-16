@@ -970,10 +970,180 @@ __global__ void square_field_kernel(Fr* result, const Fr* input, int iterations)
     *result = val;
 }
 
+// =============================================================================
+// Optimized Coset Power Computation
+// =============================================================================
+
 /**
- * @brief Kernel to precompute coset powers: g^i and g^(-i) for i in [0, n)
+ * @brief Phase 1: Compute powers within each block using chain multiplication
  * 
- * This avoids recomputing powers in each coset NTT call.
+ * Each block computes: g^(block_start), g^(block_start+1), ..., g^(block_start+block_size-1)
+ * Using chain multiplication: p[i] = p[i-1] * g (O(1) per element after first)
+ * 
+ * Block 0 computes g^0..g^(B-1) directly
+ * Other blocks initially compute g^0..g^(B-1), then Phase 2 multiplies by g^(block_start)
+ */
+__global__ void compute_coset_powers_phase1_kernel(
+    Fr* coset_powers,
+    Fr* coset_powers_inv,
+    Fr* block_bases,        // Output: g^(block_size) for each block (for Phase 2)
+    Fr* block_bases_inv,
+    Fr coset_gen,
+    Fr coset_gen_inv,
+    Fr one_val,
+    int size,
+    int block_size          // Elements per block (should equal blockDim.x)
+) {
+    extern __shared__ Fr shared[];
+    Fr* s_powers = shared;                    // [0, block_size)
+    Fr* s_powers_inv = shared + block_size;   // [block_size, 2*block_size)
+    
+    int tid = threadIdx.x;
+    int block_start = blockIdx.x * block_size;
+    int gid = block_start + tid;
+    
+    // Phase 1a: Thread 0 computes g^0 = 1, others wait
+    if (tid == 0) {
+        s_powers[0] = one_val;
+        s_powers_inv[0] = one_val;
+    }
+    __syncthreads();
+    
+    // Phase 1b: Chain multiplication within block
+    // Each thread i computes: s_powers[i] = s_powers[i-1] * g
+    // We do this in log2(block_size) parallel steps using doubling
+    // 
+    // Optimization: Use parallel prefix (scan) with multiplication
+    // Step k: element i gets multiplied by element (i - 2^k) if it exists
+    
+    // First, each thread loads its "local" power = g (or g_inv)
+    // We'll build up using inclusive scan
+    
+    // Simple approach: Thread 0 computes sequentially for small block (up to 256)
+    // This is actually faster than complex parallel scan for the field multiply cost
+    if (tid == 0) {
+        Fr pow = one_val;
+        Fr pow_inv = one_val;
+        s_powers[0] = pow;
+        s_powers_inv[0] = pow_inv;
+        
+        for (int i = 1; i < block_size && (block_start + i) < size; i++) {
+            pow = pow * coset_gen;
+            pow_inv = pow_inv * coset_gen_inv;
+            s_powers[i] = pow;
+            s_powers_inv[i] = pow_inv;
+        }
+        
+        // Store block's final power for Phase 2 (g^block_size = g^B)
+        if (block_size < size) {
+            block_bases[blockIdx.x] = pow * coset_gen;       // g^block_size
+            block_bases_inv[blockIdx.x] = pow_inv * coset_gen_inv;
+        }
+    }
+    __syncthreads();
+    
+    // Write to global memory
+    if (gid < size) {
+        coset_powers[gid] = s_powers[tid];
+        coset_powers_inv[gid] = s_powers_inv[tid];
+    }
+}
+
+/**
+ * @brief Phase 2: Multiply each block's powers by block base
+ * 
+ * Block k's elements should be: g^(k*B + i) = g^(k*B) * g^i
+ * Phase 1 computed g^i, now multiply by g^(k*B)
+ * 
+ * g^(k*B) is computed from block_bases using repeated squaring of g^B
+ */
+__global__ void compute_coset_powers_phase2_kernel(
+    Fr* coset_powers,
+    Fr* coset_powers_inv,
+    const Fr* block_bases,      // g^B precomputed
+    const Fr* block_bases_inv,
+    int size,
+    int block_size
+) {
+    int tid = threadIdx.x;
+    int block_idx = blockIdx.x;
+    int gid = block_idx * block_size + tid;
+    
+    if (gid >= size) return;
+    if (block_idx == 0) return;  // Block 0 already correct
+    
+    // Compute g^(block_idx * block_size) using repeated squaring
+    // base_power = (g^block_size)^block_idx
+    Fr base_power = block_bases[0];  // g^block_size
+    Fr base_power_inv = block_bases_inv[0];
+    
+    // Compute base^block_idx via repeated squaring
+    Fr acc = Fr::one();
+    Fr acc_inv = Fr::one();
+    int exp = block_idx;
+    
+    while (exp > 0) {
+        if (exp & 1) {
+            acc = acc * base_power;
+            acc_inv = acc_inv * base_power_inv;
+        }
+        base_power = base_power * base_power;
+        base_power_inv = base_power_inv * base_power_inv;
+        exp >>= 1;
+    }
+    
+    // Multiply this element's power by block base
+    coset_powers[gid] = coset_powers[gid] * acc;
+    coset_powers_inv[gid] = coset_powers_inv[gid] * acc_inv;
+}
+
+/**
+ * @brief Optimized kernel for small sizes - single block chain multiplication
+ * 
+ * For sizes <= 1024, use a single block with shared memory for maximum efficiency.
+ * Work complexity: O(n) instead of O(n log n)
+ */
+__global__ void compute_coset_powers_small_kernel(
+    Fr* coset_powers,
+    Fr* coset_powers_inv,
+    Fr coset_gen,
+    Fr coset_gen_inv,
+    Fr one_val,
+    int size
+) {
+    extern __shared__ Fr shared[];
+    Fr* s_powers = shared;
+    Fr* s_powers_inv = shared + size;
+    
+    int tid = threadIdx.x;
+    
+    // Thread 0 computes all powers sequentially using chain multiplication
+    // This is O(n) work with O(n) depth but runs on a single SM efficiently
+    if (tid == 0) {
+        Fr pow = one_val;
+        Fr pow_inv = one_val;
+        
+        for (int i = 0; i < size; i++) {
+            s_powers[i] = pow;
+            s_powers_inv[i] = pow_inv;
+            pow = pow * coset_gen;
+            pow_inv = pow_inv * coset_gen_inv;
+        }
+    }
+    __syncthreads();
+    
+    // Parallel copy to global memory
+    for (int i = tid; i < size; i += blockDim.x) {
+        coset_powers[i] = s_powers[i];
+        coset_powers_inv[i] = s_powers_inv[i];
+    }
+}
+
+/**
+ * @brief Legacy kernel for fallback (uses repeated squaring per thread)
+ * 
+ * Work complexity: O(n log n) but fully parallel
+ * Use for very large sizes where memory bandwidth dominates
  */
 __global__ void compute_coset_powers_kernel(
     Fr* coset_powers,
@@ -1119,6 +1289,11 @@ template eIcicleError init_domain_cuda_impl<Fr>(const Fr&, const NTTInitDomainCo
  * @param coset_gen The coset generator g
  * @param stream CUDA stream for async operations
  * @return eIcicleError::SUCCESS on success
+ * 
+ * OPTIMIZATION STRATEGY:
+ * - Small sizes (n <= 1024): Single-block chain multiplication, O(n) work
+ * - Medium sizes (1024 < n <= 2^20): Two-phase parallel algorithm, O(n + B*log(n/B)) work
+ * - Large sizes (n > 2^20): Parallel repeated squaring, O(n log n) work but fully parallel
  */
 template<typename F>
 eIcicleError init_coset_powers(Domain<F>* domain, const F& coset_gen, cudaStream_t stream) {
@@ -1151,15 +1326,67 @@ eIcicleError init_coset_powers(Domain<F>* domain, const F& coset_gen, cudaStream
     
     F h_one = F::one_host();
     
-    // Compute all coset powers in parallel
-    const int threads = 256;
-    const int blocks = (size + threads - 1) / threads;
-    compute_coset_powers_kernel<<<blocks, threads, 0, stream>>>(
-        domain->coset_powers, domain->coset_powers_inv,
-        coset_gen, coset_gen_inv, h_one, (int)size
-    );
+    // Choose optimal algorithm based on size
+    cudaError_t err;
     
-    cudaError_t err = cudaGetLastError();
+    if (size <= 1024) {
+        // SMALL: Single-block chain multiplication - O(n) work, minimal overhead
+        // Best for small domains where kernel launch overhead matters
+        size_t shared_mem = 2 * size * sizeof(F);  // powers + powers_inv
+        compute_coset_powers_small_kernel<<<1, 256, shared_mem, stream>>>(
+            domain->coset_powers, domain->coset_powers_inv,
+            coset_gen, coset_gen_inv, h_one, (int)size
+        );
+    }
+    else if (size <= (1 << 20)) {  // Up to 1M elements
+        // MEDIUM: Two-phase algorithm - O(n + B*log(n/B)) work
+        // Phase 1: Each block computes local powers via chain multiplication
+        // Phase 2: Multiply by block base powers
+        
+        const int block_size = 256;  // Elements per block
+        const int num_blocks = (size + block_size - 1) / block_size;
+        
+        // Allocate temporary storage for block bases
+        F* d_block_bases;
+        F* d_block_bases_inv;
+        CUDA_CHECK(cudaMalloc(&d_block_bases, num_blocks * sizeof(F)));
+        CUDA_CHECK(cudaMalloc(&d_block_bases_inv, num_blocks * sizeof(F)));
+        
+        // Phase 1: Compute local powers in each block
+        size_t shared_mem = 2 * block_size * sizeof(F);
+        compute_coset_powers_phase1_kernel<<<num_blocks, block_size, shared_mem, stream>>>(
+            domain->coset_powers, domain->coset_powers_inv,
+            d_block_bases, d_block_bases_inv,
+            coset_gen, coset_gen_inv, h_one, (int)size, block_size
+        );
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        
+        // Phase 2: Multiply each block's elements by block base power
+        // Block k needs to multiply by g^(k * block_size)
+        if (num_blocks > 1) {
+            compute_coset_powers_phase2_kernel<<<num_blocks, block_size, 0, stream>>>(
+                domain->coset_powers, domain->coset_powers_inv,
+                d_block_bases, d_block_bases_inv,
+                (int)size, block_size
+            );
+        }
+        
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+        CUDA_CHECK(cudaFree(d_block_bases));
+        CUDA_CHECK(cudaFree(d_block_bases_inv));
+    }
+    else {
+        // LARGE: Parallel repeated squaring - O(n log n) work but fully parallel
+        // Best for very large domains where parallelism compensates for extra work
+        const int threads = 256;
+        const int blocks = (size + threads - 1) / threads;
+        compute_coset_powers_kernel<<<blocks, threads, 0, stream>>>(
+            domain->coset_powers, domain->coset_powers_inv,
+            coset_gen, coset_gen_inv, h_one, (int)size
+        );
+    }
+    
+    err = cudaGetLastError();
     if (err != cudaSuccess) {
         cudaFree(domain->coset_powers);
         cudaFree(domain->coset_powers_inv);

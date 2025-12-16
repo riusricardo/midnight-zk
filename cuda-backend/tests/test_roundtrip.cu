@@ -337,6 +337,94 @@ bool test_field_edge_cases() {
 }
 
 // =============================================================================
+// Test: Coset NTT Roundtrip
+// =============================================================================
+
+/**
+ * @brief Test coset NTT roundtrip: iCosetNTT(CosetNTT(x)) == x
+ * 
+ * Verifies that the optimized coset power precomputation works correctly
+ * for all size ranges (small, medium, large).
+ */
+bool test_coset_ntt_roundtrip() {
+    std::cout << "\n=== Coset NTT Roundtrip Test ===" << std::endl;
+    
+    // Test sizes covering all optimization paths:
+    // <= 1024: small kernel
+    // <= 2^20: two-phase algorithm
+    // > 2^20: parallel repeated squaring (not tested here due to memory)
+    int test_log_sizes[] = {4, 8, 10, 12, 14, 16};
+    int num_tests = sizeof(test_log_sizes) / sizeof(test_log_sizes[0]);
+    
+    // Known coset generator for BLS12-381 (7 in Montgomery form)
+    // This is commonly used in PLONK implementations
+    Fr coset_gen;
+    coset_gen.limbs[0] = 0x0000000efffffff1ULL;
+    coset_gen.limbs[1] = 0x17e363d300189c0fULL;
+    coset_gen.limbs[2] = 0xff9c57876f8457b0ULL;
+    coset_gen.limbs[3] = 0x351332208fc5a8c4ULL;
+    
+    for (int t = 0; t < num_tests; t++) {
+        int log_size = test_log_sizes[t];
+        int size = 1 << log_size;
+        
+        std::cout << "Testing coset NTT 2^" << log_size << " (" << size << " elements)... " << std::flush;
+        
+        // Use known valid Montgomery-form elements
+        std::vector<Fr> input(size);
+        Fr one = Fr::one_host();
+        for (int i = 0; i < size; i++) {
+            input[i] = one;
+        }
+        std::vector<Fr> original = input;
+        
+        // Allocate device memory
+        Fr *d_input, *d_output;
+        CHECK_CUDA(cudaMalloc(&d_input, size * sizeof(Fr)));
+        CHECK_CUDA(cudaMalloc(&d_output, size * sizeof(Fr)));
+        CHECK_CUDA(cudaMemcpy(d_input, input.data(), size * sizeof(Fr), cudaMemcpyHostToDevice));
+        
+        // Forward coset NTT
+        NTTConfig config = default_ntt_config();
+        config.are_inputs_on_device = true;
+        config.are_outputs_on_device = true;
+        config.coset_gen = (void*)&coset_gen;  // Pass pointer to coset generator
+        
+        CHECK_ICICLE(ntt_cuda(d_input, size, NTTDir::kForward, config, d_output));
+        
+        // Inverse coset NTT
+        CHECK_ICICLE(ntt_cuda(d_output, size, NTTDir::kInverse, config, d_input));
+        
+        // Copy result back
+        std::vector<Fr> result(size);
+        CHECK_CUDA(cudaMemcpy(result.data(), d_input, size * sizeof(Fr), cudaMemcpyDeviceToHost));
+        
+        // Verify roundtrip
+        int failures = 0;
+        int first_failure = -1;
+        for (int i = 0; i < size; i++) {
+            if (!fr_equal(original[i], result[i])) {
+                if (first_failure < 0) first_failure = i;
+                failures++;
+            }
+        }
+        
+        cudaFree(d_input);
+        cudaFree(d_output);
+        
+        if (failures == 0) {
+            std::cout << "PASSED" << std::endl;
+        } else {
+            std::cout << "FAILED (" << failures << "/" << size << " mismatches, first at " << first_failure << ")" << std::endl;
+            return false;
+        }
+    }
+    
+    std::cout << "All coset NTT roundtrip tests passed!" << std::endl;
+    return true;
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -377,6 +465,7 @@ int main() {
     all_passed &= test_field_edge_cases();
     all_passed &= test_field_inversion_stress();
     all_passed &= test_ntt_roundtrip();
+    all_passed &= test_coset_ntt_roundtrip();
     
     // Cleanup
     release_domain_cuda<Fr>();

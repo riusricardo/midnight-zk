@@ -38,6 +38,13 @@
 #include "bls12_381_params.cuh"
 #include <cuda_runtime.h>
 
+// Portable unroll pragma - only effective in CUDA device code
+#ifdef __CUDA_ARCH__
+  #define UNROLL_LOOP _Pragma("unroll")
+#else
+  #define UNROLL_LOOP
+#endif
+
 namespace bls12_381 {
 
 // =============================================================================
@@ -167,7 +174,7 @@ struct alignas(32) Field {
 
     // Default constructor (zero)
     __host__ __device__ Field() {
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             limbs[i] = 0;
         }
@@ -175,7 +182,7 @@ struct alignas(32) Field {
 
     // Constructor from limbs array
     __host__ __device__ explicit Field(const uint64_t* data) {
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             limbs[i] = data[i];
         }
@@ -197,7 +204,7 @@ struct alignas(32) Field {
         Field result;
         #ifdef __CUDA_ARCH__
         // Device code path - read from GPU constant memory
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             result.limbs[i] = Config::one(i);
         }
@@ -228,7 +235,7 @@ struct alignas(32) Field {
     __host__ __device__ static Field R_SQUARED() {
         Field result;
         #ifdef __CUDA_ARCH__
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             result.limbs[i] = Config::r2(i);
         }
@@ -267,7 +274,7 @@ struct alignas(32) Field {
     // Check if zero
     __host__ __device__ bool is_zero() const {
         uint64_t acc = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             acc |= limbs[i];
         }
@@ -276,7 +283,7 @@ struct alignas(32) Field {
 
     // Equality
     __host__ __device__ bool operator==(const Field& other) const {
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             if (limbs[i] != other.limbs[i]) return false;
         }
@@ -311,7 +318,7 @@ __device__ __forceinline__ void field_add(
     uint64_t temp[LIMBS];
     
     // First addition: a + b
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t ai = a.limbs[i];
         uint64_t bi = b.limbs[i];
@@ -327,7 +334,7 @@ __device__ __forceinline__ void field_add(
     uint64_t borrow = 0;
     uint64_t reduced[LIMBS];
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t mod_i = Config::modulus(i);
         uint64_t t = temp[i];
@@ -342,7 +349,7 @@ __device__ __forceinline__ void field_add(
     // Select result based on whether subtraction underflowed
     bool use_reduced = (carry != 0) || (borrow == 0);
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         result.limbs[i] = use_reduced ? reduced[i] : temp[i];
     }
@@ -363,7 +370,7 @@ __device__ __forceinline__ void field_sub(
     uint64_t temp[LIMBS];
     
     // Subtraction: a - b
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t ai = a.limbs[i];
         uint64_t bi = b.limbs[i];
@@ -378,7 +385,7 @@ __device__ __forceinline__ void field_sub(
     // If borrow, add modulus
     if (borrow) {
         uint64_t carry = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 0; i < LIMBS; i++) {
             uint64_t t = temp[i];
             uint64_t mod_i = Config::modulus(i);
@@ -391,7 +398,7 @@ __device__ __forceinline__ void field_sub(
         }
     }
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         result.limbs[i] = temp[i];
     }
@@ -414,11 +421,11 @@ __device__ __forceinline__ void field_mul(
     
     uint64_t t[LIMBS + 2] = {0};
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         // Multiply accumulate: t += a[i] * b
         uint64_t carry = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int j = 0; j < LIMBS; j++) {
             // t[j] += a[i] * b[j] + carry
             unsigned __int128 prod = (unsigned __int128)a.limbs[i] * b.limbs[j];
@@ -434,7 +441,7 @@ __device__ __forceinline__ void field_mul(
         uint64_t m = t[0] * inv;
         
         carry = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int j = 0; j < LIMBS; j++) {
             unsigned __int128 prod = (unsigned __int128)m * Config::modulus(j);
             prod += t[j];
@@ -451,7 +458,7 @@ __device__ __forceinline__ void field_mul(
     uint64_t borrow = 0;
     uint64_t reduced[LIMBS];
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t mod_i = Config::modulus(i);
         uint64_t diff = t[i] - mod_i - borrow;
@@ -461,7 +468,7 @@ __device__ __forceinline__ void field_mul(
     
     bool use_reduced = (t[LIMBS] != 0) || (borrow == 0);
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         result.limbs[i] = use_reduced ? reduced[i] : t[i];
     }
@@ -484,10 +491,10 @@ __device__ __forceinline__ void field_sqr(
     uint64_t t[2 * LIMBS] = {0};
     
     // Step 1: Compute off-diagonal products (doubled due to symmetry)
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t carry = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int j = i + 1; j < LIMBS; j++) {
             unsigned __int128 prod = (unsigned __int128)a.limbs[i] * a.limbs[j];
             prod += t[i + j];
@@ -500,7 +507,7 @@ __device__ __forceinline__ void field_sqr(
     
     // Step 2: Double the off-diagonal terms
     uint64_t carry = 0;
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 1; i < 2 * LIMBS - 1; i++) {
         uint64_t val = t[i];
         t[i] = (val << 1) | carry;
@@ -510,7 +517,7 @@ __device__ __forceinline__ void field_sqr(
     
     // Step 3: Add diagonal terms a[i]^2
     carry = 0;
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         unsigned __int128 sq = (unsigned __int128)a.limbs[i] * a.limbs[i];
         sq += t[2 * i];
@@ -523,12 +530,12 @@ __device__ __forceinline__ void field_sqr(
     }
     
     // Step 4: Montgomery reduction
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t m = t[i] * inv;
         
         uint64_t red_carry = 0;
-        #pragma unroll
+        UNROLL_LOOP
         for (int j = 0; j < LIMBS; j++) {
             unsigned __int128 prod = (unsigned __int128)m * Config::modulus(j);
             prod += t[i + j];
@@ -549,7 +556,7 @@ __device__ __forceinline__ void field_sqr(
     uint64_t borrow = 0;
     uint64_t reduced[LIMBS];
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t mod_i = Config::modulus(i);
         uint64_t val = t[i + LIMBS];
@@ -563,7 +570,7 @@ __device__ __forceinline__ void field_sqr(
     
     bool use_reduced = (borrow == 0);
     
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         result.limbs[i] = use_reduced ? reduced[i] : t[i + LIMBS];
     }
@@ -585,7 +592,7 @@ __device__ __forceinline__ void field_neg(
     constexpr int LIMBS = Config::LIMBS;
     
     uint64_t borrow = 0;
-    #pragma unroll
+    UNROLL_LOOP
     for (int i = 0; i < LIMBS; i++) {
         uint64_t mod_i = Config::modulus(i);
         uint64_t diff = mod_i - a.limbs[i] - borrow;
@@ -673,7 +680,7 @@ __device__ void field_inv(
         exp[0] = mod_0 - 2;
         borrow = (mod_0 < 2) ? 1 : 0;
         
-        #pragma unroll
+        UNROLL_LOOP
         for (int i = 1; i < LIMBS; i++) {
             uint64_t mod_i = Config::modulus(i);
             exp[i] = mod_i - borrow;
