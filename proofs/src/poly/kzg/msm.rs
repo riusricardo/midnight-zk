@@ -1,4 +1,7 @@
-use std::{any::TypeId, fmt::Debug, sync::OnceLock};
+use std::{any::TypeId, fmt::Debug};
+
+#[cfg(feature = "gpu")]
+use std::sync::OnceLock;
 
 use ff::Field;
 use group::Group;
@@ -79,6 +82,9 @@ pub fn init_gpu_backend() -> Option<std::time::Duration> {
 }
 
 #[cfg(not(feature = "gpu"))]
+/// Stub for initializing GPU backend when GPU feature is disabled
+///
+/// Returns `None` since GPU is not available without the `gpu` feature flag.
 pub fn init_gpu_backend() -> Option<std::time::Duration> {
     None
 }

@@ -15,7 +15,6 @@ use super::{
 };
 use crate::{
     circuit::Value,
-    dev::cost_model::cost_model_options,
     poly::{
         batch_invert_rational,
         commitment::{Params, PolynomialCommitmentScheme},
@@ -23,6 +22,9 @@ use crate::{
     },
     utils::{arithmetic::parallelize, rational::Rational},
 };
+
+#[cfg(feature = "cost-estimator")]
+use crate::dev::cost_model::cost_model_options;
 
 pub(crate) fn create_domain<F, ConcreteCircuit>(
     k: u32,
@@ -200,8 +202,15 @@ impl<F: Field> Assignment<F> for Assembly<F> {
 }
 
 /// Compute the minimal `k` to compute a circuit.
+#[cfg(feature = "cost-estimator")]
 pub fn k_from_circuit<F: Ord + Field + FromUniformBytes<64>, C: Circuit<F>>(circuit: &C) -> u32 {
     cost_model_options(circuit).min_k as u32
+}
+
+/// Compute the minimal `k` to compute a circuit (stub when cost-estimator is disabled).
+#[cfg(not(feature = "cost-estimator"))]
+pub fn k_from_circuit<F: Ord + Field + FromUniformBytes<64>, C: Circuit<F>>(_circuit: &C) -> u32 {
+    panic!("k_from_circuit requires the 'cost-estimator' feature to be enabled")
 }
 
 /// Generates a `VerifyingKey` from a `Circuit` instance.
