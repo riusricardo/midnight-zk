@@ -3,7 +3,7 @@
 //! This module provides GPU-accelerated MSM with automatic CPU fallback.
 
 use crate::gpu::{DeviceType, GpuBackend, GpuConfig, GpuError, TypeConverter};
-use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
+use midnight_curves::{Fq as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
 use ff::Field;
 use group::Group; // For identity() method
 use group::prime::PrimeCurveAffine; // For generator() method
@@ -110,6 +110,64 @@ impl GpuMsmBackend {
         // Convert back to midnight types
         Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))
     }
+    
+    /// Compute G2 MSM on GPU using ICICLE
+    fn compute_g2_msm_internal(
+        &self,
+        scalars: &[Scalar],
+        points: &[G2Affine],
+    ) -> Result<G2Projective, MsmError> {
+        use icicle_core::msm::{msm, MSMConfig};
+        use icicle_core::ecntt::Projective; // For zero() method
+        use icicle_runtime::memory::{DeviceVec, HostSlice};
+        use icicle_bls12_381::curve::G2Projective as IcicleG2Projective;
+        
+        if scalars.len() != points.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "Scalar and point count mismatch: {} vs {}",
+                scalars.len(),
+                points.len()
+            )));
+        }
+        
+        if scalars.is_empty() {
+            return Ok(G2Projective::identity());
+        }
+        
+        // Convert to ICICLE types
+        let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
+        let icicle_points = TypeConverter::g2_affine_slice_to_icicle_vec(points);
+        
+        // Allocate device result buffer
+        let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc(1)
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        
+        // Configure and execute G2 MSM
+        let cfg = MSMConfig::default();
+        msm(
+            HostSlice::from_slice(&icicle_scalars),
+            HostSlice::from_slice(&icicle_points),
+            &cfg,
+            &mut device_result[..]
+        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("G2 MSM failed: {:?}", e))))?;
+        
+        // Copy result back to host
+        let mut host_result = vec![IcicleG2Projective::zero(); 1];
+        device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
+        
+        // Convert back to midnight types
+        Ok(TypeConverter::icicle_to_g2_projective(&host_result[0]))
+    }
+    
+    /// Public method to compute G2 MSM
+    pub fn compute_g2_msm(
+        &self,
+        scalars: &[Scalar],
+        points: &[G2Affine],
+    ) -> Result<G2Projective, MsmError> {
+        self.compute_g2_msm_internal(scalars, points)
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -148,6 +206,31 @@ impl MsmBackend for CpuMsmBackend {
         // Convert affine to projective for multi_exp
         let points_proj: Vec<G1Projective> = points.iter().map(|p| G1Projective::from(*p)).collect();
         Ok(G1Projective::multi_exp(&points_proj, scalars))
+    }
+}
+
+impl CpuMsmBackend {
+    /// Compute G2 MSM on CPU
+    pub fn compute_g2_msm(
+        &self,
+        scalars: &[Scalar],
+        points: &[G2Affine],
+    ) -> Result<G2Projective, MsmError> {
+        if scalars.len() != points.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "Scalar and point count mismatch: {} vs {}",
+                scalars.len(),
+                points.len()
+            )));
+        }
+        
+        if scalars.is_empty() {
+            return Ok(G2Projective::identity());
+        }
+        
+        // Convert affine to projective for multi_exp
+        let points_proj: Vec<G2Projective> = points.iter().map(|p| G2Projective::from(*p)).collect();
+        Ok(G2Projective::multi_exp(&points_proj, scalars))
     }
 }
 
@@ -218,6 +301,43 @@ impl MsmExecutor {
             size, k, self.config.device_type, self.config.min_gpu_size
         );
         self.cpu_backend.compute_msm(scalars, points)
+    }
+    
+    /// Execute G2 MSM with automatic backend selection based on size
+    /// 
+    /// Same decision logic as execute() but for G2 points.
+    /// G2 points are in the quadratic extension field Fq2.
+    pub fn execute_g2(
+        &self,
+        scalars: &[Scalar],
+        points: &[G2Affine],
+    ) -> Result<G2Projective, MsmError> {
+        let size = scalars.len();
+        let k = (size as f64).log2().ceil() as u8;
+        
+        if self.should_use_gpu(size) {
+            #[cfg(feature = "gpu")]
+            if let Some(gpu) = &self.gpu_backend {
+                debug!(
+                    "Using GPU for G2 MSM: {} points (K={}), device_type={:?}",
+                    size, k, self.config.device_type
+                );
+                return gpu.compute_g2_msm(scalars, points);
+            }
+            
+            #[cfg(not(feature = "gpu"))]
+            {
+                return Err(MsmError::InvalidInput(
+                    "GPU requested but feature not enabled".to_string()
+                ));
+            }
+        }
+        
+        debug!(
+            "Using CPU for G2 MSM: {} points (K={}), device_type={:?}, min_size={}",
+            size, k, self.config.device_type, self.config.min_gpu_size
+        );
+        self.cpu_backend.compute_g2_msm(scalars, points)
     }
     
     /// Execute MSM using pre-uploaded GPU bases (zero-copy optimization)

@@ -143,28 +143,20 @@ fn test_g2_msm_with_size(size: usize) {
         .map(|_| G2Projective::random(&mut rng).to_affine())
         .collect();
     
-    // TODO: Create G2 executor when available
-    // For now, this test will compile but skip G2 execution
-    // let executor = MsmExecutor::default();
-    // let result = executor.execute_g2(&scalars, &points)
-    //     .expect("G2 MSM should succeed");
+    // Execute G2 MSM on GPU (uses same executor as G1, G2 is properly wired up)
+    let executor = MsmExecutor::default();
+    let result = executor.execute_g2(&scalars, &points)
+        .expect("G2 MSM should succeed");
     
     // Verify result is not identity (with random inputs, extremely unlikely)
-    // assert!(!bool::from(result.is_identity()));
+    assert!(!bool::from(result.is_identity()), "G2 MSM result should not be identity");
     
     // For K >= 14, also verify against CPU reference
     if size >= 16384 {
         let points_proj: Vec<G2Projective> = points.iter().map(|p| G2Projective::from(*p)).collect();
         let cpu_result = G2Projective::multi_exp(&points_proj, &scalars);
-        
-        // Once GPU G2 MSM is implemented, compare:
-        // assert_eq!(result, cpu_result, "GPU and CPU G2 results should match");
-        
-        // For now, just verify CPU reference works
-        assert!(!bool::from(cpu_result.is_identity()), "CPU G2 MSM should produce non-identity");
+        assert_eq!(result, cpu_result, "GPU and CPU G2 results should match");
     }
-    
-    println!("✓ G2 MSM test passed for size {}", size);
 }
 
 #[test]
@@ -174,21 +166,15 @@ fn test_gpu_g2_msm_simple_identity() {
     let scalars = vec![Scalar::ONE; 16384]; // Need >= 16384 to use GPU
     let points = vec![generator; 16384];
     
-    // Compute expected result using CPU: 16384 * G2_generator
+    let executor = MsmExecutor::default();
+    
+    // This computes sum of 16384 G2 generators = 16384 * G2
+    let result = executor.execute_g2(&scalars, &points)
+        .expect("G2 MSM should succeed");
+    
+    // Expected: 16384 * G2
     let expected = G2Projective::from(generator) * Scalar::from(16384u64);
-    
-    // TODO: Execute on GPU when G2 MSM is wired up
-    // let executor = MsmExecutor::default();
-    // let result = executor.execute_g2(&scalars, &points)
-    //     .expect("G2 MSM should succeed");
-    // assert_eq!(result, expected, "G2 MSM result should be 16384 * G2");
-    
-    // For now, verify CPU reference works
-    let points_proj: Vec<G2Projective> = points.iter().map(|p| G2Projective::from(*p)).collect();
-    let cpu_result = G2Projective::multi_exp(&points_proj, &scalars);
-    assert_eq!(cpu_result, expected, "CPU G2 MSM result should be 16384 * G2");
-    
-    println!("✓ G2 MSM simple identity test passed (CPU reference)");
+    assert_eq!(result, expected, "G2 MSM result should be 16384 * G2");
 }
 
 #[test]

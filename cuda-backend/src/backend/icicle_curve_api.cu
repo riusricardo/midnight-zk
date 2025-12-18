@@ -66,6 +66,7 @@ __global__ void g2_points_to_montgomery_kernel(G2Affine* points, int n) {
     if (idx >= n) return;
     
     G2Affine& p = points[idx];
+    
     Fq2 x_mont, y_mont;
     
     // Convert both components of x (c0 and c1)
@@ -362,10 +363,10 @@ static icicle::eIcicleError msm_precompute_bases_cuda_impl(
 static icicle::eIcicleError msm_g2_cuda_impl(
     const icicle::Device& device,
     const icicle::icicle_scalar_t* scalars,
-    const icicle::icicle_affine_t* bases,
+    const icicle::icicle_g2_affine_t* bases,
     int msm_size,
     const icicle::MSMConfig& config,
-    icicle::icicle_projective_t* results)
+    icicle::icicle_g2_projective_t* results)
 {
     (void)device; // Unused - we always use CUDA context
     
@@ -501,10 +502,10 @@ cleanup:
 // G2 precompute bases wrapper
 static icicle::eIcicleError msm_g2_precompute_bases_cuda_impl(
     const icicle::Device& device,
-    const icicle::icicle_affine_t* input_bases,
+    const icicle::icicle_g2_affine_t* input_bases,
     int bases_size,
     const icicle::MSMConfig& config,
-    icicle::icicle_affine_t* output_bases)
+    icicle::icicle_g2_affine_t* output_bases)
 {
     (void)device; // Unused - we always use CUDA context
     

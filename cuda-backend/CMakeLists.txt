@@ -1,206 +1,303 @@
+# =============================================================================
+# BLS12-381 CUDA Backend - CMake Build System
+# =============================================================================
+#
+# This builds the complete BLS12-381 CUDA cryptographic library including
+# open-source replacements for closed-source ICICLE CUDA backend libraries.
+#
+# BUILD:
+#   mkdir build && cd build
+#   cmake .. -DCMAKE_BUILD_TYPE=Release
+#   make -j$(nproc)
+#
+# INSTALL TO ICICLE:
+#   sudo make icicle-install
+#
+# ARTIFACTS:
+#   lib/libicicle_backend_cuda_field_bls12_381.so  - Field operations (NTT, vec_ops)
+#   lib/libicicle_backend_cuda_curve_bls12_381.so  - Curve operations (MSM, EC-NTT)
+#   lib/libicicle_backend_cuda_device.so           - Device API (memory, streams)
+#
+# =============================================================================
+
 cmake_minimum_required(VERSION 3.18)
 project(icicle_backend_cuda_bls12_381 LANGUAGES CXX CUDA)
 
-# CUDA configuration
+# =============================================================================
+# Configuration Options
+# =============================================================================
+
+# For distribution: ON for both (larger binaries but works everywhere)
+# For development:  OFF for both (smaller binaries, faster builds)
+option(CUDA_STATIC_RUNTIME "Use static CUDA runtime for redistributability" ON)
+option(BUILD_TESTS "Build test executables" ON)
+option(G2_ENABLED "Enable G2 curve support" ON)
+option(MULTI_GPU_ARCH "Build for multiple GPU architectures (larger binary)" ON)
+
+# ICICLE installation directory (for icicle-install target)
+set(ICICLE_INSTALL_DIR "/opt/icicle" CACHE PATH "ICICLE installation directory")
+
+# =============================================================================
+# CUDA Configuration
+# =============================================================================
+
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# CUDA architectures (Turing through Blackwell)
-# 75 = Turing (RTX 20xx)
-# 80 = Ampere (A100)
-# 86 = Ampere (RTX 30xx)
-# 89 = Ada Lovelace (RTX 40xx)
-# 100 = Hopper (H100)
-# 120 = Blackwell (RTX 50xx)
-set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 100 120)
+# CUDA architectures
+# Default: Build only for current/latest GPU (smaller binary, faster build)
+# With MULTI_GPU_ARCH=ON: Build for all supported GPUs (larger binary, more portable)
+if(MULTI_GPU_ARCH)
+    # Build for all supported architectures (Turing through Blackwell)
+    # 75 = Turing (RTX 20xx), 80 = Ampere (A100), 86 = Ampere (RTX 30xx)
+    # 89 = Ada Lovelace (RTX 40xx), 100 = Hopper (H100), 120 = Blackwell (RTX 50xx)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 86 89 100 120 CACHE STRING "CUDA architectures" FORCE)
+    message(STATUS "Building for multiple GPU architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+else()
+    # Default: Build only for Blackwell (RTX 50 series) - smallest binary
+    # Users can override with: cmake -DCMAKE_CUDA_ARCHITECTURES="120"
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES 120 CACHE STRING "CUDA architectures" FORCE)
+    endif()
+    message(STATUS "Building for GPU architecture: ${CMAKE_CUDA_ARCHITECTURES}")
+endif()
 
-# Find CUDA toolkit
 find_package(CUDAToolkit REQUIRED)
-
-# =============================================================================
-# Redistributable Build Configuration
-# =============================================================================
-# Use static CUDA runtime for redistributability
-# This embeds the CUDA runtime into the library, removing the need for
-# users to have a specific CUDA version installed.
-option(CUDA_STATIC_RUNTIME "Use static CUDA runtime" ON)
 
 if(CUDA_STATIC_RUNTIME)
     set(CUDA_RUNTIME_LIB CUDA::cudart_static)
-    message(STATUS "Using static CUDA runtime for redistributability")
+    find_package(Threads REQUIRED)
+    message(STATUS "Using static CUDA runtime (larger binary, more portable)")
 else()
     set(CUDA_RUNTIME_LIB CUDA::cudart)
     message(STATUS "Using dynamic CUDA runtime")
 endif()
 
-# Compiler flags
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
-set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
-set(CMAKE_CUDA_FLAGS_RELEASE "-O3")
+# =============================================================================
+# Compiler Flags
+# =============================================================================
 
-# For static runtime, we need to link pthread and dl
-if(CUDA_STATIC_RUNTIME)
-    find_package(Threads REQUIRED)
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3 -use_fast_math")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -fPIC")
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler -Wall -Xcompiler -Wextra")
+
+if(G2_ENABLED)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DG2_ENABLED")
+    message(STATUS "G2 curve support enabled")
 endif()
 
-# Include directories
-include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -use_fast_math -Xptxas -O3 --extra-device-vectorization")
+set(CMAKE_CUDA_FLAGS_DEBUG "-g -G -DDEBUG -lineinfo")
 
-# Source files for field library
-# Note: ntt.cu was removed (all kernels were dead code, actual implementation is in field_backend.cu)
+# =============================================================================
+# Include Directories
+# =============================================================================
+
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include/icicle)
+
+# =============================================================================
+# Source Files
+# =============================================================================
+
+# Field library sources
 set(FIELD_SOURCES
     src/params.cu
     src/field/vec_ops.cu
     src/field/field_backend.cu
+    src/backend/icicle_field_api.cu
 )
 
-# Source files for curve library  
-# Note: params.cu is already in field library, don't duplicate
+# Curve library sources (depends on field library)
 set(CURVE_SOURCES
     src/curve/point_ops.cu
     src/curve/msm.cu
     src/curve/ecntt.cu
     src/curve/montgomery.cu
     src/curve/curve_backend.cu
+    src/backend/icicle_curve_api.cu
+    src/backend/g2_registry.cu
 )
 
-# Note: msm_kernels.cu requires CUB library for sorting
-# Add it conditionally if CUB is available
-find_package(CUB QUIET)
-if(CUB_FOUND)
-    list(APPEND CURVE_SOURCES src/curve/msm_kernels.cu)
-    message(STATUS "CUB found, enabling optimized MSM kernels")
-endif()
+# Device library sources (standalone)
+set(DEVICE_SOURCES
+    src/device/cuda_device_api.cu
+)
 
-# Field library - use STATIC for proper CUDA device code linking
-add_library(icicle_backend_cuda_field_bls12_381 STATIC ${FIELD_SOURCES})
+# =============================================================================
+# Helper macro for library properties
+# =============================================================================
+
+macro(set_icicle_library_properties target)
+    set_target_properties(${target} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+        CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
+        POSITION_INDEPENDENT_CODE ON
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_RPATH "$ORIGIN"
+    )
+endmacro()
+
+# =============================================================================
+# Field Backend Library
+# =============================================================================
+
+add_library(icicle_backend_cuda_field_bls12_381 SHARED ${FIELD_SOURCES})
 target_link_libraries(icicle_backend_cuda_field_bls12_381 
     ${CUDA_RUNTIME_LIB}
     $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
     $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
 )
-set_target_properties(icicle_backend_cuda_field_bls12_381 PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-    POSITION_INDEPENDENT_CODE ON
-    OUTPUT_NAME "icicle_backend_cuda_field_bls12_381"
-    # RPATH settings for redistributability
-    BUILD_WITH_INSTALL_RPATH ON
-    INSTALL_RPATH "$ORIGIN"
-)
+set_icicle_library_properties(icicle_backend_cuda_field_bls12_381)
 
-# Curve library - use STATIC for proper CUDA device code linking
-add_library(icicle_backend_cuda_curve_bls12_381 STATIC ${CURVE_SOURCES})
+# =============================================================================
+# Curve Backend Library
+# =============================================================================
+
+add_library(icicle_backend_cuda_curve_bls12_381 SHARED ${CURVE_SOURCES})
 target_link_libraries(icicle_backend_cuda_curve_bls12_381 
     icicle_backend_cuda_field_bls12_381
     ${CUDA_RUNTIME_LIB}
     $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
     $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
 )
-set_target_properties(icicle_backend_cuda_curve_bls12_381 PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-    POSITION_INDEPENDENT_CODE ON
-    OUTPUT_NAME "icicle_backend_cuda_curve_bls12_381"
-    # RPATH settings for redistributability
-    BUILD_WITH_INSTALL_RPATH ON
-    INSTALL_RPATH "$ORIGIN"
+set_icicle_library_properties(icicle_backend_cuda_curve_bls12_381)
+
+# =============================================================================
+# Device Backend Library (replaces closed-source ICICLE device library)
+# =============================================================================
+
+add_library(icicle_backend_cuda_device SHARED ${DEVICE_SOURCES})
+target_link_libraries(icicle_backend_cuda_device
+    ${CUDA_RUNTIME_LIB}
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+)
+set_icicle_library_properties(icicle_backend_cuda_device)
+
+# =============================================================================
+# Convenience target to build all ICICLE libraries
+# =============================================================================
+
+add_custom_target(icicle
+    DEPENDS 
+        icicle_backend_cuda_field_bls12_381
+        icicle_backend_cuda_curve_bls12_381
+        icicle_backend_cuda_device
+    COMMENT "Building all ICICLE backend libraries"
 )
 
-# Installation
+# Print summary after building icicle target
+add_custom_command(TARGET icicle POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "=================================================="
+    COMMAND ${CMAKE_COMMAND} -E echo " ICICLE-compatible backends built!"
+    COMMAND ${CMAKE_COMMAND} -E echo " Field:  $<TARGET_FILE:icicle_backend_cuda_field_bls12_381>"
+    COMMAND ${CMAKE_COMMAND} -E echo " Curve:  $<TARGET_FILE:icicle_backend_cuda_curve_bls12_381>"
+    COMMAND ${CMAKE_COMMAND} -E echo " Device: $<TARGET_FILE:icicle_backend_cuda_device>"
+    COMMAND ${CMAKE_COMMAND} -E echo "=================================================="
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+    COMMAND ${CMAKE_COMMAND} -E echo "To install - replace closed-source ICICLE libraries:"
+    COMMAND ${CMAKE_COMMAND} -E echo "  sudo make icicle-install"
+    COMMAND ${CMAKE_COMMAND} -E echo ""
+)
+
+# =============================================================================
+# ICICLE Installation Target (replaces closed-source libraries)
+# =============================================================================
+
+# Use a shell script for installation to properly handle backups and errors
+add_custom_target(icicle-install
+    DEPENDS icicle
+    COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/scripts/icicle_install.sh 
+        "${CMAKE_BINARY_DIR}" "${ICICLE_INSTALL_DIR}"
+    COMMENT "Installing ICICLE backend libraries to ${ICICLE_INSTALL_DIR}"
+    VERBATIM
+)
+
+# =============================================================================
+# Standard Installation (for non-ICICLE use)
+# =============================================================================
+
 install(TARGETS 
     icicle_backend_cuda_field_bls12_381 
     icicle_backend_cuda_curve_bls12_381
     LIBRARY DESTINATION lib/backend/bls12_381/cuda
 )
 
+install(TARGETS
+    icicle_backend_cuda_device
+    LIBRARY DESTINATION lib/backend/cuda
+)
+
+# =============================================================================
 # Tests
-enable_testing()
+# =============================================================================
 
-add_executable(test_backend 
-    tests/test_backend.cu
-)
-target_link_libraries(test_backend 
-    icicle_backend_cuda_curve_bls12_381
-    icicle_backend_cuda_field_bls12_381
-    ${CUDA_RUNTIME_LIB}
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
-)
-set_target_properties(test_backend PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-)
+if(BUILD_TESTS)
+    enable_testing()
+    
+    # Macro for test executables
+    macro(add_cuda_test name source)
+        add_executable(${name} ${source})
+        target_link_libraries(${name}
+            icicle_backend_cuda_curve_bls12_381
+            icicle_backend_cuda_field_bls12_381
+            ${CUDA_RUNTIME_LIB}
+            $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
+            $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
+        )
+        set_target_properties(${name} PROPERTIES
+            CUDA_SEPARABLE_COMPILATION ON
+            CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
+        )
+        add_test(NAME ${name} COMMAND ${name})
+    endmacro()
+    
+    # Test executables
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_backend.cu)
+        add_cuda_test(test_backend tests/test_backend.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vectors.cu)
+        add_cuda_test(test_vectors tests/test_vectors.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntt_custom.cu)
+        add_cuda_test(test_ntt_custom tests/test_ntt_custom.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntt_debug.cu)
+        add_cuda_test(test_ntt_debug tests/test_ntt_debug.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_roundtrip.cu)
+        add_cuda_test(test_roundtrip tests/test_roundtrip.cu)
+    endif()
+endif()
 
-add_test(NAME backend_tests COMMAND test_backend)
+# =============================================================================
+# Summary
+# =============================================================================
 
-# Comprehensive test suite with profiling
-add_executable(test_vectors
-    tests/test_vectors.cu
-)
-target_link_libraries(test_vectors
-    icicle_backend_cuda_curve_bls12_381
-    icicle_backend_cuda_field_bls12_381
-    ${CUDA_RUNTIME_LIB}
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
-)
-set_target_properties(test_vectors PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-)
-
-add_test(NAME vector_tests COMMAND test_vectors)
-
-# Custom NTT Test
-add_executable(test_ntt_custom
-    tests/test_ntt_custom.cu
-)
-target_link_libraries(test_ntt_custom
-    icicle_backend_cuda_curve_bls12_381
-    icicle_backend_cuda_field_bls12_381
-    ${CUDA_RUNTIME_LIB}
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
-)
-set_target_properties(test_ntt_custom PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-)
-
-add_test(NAME ntt_custom_tests COMMAND test_ntt_custom)
-
-# NTT Debug Test
-add_executable(test_ntt_debug
-    tests/test_ntt_debug.cu
-)
-target_link_libraries(test_ntt_debug
-    icicle_backend_cuda_curve_bls12_381
-    icicle_backend_cuda_field_bls12_381
-    ${CUDA_RUNTIME_LIB}
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
-)
-set_target_properties(test_ntt_debug PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-)
-
-# Roundtrip and Stress Tests
-add_executable(test_roundtrip
-    tests/test_roundtrip.cu
-)
-target_link_libraries(test_roundtrip
-    icicle_backend_cuda_curve_bls12_381
-    icicle_backend_cuda_field_bls12_381
-    ${CUDA_RUNTIME_LIB}
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:Threads::Threads>
-    $<$<BOOL:${CUDA_STATIC_RUNTIME}>:${CMAKE_DL_LIBS}>
-)
-set_target_properties(test_roundtrip PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON
-    CUDA_RUNTIME_LIBRARY $<IF:$<BOOL:${CUDA_STATIC_RUNTIME}>,Static,Shared>
-)
-
-add_test(NAME roundtrip_tests COMMAND test_roundtrip)
+message(STATUS "")
+message(STATUS "=== CUDA Backend Configuration ===")
+message(STATUS "  CUDA Architectures:  ${CMAKE_CUDA_ARCHITECTURES}")
+message(STATUS "  Multi-GPU Arch:      ${MULTI_GPU_ARCH}")
+message(STATUS "  Static Runtime:      ${CUDA_STATIC_RUNTIME}")
+message(STATUS "  G2 Support:          ${G2_ENABLED}")
+message(STATUS "  Build Tests:         ${BUILD_TESTS}")
+message(STATUS "  ICICLE Install Dir:  ${ICICLE_INSTALL_DIR}")
+message(STATUS "")
+message(STATUS "Build targets:")
+message(STATUS "  make                       - Build all libraries")
+message(STATUS "  make icicle                - Build ICICLE-compatible libraries")
+message(STATUS "  sudo make icicle-install   - Install to ICICLE directory")
+message(STATUS "  make test                  - Run tests")
+message(STATUS "")
+message(STATUS "Build options:")
+message(STATUS "  -DMULTI_GPU_ARCH=ON        - Build for all GPUs (larger, portable)")
+message(STATUS "  -DCUDA_STATIC_RUNTIME=ON   - Embed CUDA runtime (larger, standalone)")
+message(STATUS "  -DCMAKE_CUDA_ARCHITECTURES=\"89\" - Build for specific GPU")
+message(STATUS "")

@@ -126,10 +126,11 @@ using MsmG2PreComputeImpl = std::function<eIcicleError(
     const MSMConfig& config,
     icicle_g2_affine_t* output_bases)>;
 
-// G2 registration functions (provided by libicicle_curve_bls12_381.so)
-// Note: These may need to match actual Icicle function names
-extern void register_msm_g2(const std::string& deviceType, MsmG2Impl impl);
-extern void register_msm_g2_precompute_bases(const std::string& deviceType, MsmG2PreComputeImpl impl);
+// G2 registration functions - we provide our own implementation since
+// ICICLE core doesn't export these (G2 support is behind G2_ENABLED flag)
+// See g2_registry.cu for the implementation
+void register_g2_msm(const std::string& deviceType, MsmG2Impl impl);
+void register_g2_msm_precompute_bases(const std::string& deviceType, MsmG2PreComputeImpl impl);
 
 } // namespace icicle
 
@@ -160,15 +161,11 @@ extern void register_msm_g2_precompute_bases(const std::string& deviceType, MsmG
         }();                                                        \
     }
 
-// G2 MSM Registration
-// Note: These macros register G2 implementations. If Icicle doesn't
-// have G2 registration functions yet, comment these out and use
-// the G2 MSM through the C API directly.
-#ifdef ICICLE_HAS_G2_REGISTRATION
+// G2 MSM Registration (matches ICICLE's naming: register_g2_msm)
 #define REGISTER_MSM_G2_BACKEND(DEVICE_TYPE, FUNC)                 \
     namespace {                                                     \
         static bool ICICLE_UNIQUE(_reg_msm_g2_) = []() -> bool {   \
-            icicle::register_msm_g2(DEVICE_TYPE, FUNC);            \
+            icicle::register_g2_msm(DEVICE_TYPE, FUNC);            \
             return true;                                            \
         }();                                                        \
     }
@@ -176,15 +173,7 @@ extern void register_msm_g2_precompute_bases(const std::string& deviceType, MsmG
 #define REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND(DEVICE_TYPE, FUNC) \
     namespace {                                                      \
         static bool ICICLE_UNIQUE(_reg_msm_g2_pre_) = []() -> bool { \
-            icicle::register_msm_g2_precompute_bases(DEVICE_TYPE, FUNC); \
+            icicle::register_g2_msm_precompute_bases(DEVICE_TYPE, FUNC); \
             return true;                                             \
         }();                                                         \
     }
-#else
-// Stub macros when Icicle doesn't have G2 registration
-// G2 MSM is still available through C API (bls12_381_g2_msm_cuda)
-#define REGISTER_MSM_G2_BACKEND(DEVICE_TYPE, FUNC) \
-    /* G2 Icicle registration disabled - use C API */
-#define REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND(DEVICE_TYPE, FUNC) \
-    /* G2 Icicle registration disabled - use C API */
-#endif
