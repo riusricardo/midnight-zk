@@ -2,6 +2,7 @@
 //!
 //! Demonstrates GPU acceleration for K=14-18
 
+// Only compile this example when GPU feature is enabled
 #![cfg(feature = "gpu")]
 
 use midnight_proofs::gpu::{GpuConfig, MsmExecutor};

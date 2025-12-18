@@ -134,3 +134,19 @@ required-features = ["test-dev-graph"]
 [[example]]
 name = "proof-size"
 required-features = ["cost-estimator"]
+
+[[example]]
+name = "gpu_benchmark"
+required-features = ["gpu"]
+
+[[example]]
+name = "gpu_init"
+required-features = ["gpu"]
+
+[[example]]
+name = "plonk_msm_benchmark"
+required-features = ["gpu"]
+
+[[example]]
+name = "proof_generation_benchmark"
+required-features = ["gpu"]

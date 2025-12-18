@@ -259,14 +259,59 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
     
-    // Verify we're using midnight_curves (BLS12-381 with BLST)
-    assert!(
-        is_blst_available::<C>(),
-        "MSM must use midnight_curves::G1Affine with BLST optimization. Found: {}",
-        std::any::type_name::<C>()
-    );
+    // Check if we're using midnight_curves (BLS12-381 with BLST)
+    // If not, fall back to generic implementation using parallelize
+    if !is_blst_available::<C>() {
+        #[cfg(feature = "trace-msm")]
+        eprintln!("   [MSM] Using generic fallback MSM for {}", std::any::type_name::<C>());
+        
+        use group::Group;
+        use crate::utils::arithmetic::parallelize;
+        
+        let num_threads = rayon::current_num_threads();
+        let base_chunk_size = coeffs.len() / num_threads;
+        let remainder = coeffs.len() % num_threads;
+        
+        let mut results = vec![C::Curve::identity(); num_threads];
+        
+        parallelize(&mut results, |results_chunk, chunk_idx| {
+            // Calculate the range for this chunk
+            let chunk_size = if chunk_idx < remainder {
+                base_chunk_size + 1
+            } else {
+                base_chunk_size
+            };
+            
+            let start = if chunk_idx < remainder {
+                chunk_idx * (base_chunk_size + 1)
+            } else {
+                remainder * (base_chunk_size + 1) + (chunk_idx - remainder) * base_chunk_size
+            };
+            let end = start + chunk_size;
+            
+            if start >= coeffs.len() {
+                return;
+            }
+            
+            let mut acc = C::Curve::identity();
+            for i in start..end.min(coeffs.len()) {
+                acc = (acc + bases[i] * coeffs[i]).into();
+            }
+            results_chunk[0] = acc;
+        });
+        
+        let result = results.iter().fold(C::Curve::identity(), |acc, r| acc + r);
+        
+        #[cfg(feature = "trace-msm")]
+        {
+            let elapsed = start.elapsed();
+            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+        }
+        
+        return result;
+    }
     
-    // Safe: we just verified the type
+    // Safe: we verified the type is midnight_curves::G1Affine
     let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
     let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
     
