@@ -123,14 +123,21 @@ __device__ __forceinline__ void fq2_mul(Fq2& result, const Fq2& a, const Fq2& b)
 __device__ __forceinline__ void fq2_sqr(Fq2& result, const Fq2& a) {
     // (a0 + a1*u)^2 = (a0^2 - a1^2) + 2*a0*a1*u
     // Optimized: (a0 + a1)(a0 - a1) for real part
-    Fq t0, t1, t2;
+    // 
+    // NOTE: This function is aliasing-safe (result can be the same as a)
+    Fq t0, t1;
     
-    field_add(t0, a.c0, a.c1);           // a0 + a1
-    field_sub(t1, a.c0, a.c1);           // a0 - a1
+    field_add(t0, a.c0, a.c1);           // t0 = a0 + a1
+    field_sub(t1, a.c0, a.c1);           // t1 = a0 - a1
+    
+    // Compute c1 BEFORE c0 to handle aliasing (result == a)
+    Fq c1_tmp;
+    field_mul(c1_tmp, a.c0, a.c1);       // c1_tmp = a0 * a1
+    field_add(c1_tmp, c1_tmp, c1_tmp);   // c1_tmp = 2 * a0 * a1
+    
+    // Now safe to write c0 (we've finished reading a.c0 and a.c1)
     field_mul(result.c0, t0, t1);        // (a0+a1)(a0-a1) = a0^2 - a1^2
-    
-    field_mul(t2, a.c0, a.c1);           // a0 * a1
-    field_add(result.c1, t2, t2);        // 2 * a0 * a1
+    result.c1 = c1_tmp;
 }
 
 __device__ __forceinline__ void fq2_neg(Fq2& result, const Fq2& a) {

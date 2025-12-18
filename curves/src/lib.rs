@@ -26,6 +26,7 @@ mod pairing;
 mod jubjub;
 
 pub use fp::Fp;
+pub use fp2::Fp2;
 pub use fq::Fq;
 pub use g1::{G1Affine, G1Projective, A, B};
 pub use g2::{G2Affine, G2Prepared, G2Projective};

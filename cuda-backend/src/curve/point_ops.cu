@@ -318,6 +318,37 @@ __global__ void batch_affine_to_projective_g2_kernel(
     output[idx] = G2Projective::from_affine(input[idx]);
 }
 
+/**
+ * @brief Batch G2 projective to affine conversion
+ */
+__global__ void batch_projective_to_affine_g2_naive_kernel(
+    G2Affine* output,
+    const G2Projective* input,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    output[idx] = input[idx].to_affine();
+}
+
+/**
+ * @brief Batch G2 projective to affine using naive per-element inversion
+ */
+void batch_projective_to_affine_g2(
+    G2Affine* d_output,
+    const G2Projective* d_input,
+    int size,
+    cudaStream_t stream
+) {
+    const int threads = 256;
+    const int blocks = (size + threads - 1) / threads;
+    
+    batch_projective_to_affine_g2_naive_kernel<<<blocks, threads, 0, stream>>>(
+        d_output, d_input, size
+    );
+}
+
 } // namespace curve
 
 // =============================================================================
@@ -399,6 +430,44 @@ eIcicleError bls12_381_g1_projective_to_affine(
     
     if (need_alloc_output) {
         cudaMemcpy(output, d_output, size * sizeof(G1Affine), cudaMemcpyDeviceToHost);
+        cudaFree(d_output);
+    }
+    if (need_alloc_input) {
+        cudaFree((void*)d_input);
+    }
+    
+    return eIcicleError::SUCCESS;
+}
+
+/**
+ * @brief Exported batch projective to affine for G2
+ */
+eIcicleError bls12_381_g2_projective_to_affine(
+    const G2Projective* input,
+    int size,
+    const VecOpsConfig* config,
+    G2Affine* output
+) {
+    cudaStream_t stream = static_cast<cudaStream_t>(config->stream);
+    
+    const G2Projective* d_input = input;
+    G2Affine* d_output = output;
+    
+    bool need_alloc_input = !config->is_a_on_device;
+    bool need_alloc_output = !config->is_result_on_device;
+    
+    if (need_alloc_input) {
+        cudaMalloc((void**)&d_input, size * sizeof(G2Projective));
+        cudaMemcpy((void*)d_input, input, size * sizeof(G2Projective), cudaMemcpyHostToDevice);
+    }
+    if (need_alloc_output) {
+        cudaMalloc(&d_output, size * sizeof(G2Affine));
+    }
+    
+    curve::batch_projective_to_affine_g2(d_output, d_input, size, stream);
+    
+    if (need_alloc_output) {
+        cudaMemcpy(output, d_output, size * sizeof(G2Affine), cudaMemcpyDeviceToHost);
         cudaFree(d_output);
     }
     if (need_alloc_input) {

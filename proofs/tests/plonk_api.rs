@@ -472,6 +472,7 @@ fn plonk_api() {
             + Hash
             + SerdeObject,
         Scheme::Commitment: Hashable<T::Hash>,
+        Scheme::Parameters: Sync,
     {
         let (a, instance, lookup_table) = common!(F);
 
