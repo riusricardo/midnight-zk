@@ -2,10 +2,7 @@
 //! public message.
 
 use ff::Field;
-use halo2curves::{
-    group::Curve,
-    secp256k1::{Fq as secp256k1Scalar, Secp256k1},
-};
+use group::Curve;
 use midnight_circuits::{
     compact_std_lib::{self, Relation, ZkStdLib, ZkStdLibArch},
     field::foreign::{params::MultiEmulationParams as MEP, AssignedField},
@@ -19,7 +16,10 @@ use midnight_circuits::{
     },
     types::{AssignedForeignPoint, InnerValue, Instantiable},
 };
-use midnight_curves::Fq as Scalar;
+use midnight_curves::{
+    secp256k1::{Fq as secp256k1Scalar, Secp256k1},
+    Fq as Scalar,
+};
 use midnight_proofs::{
     circuit::{Layouter, Value},
     plonk::Error,
@@ -187,8 +187,11 @@ impl Relation for BitcoinThresholdECDSA {
         ZkStdLibArch {
             jubjub: false,
             poseidon: false,
-            sha256: false,
-            sha512: false,
+            sha2_256: false,
+            sha2_512: false,
+            sha3_256: false,
+            keccak_256: false,
+            blake2b: false,
             secp256k1: true,
             bls12_381: false,
             base64: false,

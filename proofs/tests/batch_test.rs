@@ -88,13 +88,13 @@ fn test_result_boundaries() {
 #[ignore] // Requires GPU device - run with --ignored flag
 fn test_commit_lagrange_batch() {
     use midnight_proofs::poly::kzg::params::ParamsKZG;
-    use halo2curves::bn256::{Bn256, Fr};
+    use midnight_curves::{Bls12, Fq as Fr};
     use ff::Field;
     use rand::thread_rng;
     
     // Create large params to trigger GPU path (K=14 = 16384 points)
     let k = 14;
-    let params: ParamsKZG<Bn256> = ParamsKZG::unsafe_setup(k, thread_rng());
+    let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(k, thread_rng());
     
     // Create 3 polynomials in Lagrange form
     let size = 1 << k;
@@ -117,13 +117,13 @@ fn test_commit_lagrange_batch() {
 #[ignore] // Requires GPU device - run with --ignored flag
 fn test_commit_batch() {
     use midnight_proofs::poly::kzg::params::ParamsKZG;
-    use halo2curves::bn256::{Bn256, Fr};
+    use midnight_curves::{Bls12, Fq as Fr};
     use ff::Field;
     use rand::thread_rng;
     
     // Create large params to trigger GPU path (K=14 = 16384 points)
     let k = 14;
-    let params: ParamsKZG<Bn256> = ParamsKZG::unsafe_setup(k, thread_rng());
+    let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(k, thread_rng());
     
     // Create 3 polynomials in coefficient form
     let size = 1 << k;

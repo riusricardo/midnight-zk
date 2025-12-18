@@ -26,6 +26,7 @@ mod utils;
 
 pub mod biguint;
 pub mod ecc;
+pub mod external;
 pub mod field;
 pub mod hash;
 pub mod map;
@@ -34,7 +35,6 @@ pub mod vec;
 pub mod verifier;
 
 // Re-exporting modules for convenience and usability.
-pub use halo2curves;
 pub use midnight_proofs;
 
 /// Tools useful for testing

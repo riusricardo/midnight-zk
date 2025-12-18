@@ -16,13 +16,12 @@ rustdoc-args = ["--cfg", "docsrs", "--html-in-header", "katex-header.html"]
 group = { workspace = true }
 ff = { workspace = true }
 
-midnight-curves = { path = "../curves", version = "0.1.0" }
-midnight-proofs = { path = "../proofs", version = "0.5.1", default-features = false, features = [
-    "bits",
+midnight-curves = { git = "https://github.com/midnightntwrk/midnight-zk.git", tag = "midnight-curves-v0.2.0" }
+midnight-proofs = { git = "https://github.com/midnightntwrk/midnight-zk.git", tag = "midnight-proofs-v0.6.0", default-features = false, features = [
     "circuit-params",
     "committed-instances",
 ] }
-midnight-circuits = { path = "../circuits", default-features = false, features = [
+midnight-circuits = { path = "../circuits", version = "5.0.1", default-features = false, features = [
     "testing",
 ] }
 
@@ -33,6 +32,7 @@ bincode = "2.0.1"
 num-bigint = "0.4.6"
 num-traits = "0.2"
 const-hex = "^1.14.0"
+sha2 = { workspace = true }
 
 [dev-dependencies]
 rand_chacha = { workspace = true }

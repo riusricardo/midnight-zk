@@ -2,7 +2,6 @@
 
 use std::{io::Write, time::Instant};
 
-use halo2curves::secp256k1::Secp256k1;
 use midnight_circuits::{
     compact_std_lib::{self, Relation, ZkStdLib, ZkStdLibArch},
     field::foreign::{params::MultiEmulationParams, AssignedField},
@@ -17,7 +16,7 @@ use midnight_circuits::{
     },
     types::{AssignedByte, AssignedForeignPoint, Instantiable},
 };
-use midnight_curves::G1Affine;
+use midnight_curves::{secp256k1::Secp256k1, G1Affine};
 use midnight_proofs::{
     circuit::{Layouter, Value},
     plonk::{commit_to_instances, Error},
@@ -105,8 +104,11 @@ impl Relation for CredentialEnrollment {
         ZkStdLibArch {
             jubjub: false,
             poseidon: false,
-            sha256: true,
-            sha512: false,
+            sha2_256: true,
+            sha2_512: false,
+            sha3_256: false,
+            keccak_256: false,
+            blake2b: false,
             secp256k1: true,
             bls12_381: false,
             base64: true,
@@ -155,7 +157,7 @@ impl CredentialEnrollment {
 
         // Assign the message and hash it.
         let msg_hash: AssignedField<_, _, _> = {
-            let hash_bytes = std_lib.sha256(layouter, message)?;
+            let hash_bytes = std_lib.sha2_256(layouter, message)?;
             secp256k1_scalar.assigned_from_be_bytes(layouter, &hash_bytes)?
         };
 

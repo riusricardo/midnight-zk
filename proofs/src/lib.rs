@@ -10,7 +10,6 @@
 #![cfg_attr(feature = "gpu", allow(unsafe_code))]
 
 pub mod circuit;
-pub use halo2curves;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod plonk;

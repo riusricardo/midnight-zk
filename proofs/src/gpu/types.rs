@@ -28,7 +28,7 @@ use icicle_core::ecntt::Projective as IcicleProjective;
 #[cfg(feature = "gpu")]
 use icicle_core::bignum::BigNum;
 #[cfg(feature = "gpu")]
-use halo2curves::CurveAffine;
+use midnight_curves::CurveAffine;
 #[cfg(feature = "gpu")]
 use ff::PrimeField;
 

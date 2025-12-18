@@ -1,12 +1,12 @@
 use std::{any::TypeId, fmt::Debug};
 
 use ff::Field;
-use group::Group;
-use halo2curves::{
+use group::{Curve, Group};
+use midnight_curves::{
+    msm::msm_best,
     pairing::{Engine, MillerLoopResult, MultiMillerLoop},
-    CurveAffine,
+    CurveAffine, Fq, G1Projective,
 };
-use midnight_curves::{Fq, G1Projective};
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
 #[cfg(feature = "gpu")]
