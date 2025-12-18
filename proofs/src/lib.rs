@@ -19,3 +19,14 @@ pub mod transcript;
 
 pub mod dev;
 pub mod utils;
+
+// Re-export GPU initialization function for easy access
+#[cfg(feature = "gpu")]
+#[doc(inline)]
+pub use poly::kzg::msm::init_gpu_backend;
+
+#[cfg(not(feature = "gpu"))]
+/// Stub for non-GPU builds
+pub fn init_gpu_backend() -> Option<std::time::Duration> {
+    None
+}

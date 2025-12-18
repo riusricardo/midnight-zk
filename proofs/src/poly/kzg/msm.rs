@@ -1,4 +1,4 @@
-use std::{any::TypeId, fmt::Debug};
+use std::{any::TypeId, fmt::Debug, sync::OnceLock};
 
 use ff::Field;
 use group::Group;
@@ -13,6 +13,75 @@ use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 use midnight_curves::G1Affine;
 #[cfg(feature = "gpu")]
 use crate::gpu::MsmExecutor;
+
+#[cfg(feature = "gpu")]
+/// Global MSM executor instance
+/// 
+/// This is initialized on first use (lazy) or can be initialized eagerly
+/// via init_gpu_backend() to avoid first-call latency.
+static GLOBAL_MSM_EXECUTOR: OnceLock<MsmExecutor> = OnceLock::new();
+
+#[cfg(feature = "gpu")]
+/// Get or initialize the global MSM executor
+fn get_msm_executor() -> &'static MsmExecutor {
+    GLOBAL_MSM_EXECUTOR.get_or_init(|| {
+        #[cfg(feature = "trace-msm")]
+        eprintln!("[MSM] Initializing global MSM executor (lazy)");
+        MsmExecutor::default()
+    })
+}
+
+/// Initialize GPU backend eagerly
+/// 
+/// Call this at application startup to avoid ~500-1000ms initialization
+/// latency on the first proof request. If the backend is already initialized,
+/// this is a no-op.
+/// 
+/// Returns the warmup duration if GPU is available and was initialized.
+/// 
+/// # Example
+/// ```rust,no_run
+/// use midnight_proofs::poly::kzg::msm::init_gpu_backend;
+/// 
+/// fn main() {
+///     // Initialize GPU at startup
+///     if let Some(duration) = init_gpu_backend() {
+///         println!("GPU backend ready in {:?}", duration);
+///     }
+///     
+///     // Start proof server...
+/// }
+/// ```
+#[cfg(feature = "gpu")]
+pub fn init_gpu_backend() -> Option<std::time::Duration> {
+    use tracing::info;
+    
+    // Check if already initialized
+    if GLOBAL_MSM_EXECUTOR.get().is_some() {
+        info!("GPU backend already initialized");
+        return None;
+    }
+    
+    info!("Initializing GPU backend eagerly...");
+    let executor = MsmExecutor::default();
+    
+    // Warmup to trigger full CUDA initialization
+    let warmup_result = executor.warmup().ok();
+    
+    // Store in global
+    let _ = GLOBAL_MSM_EXECUTOR.set(executor);
+    
+    if let Some(duration) = warmup_result {
+        info!("GPU backend initialized and warmed up in {:?}", duration);
+    }
+    
+    warmup_result
+}
+
+#[cfg(not(feature = "gpu"))]
+pub fn init_gpu_backend() -> Option<std::time::Duration> {
+    None
+}
 
 use super::params::ParamsVerifierKZG;
 use crate::{
@@ -151,14 +220,11 @@ pub fn msm_with_cached_bases<C: CurveAffine>(
     // Safe: we just verified the type
     let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
     
-    // Use GPU-cached bases via MsmExecutor
-    use once_cell::sync::Lazy;
-    static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
-    
+    // Use GPU-cached bases via global MsmExecutor
     #[cfg(feature = "trace-msm")]
     eprintln!("   [MSM-CACHED] Executing zero-copy GPU MSM");
     
-    let res = MSM_EXECUTOR.execute_with_device_bases(coeffs, device_bases)
+    let res = get_msm_executor().execute_with_device_bases(coeffs, device_bases)
         .expect("Cached MSM execution failed");
     let result = unsafe { std::mem::transmute_copy(&res) };
     
@@ -201,7 +267,6 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     #[cfg(feature = "gpu")]
     {
         use crate::gpu::config::{GpuConfig, DeviceType};
-        use once_cell::sync::Lazy;
         
         // Check environment-based decision BEFORE initializing GPU backend
         // This avoids the ~700ms GPU initialization overhead for small MSMs
@@ -216,18 +281,18 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         };
         
         if should_try_gpu {
-            // Only now initialize the GPU executor (lazy)
-            static MSM_EXECUTOR: Lazy<MsmExecutor> = Lazy::new(MsmExecutor::default);
+            // Get global MSM executor (will initialize lazily if not done eagerly)
+            let executor = get_msm_executor();
             
             // Check if GPU is actually available
-            if MSM_EXECUTOR.should_use_gpu(size) {
+            if executor.should_use_gpu(size) {
                 #[cfg(feature = "trace-msm")]
                 eprintln!("   [MSM] Using GPU backend ({} points)", size);
                 
                 // Convert projective bases to affine for GPU MSM
                 let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
                 
-                match MSM_EXECUTOR.execute(coeffs, &bases_affine) {
+                match executor.execute(coeffs, &bases_affine) {
                     Ok(res) => {
                         let result = unsafe { std::mem::transmute_copy(&res) };
                         
