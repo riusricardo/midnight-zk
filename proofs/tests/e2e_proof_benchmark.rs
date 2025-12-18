@@ -16,7 +16,7 @@ use midnight_proofs::{
     circuit::{Layouter, Value},
     plonk::Error,
 };
-use rand::{Rng, SeedableRng};
+use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
@@ -33,8 +33,8 @@ impl Relation for BenchCircuit {
     type Instance = Vec<F>;
     type Witness = Vec<F>;
 
-    fn format_instance(x: &Self::Instance) -> Result<Vec<F>, Error> {
-        Ok(x.clone())
+    fn format_instance(x: &Self::Instance) -> Vec<F> {
+        x.clone()
     }
 
     fn circuit(
