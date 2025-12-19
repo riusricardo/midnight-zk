@@ -18,19 +18,18 @@
 //!
 //! # Setup
 //!
-//! 1. Install ICICLE CUDA backend:
+//! 1. Build and install the CUDA backend:
 //!    ```bash
-//!    wget https://github.com/ingonyama-zk/icicle/releases/download/v4.0.0/icicle_4_0_0-ubuntu22-cuda122.tar.gz
-//!    sudo tar -xzf icicle_4_0_0-ubuntu22-cuda122.tar.gz -C /opt
-//!    export ICICLE_BACKEND_INSTALL_DIR=/opt/icicle/lib/backend
+//!    cd cuda-backend
+//!    mkdir build && cd build
+//!    cmake .. -DCMAKE_BUILD_TYPE=Release
+//!    make icicle -j$(nproc)
+//!    sudo make icicle-install
 //!    ```
 //!
 //! 2. The backend will be automatically loaded when the prover is initialized.
 //!
-//! # License
-//!
-//! ICICLE uses a free R&D license that connects to `license.icicle.ingonyama.com`.
-//! For production deployments, contact sales@ingonyama.com for commercial licensing.
+//! The CUDA backend is fully open source and can be found in the `cuda-backend` directory.
 //!
 //! # Example
 //!
