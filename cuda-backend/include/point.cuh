@@ -146,6 +146,15 @@ __device__ __forceinline__ void fq2_neg(Fq2& result, const Fq2& a) {
 }
 
 __device__ __forceinline__ void fq2_inv(Fq2& result, const Fq2& a) {
+    // Validate input is non-zero to prevent division by zero
+    // Note: Caller should handle zero inputs appropriately
+    if (a.is_zero()) {
+        // Cannot invert zero - return zero and let caller handle
+        // (In correct cryptographic operations, this should never occur)
+        result = Fq2::zero();
+        return;
+    }
+    
     // (a0 + a1*u)^-1 = (a0 - a1*u) / (a0^2 + a1^2)
     // For u^2 = -1: norm = a0^2 + a1^2
     Fq t0, t1, norm, norm_inv;
@@ -153,6 +162,14 @@ __device__ __forceinline__ void fq2_inv(Fq2& result, const Fq2& a) {
     field_sqr(t0, a.c0);                 // a0^2
     field_sqr(t1, a.c1);                 // a1^2
     field_add(norm, t0, t1);             // a0^2 + a1^2
+    
+    // Defense in depth: norm should never be zero if input validation correct
+    // but this guards against bugs in field arithmetic
+    if (norm.is_zero()) {
+        result = Fq2::zero();
+        return;
+    }
+    
     field_inv(norm_inv, norm);           // 1 / (a0^2 + a1^2)
     
     field_mul(result.c0, a.c0, norm_inv);  // a0 / norm
@@ -296,6 +313,13 @@ struct Projective {
         if (is_identity()) {
             return Affine<BaseField>::identity();
         }
+        
+        // Defensive check - Z should never be zero for non-identity points
+        // but this guards against bugs in point arithmetic
+        if (Z.is_zero()) {
+            return Affine<BaseField>::identity();
+        }
+        
         BaseField z_inv;
         field_inv(z_inv, Z);
         BaseField ax, ay;
@@ -427,7 +451,11 @@ __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective&
     // H = U2 - U1
     field_sub(h, u2, u1);
     
-    // Check for doubling case
+    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
+    // This means either P == Q (doubling case) or P == -Q (sum is point at infinity)
+    // We check S2 - S1 to distinguish:
+    //   - If S2 == S1: points are equal → use doubling formula
+    //   - If S2 != S1: points are negatives → result is identity
     if (h.is_zero()) {
         Fq diff;
         field_sub(diff, s2, s1);
@@ -521,7 +549,8 @@ __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Proje
     // H = U2 - X1
     field_sub(h, u2, p.X);
     
-    // Check for doubling case
+    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
+    // Check S2 - Y1 to distinguish doubling from negation
     if (h.is_zero()) {
         Fq diff;
         field_sub(diff, s2, p.Y);
@@ -598,6 +627,12 @@ __device__ __forceinline__ void g1_neg(G1Projective& result, const G1Projective&
  */
 __device__ __forceinline__ void g1_to_affine(G1Affine& result, const G1Projective& p) {
     if (p.is_identity()) {
+        result = G1Affine::identity();
+        return;
+    }
+    
+    // Defensive check - should never occur if point arithmetic is correct
+    if (p.Z.is_zero()) {
         result = G1Affine::identity();
         return;
     }
@@ -707,7 +742,8 @@ __device__ __forceinline__ void g2_add(G2Projective& result, const G2Projective&
     // H = U2 - U1
     fq2_sub(h, u2, u1);
     
-    // Check for doubling case
+    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
+    // Check S2 - S1 to distinguish doubling from negation
     if (h.is_zero()) {
         Fq2 diff;
         fq2_sub(diff, s2, s1);
@@ -797,7 +833,8 @@ __device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Proje
     // H = U2 - X1
     fq2_sub(h, u2, p.X);
     
-    // Check for doubling case
+    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
+    // Check S2 - Y1 to distinguish doubling from negation
     if (h.is_zero()) {
         Fq2 diff;
         fq2_sub(diff, s2, p.Y);
@@ -874,6 +911,12 @@ __device__ __forceinline__ void g2_neg(G2Projective& result, const G2Projective&
  */
 __device__ __forceinline__ void g2_to_affine(G2Affine& result, const G2Projective& p) {
     if (p.is_identity()) {
+        result = G2Affine::identity();
+        return;
+    }
+    
+    // Defensive check - should never occur if point arithmetic is correct
+    if (p.Z.is_zero()) {
         result = G2Affine::identity();
         return;
     }

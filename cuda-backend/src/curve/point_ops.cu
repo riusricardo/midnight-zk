@@ -68,6 +68,7 @@ void batch_projective_to_affine_g1(
     int size,
     cudaStream_t stream
 ) {
+    // Optimal thread count for memory-bound point operations
     const int threads = 256;
     const int blocks = (size + threads - 1) / threads;
     
@@ -136,13 +137,15 @@ __global__ void batch_scalar_mul_g1_kernel(
     G1Projective base = G1Projective::from_affine(bases[idx]);
     Fr scalar = scalars[idx];
     
-    // Double-and-add: process all 256 bits for safety
-    for (int i = 0; i < 256; i++) {
+    // Double-and-add: process all scalar bits
+    // Fr has LIMBS limbs of 64 bits each
+    constexpr int SCALAR_BITS = Fr::LIMBS * 64;
+    for (int i = 0; i < SCALAR_BITS; i++) {
         if ((scalar.limbs[i / 64] >> (i % 64)) & 1) {
             g1_add(result, result, base);
         }
         // Don't double after processing the last bit
-        if (i < 255) {
+        if (i < SCALAR_BITS - 1) {
             g1_double(base, base);
         }
     }
@@ -341,6 +344,7 @@ void batch_projective_to_affine_g2(
     int size,
     cudaStream_t stream
 ) {
+    // Optimal thread count for memory-bound point operations
     const int threads = 256;
     const int blocks = (size + threads - 1) / threads;
     
@@ -350,6 +354,20 @@ void batch_projective_to_affine_g2(
 }
 
 } // namespace curve
+
+// =============================================================================
+// Constants for exported functions
+// =============================================================================
+
+namespace {
+    // Optimal thread count for memory-bound point operations
+    // 256 threads provides good occupancy on all GPU architectures (SM 5.0+)
+    constexpr int POINT_OP_THREADS = 256;
+    
+    // Maximum batch size to prevent integer overflow and excessive memory usage
+    // 2^26 = 64M points (reasonable upper limit for batch operations)
+    constexpr int MAX_POINT_BATCH_SIZE = (1 << 26);
+}
 
 // =============================================================================
 // Exported Symbols
@@ -368,7 +386,19 @@ eIcicleError bls12_381_g1_affine_to_projective(
     const VecOpsConfig* config,
     G1Projective* output
 ) {
+    // Input validation
+    if (input == nullptr || output == nullptr || config == nullptr) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size <= 0) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size > MAX_POINT_BATCH_SIZE) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     cudaStream_t stream = static_cast<cudaStream_t>(config->stream);
+    cudaError_t err;
     
     const G1Affine* d_input = input;
     G1Projective* d_output = output;
@@ -376,24 +406,57 @@ eIcicleError bls12_381_g1_affine_to_projective(
     bool need_alloc_input = !config->is_a_on_device;
     bool need_alloc_output = !config->is_result_on_device;
     
+    // Allocate and copy input if needed
     if (need_alloc_input) {
-        cudaMalloc((void**)&d_input, size * sizeof(G1Affine));
-        cudaMemcpy((void*)d_input, input, size * sizeof(G1Affine), cudaMemcpyHostToDevice);
-    }
-    if (need_alloc_output) {
-        cudaMalloc(&d_output, size * sizeof(G1Projective));
+        err = cudaMalloc((void**)&d_input, size * sizeof(G1Affine));
+        if (err != cudaSuccess) {
+            return eIcicleError::ALLOCATION_FAILED;
+        }
+        
+        err = cudaMemcpy((void*)d_input, input, size * sizeof(G1Affine), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
     }
     
-    const int threads = 256;
-    const int blocks = (size + threads - 1) / threads;
+    // Allocate output if needed
+    if (need_alloc_output) {
+        err = cudaMalloc(&d_output, size * sizeof(G1Projective));
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::ALLOCATION_FAILED;
+        }
+    }
+    
+    // Launch kernel with overflow-safe block calculation
+    const int threads = POINT_OP_THREADS;
+    const int64_t safe_blocks = ((int64_t)size + threads - 1) / threads;
+    const int blocks = static_cast<int>(safe_blocks);
+    
     curve::batch_affine_to_projective_g1_kernel<<<blocks, threads, 0, stream>>>(
         d_output, d_input, size
     );
     
-    if (need_alloc_output) {
-        cudaMemcpy(output, d_output, size * sizeof(G1Projective), cudaMemcpyDeviceToHost);
-        cudaFree(d_output);
+    // Check for kernel launch errors
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        if (need_alloc_output) cudaFree(d_output);
+        if (need_alloc_input) cudaFree((void*)d_input);
+        return eIcicleError::UNKNOWN_ERROR;
     }
+    
+    // Copy results back if needed
+    if (need_alloc_output) {
+        err = cudaMemcpy(output, d_output, size * sizeof(G1Projective), cudaMemcpyDeviceToHost);
+        cudaFree(d_output);
+        
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
+    }
+    
     if (need_alloc_input) {
         cudaFree((void*)d_input);
     }
@@ -410,7 +473,19 @@ eIcicleError bls12_381_g1_projective_to_affine(
     const VecOpsConfig* config,
     G1Affine* output
 ) {
+    // Input validation
+    if (input == nullptr || output == nullptr || config == nullptr) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size <= 0) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size > MAX_POINT_BATCH_SIZE) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     cudaStream_t stream = static_cast<cudaStream_t>(config->stream);
+    cudaError_t err;
     
     const G1Projective* d_input = input;
     G1Affine* d_output = output;
@@ -418,20 +493,50 @@ eIcicleError bls12_381_g1_projective_to_affine(
     bool need_alloc_input = !config->is_a_on_device;
     bool need_alloc_output = !config->is_result_on_device;
     
+    // Allocate and copy input if needed
     if (need_alloc_input) {
-        cudaMalloc((void**)&d_input, size * sizeof(G1Projective));
-        cudaMemcpy((void*)d_input, input, size * sizeof(G1Projective), cudaMemcpyHostToDevice);
+        err = cudaMalloc((void**)&d_input, size * sizeof(G1Projective));
+        if (err != cudaSuccess) {
+            return eIcicleError::ALLOCATION_FAILED;
+        }
+        
+        err = cudaMemcpy((void*)d_input, input, size * sizeof(G1Projective), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
     }
+    
+    // Allocate output if needed
     if (need_alloc_output) {
-        cudaMalloc(&d_output, size * sizeof(G1Affine));
+        err = cudaMalloc(&d_output, size * sizeof(G1Affine));
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::ALLOCATION_FAILED;
+        }
     }
     
     curve::batch_projective_to_affine_g1(d_output, d_input, size, stream);
     
-    if (need_alloc_output) {
-        cudaMemcpy(output, d_output, size * sizeof(G1Affine), cudaMemcpyDeviceToHost);
-        cudaFree(d_output);
+    // Check for kernel errors
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        if (need_alloc_output) cudaFree(d_output);
+        if (need_alloc_input) cudaFree((void*)d_input);
+        return eIcicleError::UNKNOWN_ERROR;
     }
+    
+    // Copy results back if needed
+    if (need_alloc_output) {
+        err = cudaMemcpy(output, d_output, size * sizeof(G1Affine), cudaMemcpyDeviceToHost);
+        cudaFree(d_output);
+        
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
+    }
+    
     if (need_alloc_input) {
         cudaFree((void*)d_input);
     }
@@ -448,7 +553,19 @@ eIcicleError bls12_381_g2_projective_to_affine(
     const VecOpsConfig* config,
     G2Affine* output
 ) {
+    // Input validation
+    if (input == nullptr || output == nullptr || config == nullptr) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size <= 0) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    if (size > MAX_POINT_BATCH_SIZE) {
+        return eIcicleError::INVALID_ARGUMENT;
+    }
+    
     cudaStream_t stream = static_cast<cudaStream_t>(config->stream);
+    cudaError_t err;
     
     const G2Projective* d_input = input;
     G2Affine* d_output = output;
@@ -456,20 +573,50 @@ eIcicleError bls12_381_g2_projective_to_affine(
     bool need_alloc_input = !config->is_a_on_device;
     bool need_alloc_output = !config->is_result_on_device;
     
+    // Allocate and copy input if needed
     if (need_alloc_input) {
-        cudaMalloc((void**)&d_input, size * sizeof(G2Projective));
-        cudaMemcpy((void*)d_input, input, size * sizeof(G2Projective), cudaMemcpyHostToDevice);
+        err = cudaMalloc((void**)&d_input, size * sizeof(G2Projective));
+        if (err != cudaSuccess) {
+            return eIcicleError::ALLOCATION_FAILED;
+        }
+        
+        err = cudaMemcpy((void*)d_input, input, size * sizeof(G2Projective), cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
     }
+    
+    // Allocate output if needed
     if (need_alloc_output) {
-        cudaMalloc(&d_output, size * sizeof(G2Affine));
+        err = cudaMalloc(&d_output, size * sizeof(G2Affine));
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::ALLOCATION_FAILED;
+        }
     }
     
     curve::batch_projective_to_affine_g2(d_output, d_input, size, stream);
     
-    if (need_alloc_output) {
-        cudaMemcpy(output, d_output, size * sizeof(G2Affine), cudaMemcpyDeviceToHost);
-        cudaFree(d_output);
+    // Check for kernel errors
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        if (need_alloc_output) cudaFree(d_output);
+        if (need_alloc_input) cudaFree((void*)d_input);
+        return eIcicleError::UNKNOWN_ERROR;
     }
+    
+    // Copy results back if needed
+    if (need_alloc_output) {
+        err = cudaMemcpy(output, d_output, size * sizeof(G2Affine), cudaMemcpyDeviceToHost);
+        cudaFree(d_output);
+        
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
+    }
+    
     if (need_alloc_input) {
         cudaFree((void*)d_input);
     }
