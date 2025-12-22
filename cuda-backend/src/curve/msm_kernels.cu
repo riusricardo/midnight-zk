@@ -60,8 +60,9 @@ __global__ void compute_bucket_indices_kernel(
         unsigned int sign = 0;
         
         if (window_val == 0) {
-            // Skip this contribution
-            bucket_indices[output_idx] = 0xFFFFFFFF; // Invalid marker
+            // Skip this contribution - map to invalid bucket index
+            // Note: This file uses separate arrays, not packed encoding
+            bucket_indices[output_idx] = 0xFFFFFFFF; // INVALID_BUCKET_INDEX
             point_indices[output_idx] = idx;
             signs[output_idx] = 0;
             continue;

@@ -82,6 +82,129 @@ using namespace bls12_381;
 using namespace icicle;
 
 // =============================================================================
+// MSM Limits and Constants
+// =============================================================================
+
+// Maximum MSM size to prevent integer overflow in packed index encoding
+// (idx << 1) requires idx < 2^31 for safe unsigned 32-bit operation
+constexpr int MAX_MSM_SIZE = (1 << 24);  // 16M points
+
+// Window size limits
+constexpr int MIN_WINDOW_SIZE = 1;
+constexpr int MAX_WINDOW_SIZE = 24;  // Prevents bucket count overflow
+
+// Invalid bucket index marker (for zero contributions)
+constexpr unsigned int INVALID_BUCKET_INDEX = 0xFFFFFFFF;
+
+// =============================================================================
+// GPU Performance Tuning
+// =============================================================================
+
+// Kernel type identifiers (compile-time constants to avoid string comparison)
+enum class KernelType {
+    COMPUTE_INDICES,
+    HISTOGRAM,
+    ACCUMULATE,
+    REDUCTION
+};
+
+/**
+ * @brief Get optimal block size based on GPU compute capability and kernel type
+ * 
+ * Different kernels have different characteristics:
+ * - Memory-bound: benefit from larger blocks (better memory bandwidth utilization)
+ * - Compute-bound: may need smaller blocks (register pressure)
+ * - Atomic-bound: medium blocks (balance contention vs parallelism)
+ */
+inline int get_optimal_block_size(int compute_capability_major, KernelType kernel_type) {
+    // Validate compute capability is in reasonable range
+    // GPU compute capabilities range from 1.x to 10.x (as of 2025)
+    if (compute_capability_major < 1 || compute_capability_major > 15) {
+        // Invalid capability - return safe conservative default
+        return 256;
+    }
+    
+    // Modern GPUs (Ampere 8.x, Ada 8.9, Hopper 9.x, Blackwell 10.x+)
+    bool is_modern = compute_capability_major >= 8;
+    
+    // Kernel-specific tuning
+    switch (kernel_type) {
+        case KernelType::COMPUTE_INDICES:
+            // Memory-bound: reading scalars, writing indices
+            // Higher thread count improves memory throughput
+            return is_modern ? 512 : 256;
+            
+        case KernelType::HISTOGRAM:
+            // Atomic-bound: too many threads increase contention
+            // Medium block size balances parallelism and atomic efficiency
+            return is_modern ? 512 : 256;
+            
+        case KernelType::ACCUMULATE:
+            // Compute-bound: point arithmetic (field ops, curve ops)
+            // Register pressure from point operations limits thread count
+            return 256;  // Conservative for all architectures
+            
+        case KernelType::REDUCTION:
+            // Sequential per-thread: no benefit from larger blocks
+            return 256;
+            
+        default:
+            // Unknown kernel type - return safe default
+            return 256;
+    }
+}
+
+/**
+ * @brief Detect GPU compute capability with error checking (thread-safe cached)
+ * 
+ * SECURITY:
+ * - Thread-safe: uses atomic operations for cache initialization
+ * - Error handling: validates all CUDA calls, returns safe default on failure
+ * - Bounds checking: ensures returned value is in valid range
+ * 
+ * @return GPU compute capability major version, or 5 (safe default) on error
+ */
+inline int get_gpu_compute_capability() {
+    // Thread-safe cache using atomic flag
+    static std::atomic<int> cached_capability{-1};
+    
+    // Fast path: capability already cached
+    int capability = cached_capability.load(std::memory_order_acquire);
+    if (capability != -1) {
+        return capability;
+    }
+    
+    // Slow path: query GPU capability with error checking
+    int device = 0;
+    cudaError_t err = cudaGetDevice(&device);
+    if (err != cudaSuccess) {
+        // CUDA not initialized or no GPU - return safe default
+        // Default to compute capability 5.x (Maxwell) - conservative but functional
+        cached_capability.store(5, std::memory_order_release);
+        return 5;
+    }
+    
+    cudaDeviceProp prop;
+    err = cudaGetDeviceProperties(&prop, device);
+    if (err != cudaSuccess) {
+        // Failed to get device properties - return safe default
+        cached_capability.store(5, std::memory_order_release);
+        return 5;
+    }
+    
+    // Validate compute capability is in reasonable range
+    int major = prop.major;
+    if (major < 1 || major > 15) {
+        // Invalid capability - clamp to safe range
+        major = 5;
+    }
+    
+    // Cache the validated capability
+    cached_capability.store(major, std::memory_order_release);
+    return major;
+}
+
+// =============================================================================
 // Generic Point Operation Dispatchers
 // =============================================================================
 // These allow the templated kernels to call the correct point operations
@@ -261,7 +384,7 @@ __global__ void compute_bucket_indices_kernel(
         // Handle zero: if (bucket_val == 0 after adjustment)
         int is_zero = (bucket_val == 0);
         if (is_zero) {
-            bucket_val = num_buckets + 1; // Map to trash bucket
+            bucket_val = num_buckets + 1; // Map to trash bucket (beyond valid range)
             sign = 0;
         }
         
@@ -269,7 +392,22 @@ __global__ void compute_bucket_indices_kernel(
         unsigned int bucket_idx = w * buckets_per_window + (bucket_val - 1);
         
         bucket_indices[output_idx] = bucket_idx;
-        packed_indices[output_idx] = (idx << 1) | sign;
+        
+        // Use unsigned to prevent signed overflow, validate idx fits in 31 bits
+        // This is guaranteed by MAX_MSM_SIZE check at function entry
+        unsigned int idx_unsigned = static_cast<unsigned int>(idx);
+        packed_indices[output_idx] = (idx_unsigned << 1) | (sign & 1);
+    }
+    
+    // For valid scalars < modulus, the final window should never produce a carry.
+    // If it does, the scalar is malformed or >= modulus, which should be rejected.
+    // We handle this by mapping to trash bucket (same as zero contributions).
+    if (carry != 0) {
+        // Final window generated carry - mark all windows for this scalar as invalid
+        for (int w = 0; w < num_windows; w++) {
+            int output_idx = idx * num_windows + w;
+            bucket_indices[output_idx] = INVALID_BUCKET_INDEX;
+        }
     }
 }
 
@@ -324,7 +462,6 @@ __global__ void accumulate_sorted_kernel(
  * @brief Simple atomic histogram kernel
  * 
  * Each thread increments the count for its bucket index using atomics.
- * More reliable than CUB for large bucket counts.
  */
 __global__ void histogram_atomic_kernel(
     unsigned int* histogram,
@@ -441,6 +578,17 @@ cudaError_t msm_cuda(
     const MSMConfig& config,
     P* result
 ) {
+    // Validate pointers are non-null
+    if (scalars == nullptr || bases == nullptr || result == nullptr) {
+        return cudaErrorInvalidValue;
+    }
+    
+    // Validate msm_size is in safe range
+    if (msm_size < 0) {
+        return cudaErrorInvalidValue;
+    }
+    
+    // Handle empty MSM
     if (msm_size == 0) {
         P identity = P::identity();
         if (config.are_results_on_device) {
@@ -450,26 +598,61 @@ cudaError_t msm_cuda(
         }
         return cudaSuccess;
     }
+    
+    // Validate msm_size doesn't exceed maximum safe value
+    // This prevents integer overflow in packed index encoding (idx << 1)
+    if (msm_size > MAX_MSM_SIZE) {
+        return cudaErrorInvalidValue;
+    }
 
     cudaStream_t stream = config.stream;
     cudaError_t err;
     
-    // Determine parameters
-    int c = config.c > 0 ? config.c : get_optimal_c(msm_size);
+    // =============================================================================
+    // Parameter Validation
+    // =============================================================================
     
-    // Security check: prevent integer overflow and excessive memory usage
-    if (c > 24) return cudaErrorInvalidValue;
+    // Determine window size with proper validation
+    int c = config.c;
+    if (c <= 0) {
+        // Use automatic selection if not specified or invalid
+        c = get_optimal_c(msm_size);
+    }
+    
+    // Validate window size is in safe range
+    if (c < MIN_WINDOW_SIZE || c > MAX_WINDOW_SIZE) {
+        return cudaErrorInvalidValue;
+    }
 
+    // Validate scalar bitsize
     int scalar_bits = config.bitsize > 0 ? config.bitsize : S::LIMBS * 64;
+    if (scalar_bits <= 0 || scalar_bits > S::LIMBS * 64) {
+        return cudaErrorInvalidValue;
+    }
+    
     int num_windows = get_num_windows(scalar_bits, c);
+    
+    // Validate bucket count doesn't overflow
+    // For c up to 24: (1 << 23) = 8,388,608 buckets per window (safe)
+    // c >= 32 would cause overflow in int
+    if (c >= 31) {  // Extra safety margin
+        return cudaErrorInvalidValue;
+    }
     int num_buckets = (1 << (c - 1));  // Signed digit representation
     
-    // Check for overflow in total_buckets
-    long long total_buckets_long = (long long)num_windows * (num_buckets + 1);
-    if (total_buckets_long > (long long)2147483647) return cudaErrorInvalidValue;
-    
+    // Check for overflow in total_buckets calculation
+    long long total_buckets_long = (long long)num_windows * (long long)(num_buckets + 1);
+    if (total_buckets_long > (long long)INT_MAX) {
+        return cudaErrorInvalidValue;
+    }
     int total_buckets = (int)total_buckets_long;
-    int num_contributions = msm_size * num_windows;
+    
+    // Check for overflow in num_contributions calculation
+    long long num_contributions_long = (long long)msm_size * (long long)num_windows;
+    if (num_contributions_long > (long long)INT_MAX) {
+        return cudaErrorInvalidValue;
+    }
+    int num_contributions = (int)num_contributions_long;
     
     // Allocate device memory
     S* d_scalars = nullptr;
@@ -525,7 +708,8 @@ cudaError_t msm_cuda(
     
     // 1. Compute Indices
     {
-        int threads = 256;
+        int gpu_capability = get_gpu_compute_capability();
+        int threads = get_optimal_block_size(gpu_capability, KernelType::COMPUTE_INDICES);
         int blocks = (msm_size + threads - 1) / threads;
         compute_bucket_indices_kernel<<<blocks, threads, 0, stream>>>(
             d_bucket_indices, d_packed_indices, d_scalars, msm_size, c, num_windows, num_buckets
@@ -538,12 +722,19 @@ cudaError_t msm_cuda(
         // Initialize sizes to 0
         MSM_CUDA_CHECK(cudaMemsetAsync(d_bucket_sizes, 0, total_buckets * sizeof(unsigned int), stream));
         
-        // Use atomic histogram kernel instead of CUB (more reliable for large bucket counts)
-        int threads = 256;
+        // Use atomic histogram kernel
+        int gpu_capability = get_gpu_compute_capability();
+        int threads = get_optimal_block_size(gpu_capability, KernelType::HISTOGRAM);
         int blocks = (num_contributions + threads - 1) / threads;
         histogram_atomic_kernel<<<blocks, threads, 0, stream>>>(
             d_bucket_sizes, d_bucket_indices, num_contributions, total_buckets);
         MSM_CUDA_CHECK(cudaGetLastError());
+        
+        // Ensure histogram completes before proceeding to scan
+        // This prevents race conditions in bucket size computation
+        if (!config.is_async) {
+            MSM_CUDA_CHECK(cudaStreamSynchronize(stream));
+        }
     }
     
     // 3. Scan (Compute bucket offsets)
@@ -584,7 +775,8 @@ cudaError_t msm_cuda(
     
     // 5. Accumulate Sorted
     {
-        int threads = 256;
+        int gpu_capability = get_gpu_compute_capability();
+        int threads = get_optimal_block_size(gpu_capability, KernelType::ACCUMULATE);
         int blocks = (total_buckets + threads - 1) / threads;
         
         // Template instantiation: A = Affine type, P = Projective type
@@ -601,7 +793,9 @@ cudaError_t msm_cuda(
     
     // 6. Bucket Reduction
     {
-        int threads = min(num_windows, 256);
+        int gpu_capability = get_gpu_compute_capability();
+        int optimal_threads = get_optimal_block_size(gpu_capability, KernelType::REDUCTION);
+        int threads = min(num_windows, optimal_threads);
         int blocks = (num_windows + threads - 1) / threads;
         
         // Template instantiation: P = Projective type
@@ -639,21 +833,40 @@ cudaError_t msm_cuda(
     }
 
 cleanup:
-    if (d_buckets) cudaFree(d_buckets);
-    if (d_window_results) cudaFree(d_window_results);
-    if (d_bucket_indices) cudaFree(d_bucket_indices);
-    if (d_packed_indices) cudaFree(d_packed_indices);
-    if (d_bucket_indices_sorted) cudaFree(d_bucket_indices_sorted);
-    if (d_packed_indices_sorted) cudaFree(d_packed_indices_sorted);
-    if (d_bucket_offsets) cudaFree(d_bucket_offsets);
-    if (d_bucket_sizes) cudaFree(d_bucket_sizes);
+    // Ensure all GPU operations complete before cleanup
+    // This prevents use-after-free in async mode
+    if (config.is_async && stream != nullptr) {
+        cudaStreamSynchronize(stream);  // Best effort, ignore errors in cleanup
+    }
     
-    if (!config.are_scalars_on_device && d_scalars) cudaFree(d_scalars);
-    if (!config.are_points_on_device && d_bases) cudaFree(d_bases);
-    if (!config.are_results_on_device && d_result) cudaFree(d_result);
+    // Track cleanup errors separately from main operation errors
+    cudaError_t cleanup_err = cudaSuccess;
     
+    #define SAFE_FREE(ptr) do { \
+        if (ptr) { \
+            cudaError_t e = cudaFree(ptr); \
+            if (e != cudaSuccess && cleanup_err == cudaSuccess) cleanup_err = e; \
+        } \
+    } while(0)
+    
+    SAFE_FREE(d_buckets);
+    SAFE_FREE(d_window_results);
+    SAFE_FREE(d_bucket_indices);
+    SAFE_FREE(d_packed_indices);
+    SAFE_FREE(d_bucket_indices_sorted);
+    SAFE_FREE(d_packed_indices_sorted);
+    SAFE_FREE(d_bucket_offsets);
+    SAFE_FREE(d_bucket_sizes);
+    
+    if (!config.are_scalars_on_device) SAFE_FREE(d_scalars);
+    if (!config.are_points_on_device) SAFE_FREE(d_bases);
+    if (!config.are_results_on_device) SAFE_FREE(d_result);
+    
+    #undef SAFE_FREE
     #undef MSM_CUDA_CHECK
-    return err;
+    
+    // Return original error if present, otherwise cleanup error
+    return (err != cudaSuccess) ? err : cleanup_err;
 }
 
 } // namespace msm
