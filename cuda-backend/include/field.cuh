@@ -300,6 +300,40 @@ using Fr = Field<fp_config>;  // Scalar field
 using Fq = Field<fq_config>;  // Base field
 
 // =============================================================================
+// Constant-Time Selection Helpers (for side-channel resistance)
+// =============================================================================
+
+/**
+ * @brief Constant-time conditional selection: result = cond ? a : b
+ * 
+ * SECURITY: This function executes in constant time regardless of the value
+ * of `cond`. It prevents timing side-channels by avoiding branches.
+ * 
+ * @param result Output field element
+ * @param a Value selected when cond is true (non-zero)
+ * @param b Value selected when cond is false (zero)
+ * @param cond Condition (0 = select b, non-zero = select a)
+ */
+template<typename Config>
+__device__ __forceinline__ void field_cmov(
+    Field<Config>& result,
+    const Field<Config>& a,
+    const Field<Config>& b,
+    int cond
+) {
+    constexpr int LIMBS = Config::LIMBS;
+    
+    // Convert condition to all-ones or all-zeros mask
+    uint64_t mask = (uint64_t)(-(int64_t)(cond != 0));
+    
+    UNROLL_LOOP
+    for (int i = 0; i < LIMBS; i++) {
+        // result[i] = (mask & a[i]) | (~mask & b[i])
+        result.limbs[i] = (mask & a.limbs[i]) | (~mask & b.limbs[i]);
+    }
+}
+
+// =============================================================================
 // Montgomery arithmetic - Device functions
 // =============================================================================
 

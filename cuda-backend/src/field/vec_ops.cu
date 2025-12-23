@@ -259,90 +259,242 @@ __global__ void batch_inv_compute_kernel(
 }
 
 /**
- * @brief Serial batch inversion using Montgomery's trick (host launch)
+ * @brief Parallel batch inversion using Montgomery's trick
+ * 
+ * Algorithm:
+ * 1. Phase 1: Each block computes prefix products for its chunk
+ * 2. Phase 2: Single thread inverts final product (unavoidable)
+ * 3. Phase 3: Each block computes suffix inverses and final results
  * 
  * Inverts n elements using 3(n-1) multiplications + 1 inversion
  * instead of n inversions (each ~256 multiplications).
  * 
  * Speedup: ~85x for large batches
  */
-__global__ void batch_inv_montgomery_kernel(
-    Fr* output,
+
+/**
+ * @brief Phase 1: Compute prefix products within each block
+ */
+__global__ void batch_inv_prefix_phase1_kernel(
+    Fr* prefix,           // Output: prefix products (same size as input)
+    Fr* block_products,   // Output: product of each block
     const Fr* input,
-    Fr* scratch,  // size n for prefix products
     int size
 ) {
-    // This kernel runs with a single thread for correctness
-    // For large sizes, use the parallel version
-    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    extern __shared__ Fr shared[];
     
-    if (size == 0) return;
-    if (size == 1) {
-        output[0] = field_inv(input[0]);
-        return;
+    int tid = threadIdx.x;
+    int block_start = blockIdx.x * blockDim.x;
+    int gid = block_start + tid;
+    
+    // Load input to shared memory
+    if (gid < size) {
+        shared[tid] = input[gid];
+    } else {
+        shared[tid] = Fr::one();
     }
+    __syncthreads();
     
-    // Step 1: Compute prefix products
-    // scratch[i] = input[0] * input[1] * ... * input[i]
-    scratch[0] = input[0];
-    for (int i = 1; i < size; i++) {
-        scratch[i] = scratch[i-1] * input[i];
-    }
-    
-    // Step 2: Invert the final product
-    Fr total_inv = field_inv(scratch[size - 1]);
-    
-    // Step 3: Compute individual inverses working backwards
-    // output[i] = (product of 0..i-1) * (inverse of product i..n-1)
-    for (int i = size - 1; i >= 0; i--) {
-        if (i == 0) {
-            output[0] = total_inv;
-        } else {
-            output[i] = scratch[i-1] * total_inv;
+    // Parallel prefix product using Hillis-Steele algorithm
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        Fr val = shared[tid];
+        if (tid >= stride) {
+            val = shared[tid - stride] * val;
         }
-        // Update total_inv for next iteration: multiply by input[i] to "remove" it
-        total_inv = total_inv * input[i];
+        __syncthreads();
+        shared[tid] = val;
+        __syncthreads();
+    }
+    
+    // Write prefix products to global memory
+    if (gid < size) {
+        prefix[gid] = shared[tid];
+    }
+    
+    // Last thread in block writes block product
+    if (tid == blockDim.x - 1) {
+        block_products[blockIdx.x] = shared[tid];
     }
 }
 
 /**
- * @brief Parallel batch inversion kernel using Montgomery's trick
- * 
- * Each block handles a chunk of elements using the serial algorithm,
- * then results are combined across blocks.
+ * @brief Phase 2: Compute prefix products of block products (small, runs on single block)
  */
-__global__ void batch_inv_parallel_kernel(
+__global__ void batch_inv_block_prefix_kernel(
+    Fr* block_prefix_inv,   // Output: inclusive prefix inverse for each block
+    Fr* block_products,     // Input: product of each block
+    int num_blocks
+) {
+    // Single block handles this phase
+    if (blockIdx.x != 0) return;
+    
+    extern __shared__ Fr shared[];
+    int tid = threadIdx.x;
+    
+    // Load block products
+    if (tid < num_blocks) {
+        shared[tid] = block_products[tid];
+    } else {
+        shared[tid] = Fr::one();
+    }
+    __syncthreads();
+    
+    // Compute prefix products of block products
+    if (tid == 0) {
+        for (int i = 1; i < num_blocks; i++) {
+            shared[i] = shared[i-1] * shared[i];
+        }
+    }
+    __syncthreads();
+    
+    // Invert the total product
+    Fr total_inv;
+    if (tid == 0) {
+        total_inv = field_inv(shared[num_blocks - 1]);
+    }
+    
+    // Broadcast total_inv to all threads via shared memory
+    if (tid == 0) {
+        shared[num_blocks] = total_inv;
+    }
+    __syncthreads();
+    total_inv = shared[num_blocks];
+    
+    // Compute inclusive prefix inverses for each block
+    // block_prefix_inv[i] = 1 / (block_product[0] * ... * block_product[i])
+    // We have:
+    // shared[i] = B_0 * ... * B_i
+    // total_inv = 1 / (B_0 * ... * B_{n-1})
+    //
+    // We want inv(shared[i]).
+    // inv(shared[i]) = total_inv * (B_{i+1} * ... * B_{n-1})
+    // This requires suffix products of blocks.
+    
+    // Simpler: Just invert each shared[i] sequentially?
+    // Or use the same trick:
+    // inv(shared[i]) = inv(shared[i+1]) * B_{i+1}.
+    // Start from inv(shared[n-1]) = total_inv.
+    
+    if (tid == 0) {
+        Fr current_inv = total_inv;
+        block_prefix_inv[num_blocks - 1] = current_inv;
+        
+        for (int i = num_blocks - 2; i >= 0; i--) {
+            current_inv = current_inv * block_products[i+1];
+            block_prefix_inv[i] = current_inv;
+        }
+    }
+}
+
+/**
+ * @brief Phase 3: Compute individual inverses using prefix products and block inverses
+ */
+__global__ void batch_inv_compute_phase3_kernel(
     Fr* output,
     const Fr* input,
-    Fr* block_products,  // Product of each block's elements
-    int size,
-    int elements_per_block
+    const Fr* prefix,
+    const Fr* block_prefix_inv,
+    int size
 ) {
     extern __shared__ Fr shared[];
-    Fr* prefix = shared;  // size = elements_per_block
     
     int tid = threadIdx.x;
-    int block_start = blockIdx.x * elements_per_block;
-    int block_end = min(block_start + elements_per_block, size);
-    int block_size = block_end - block_start;
+    int block_start = blockIdx.x * blockDim.x;
+    int gid = block_start + tid;
     
-    if (block_size <= 0) return;
-    
-    // Step 1: Load and compute prefix products in shared memory
-    if (tid < block_size) {
-        prefix[tid] = input[block_start + tid];
+    // Load input to shared memory
+    Fr val = Fr::one();
+    if (gid < size) {
+        val = input[gid];
     }
+    shared[tid] = val;
     __syncthreads();
     
-    // Serial prefix product within block (could parallelize with scan)
-    if (tid == 0) {
-        for (int i = 1; i < block_size; i++) {
-            prefix[i] = prefix[i-1] * prefix[i];
+    // Compute suffix products in shared memory (Backward Scan)
+    // We want shared[tid] to contain product of input[gid]...input[block_end-1]
+    
+    // Naive parallel suffix scan
+    // For stride = 1, 2, 4...
+    // if tid + stride < blockDim, val = val * shared[tid+stride]
+    // But we need to be careful with synchronization and overwriting
+    
+    for (int stride = 1; stride < blockDim.x; stride *= 2) {
+        Fr neighbor = Fr::one();
+        if (tid + stride < blockDim.x) {
+            neighbor = shared[tid + stride];
         }
-        // Store block product
-        block_products[blockIdx.x] = prefix[block_size - 1];
+        __syncthreads();
+        
+        // Only update if we have a neighbor (optimization)
+        if (tid + stride < blockDim.x) {
+            shared[tid] = shared[tid] * neighbor;
+        }
+        __syncthreads();
     }
-    __syncthreads();
+    
+    if (gid >= size) return;
+    
+    // output[i] = prefix[i-1] * local_suffix[i+1] * block_prefix_inv[blockIdx.x]
+    
+    Fr prev_prefix = (gid == 0) ? Fr::one() : prefix[gid - 1];
+    
+    Fr local_suffix_next = Fr::one();
+    if (tid + 1 < blockDim.x && gid + 1 < size) {
+        local_suffix_next = shared[tid + 1];
+    }
+    
+    Fr block_inv = block_prefix_inv[blockIdx.x];
+    
+    // Combine
+    Fr res = prev_prefix * local_suffix_next;
+    res = res * block_inv;
+    
+    output[gid] = res;
+}
+
+/**
+ * @brief Simple parallel batch inversion (block-parallel Montgomery's trick)
+ * 
+ * Each block independently inverts a chunk of elements.
+ * For large arrays, this is much faster than single-threaded.
+ */
+__global__ void batch_inv_parallel_simple_kernel(
+    Fr* output,
+    const Fr* input,
+    int size,
+    int elements_per_thread
+) {
+    extern __shared__ Fr scratch[];
+    
+    int tid = threadIdx.x;
+    int block_start = blockIdx.x * blockDim.x * elements_per_thread;
+    int my_start = block_start + tid * elements_per_thread;
+    int my_end = min(my_start + elements_per_thread, size);
+    int my_size = my_end - my_start;
+    
+    if (my_size <= 0) return;
+    
+    // Each thread processes its chunk using Montgomery's trick
+    Fr* my_scratch = scratch + tid * elements_per_thread;
+    
+    // Step 1: Compute prefix products
+    my_scratch[0] = input[my_start];
+    for (int i = 1; i < my_size; i++) {
+        my_scratch[i] = my_scratch[i-1] * input[my_start + i];
+    }
+    
+    // Step 2: Invert final product
+    Fr total_inv = field_inv(my_scratch[my_size - 1]);
+    
+    // Step 3: Compute individual inverses
+    for (int i = my_size - 1; i >= 0; i--) {
+        if (i == 0) {
+            output[my_start] = total_inv;
+        } else {
+            output[my_start + i] = my_scratch[i-1] * total_inv;
+        }
+        total_inv = total_inv * input[my_start + i];
+    }
 }
 
 /**
@@ -785,28 +937,57 @@ eIcicleError batch_inv_cuda(
                eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
     }
     
-    // Allocate scratch space for prefix products
-    F* d_scratch;
-    cudaError_t err = cudaMalloc(&d_scratch, size * sizeof(F));
-    if (err != cudaSuccess) {
-        return eIcicleError::UNKNOWN_ERROR;
+    // Allocate scratch space
+    F *d_prefix, *d_block_products, *d_block_prefix_inv;
+    const int threads = 256;
+    const int blocks = (size + threads - 1) / threads;
+    
+    // Check if we exceed single-block limit for Phase 2
+    if (blocks > 1024) {
+        // For very large arrays (>262K elements), fall back to simple element-wise inversion
+        // A full recursive implementation would require Phase 2 to be multi-level
+        const int inv_threads = 256;
+        const int inv_blocks = (size + inv_threads - 1) / inv_threads;
+        vec_inv_kernel<<<inv_blocks, inv_threads, 0, stream>>>(output, input, size);
+        return cudaGetLastError() == cudaSuccess ? eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
     }
     
-    // Launch Montgomery batch inversion kernel
-    // Uses single thread for correctness (could parallelize for very large sizes)
-    batch_inv_montgomery_kernel<<<1, 1, 0, stream>>>(
-        output, input, d_scratch, size
+    cudaError_t err;
+    err = cudaMalloc(&d_prefix, size * sizeof(F));
+    if (err != cudaSuccess) return eIcicleError::ALLOCATION_FAILED;
+    
+    err = cudaMalloc(&d_block_products, blocks * sizeof(F));
+    if (err != cudaSuccess) { cudaFree(d_prefix); return eIcicleError::ALLOCATION_FAILED; }
+    
+    err = cudaMalloc(&d_block_prefix_inv, blocks * sizeof(F));
+    if (err != cudaSuccess) { cudaFree(d_prefix); cudaFree(d_block_products); return eIcicleError::ALLOCATION_FAILED; }
+    
+    // Phase 1: Block-level prefix products
+    batch_inv_prefix_phase1_kernel<<<blocks, threads, threads * sizeof(F), stream>>>(
+        d_prefix, d_block_products, input, size
+    );
+    
+    // Phase 2: Block product prefix inverses (single block)
+    // Shared mem: blocks elements + 1 for total_inv
+    batch_inv_block_prefix_kernel<<<1, blocks, (blocks + 1) * sizeof(F), stream>>>(
+        d_block_prefix_inv, d_block_products, blocks
+    );
+    
+    // Phase 3: Final computation
+    batch_inv_compute_phase3_kernel<<<blocks, threads, threads * sizeof(F), stream>>>(
+        output, input, d_prefix, d_block_prefix_inv, size
     );
     
     err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        cudaFree(d_scratch);
-        return eIcicleError::UNKNOWN_ERROR;
-    }
     
-    // Synchronize to ensure completion before freeing scratch
-    err = cudaStreamSynchronize(stream);
-    cudaFree(d_scratch);
+    // Cleanup (async if possible, but we need to free)
+    // If async, we can't free immediately unless we use cudaFreeAsync (CUDA 11.2+)
+    // For compatibility, we synchronize.
+    cudaStreamSynchronize(stream);
+    
+    cudaFree(d_prefix);
+    cudaFree(d_block_products);
+    cudaFree(d_block_prefix_inv);
     
     return (err == cudaSuccess) ? eIcicleError::SUCCESS : eIcicleError::UNKNOWN_ERROR;
 }

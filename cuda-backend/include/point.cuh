@@ -351,6 +351,54 @@ __device__ __forceinline__ G2Projective g2_affine_to_projective(const G2Affine& 
 }
 
 // =============================================================================
+// Constant-Time Point Selection (for side-channel resistance)
+// =============================================================================
+
+/**
+ * @brief Constant-time conditional selection for G1Projective: result = cond ? a : b
+ * 
+ * SECURITY: This function executes in constant time regardless of the value
+ * of `cond`. It prevents timing side-channels by avoiding branches.
+ */
+__device__ __forceinline__ void g1_cmov(
+    G1Projective& result,
+    const G1Projective& a,
+    const G1Projective& b,
+    int cond
+) {
+    field_cmov(result.X, a.X, b.X, cond);
+    field_cmov(result.Y, a.Y, b.Y, cond);
+    field_cmov(result.Z, a.Z, b.Z, cond);
+}
+
+/**
+ * @brief Constant-time conditional copy for Fq2 (used for G2)
+ */
+__device__ __forceinline__ void fq2_cmov(
+    Fq2& result,
+    const Fq2& a,
+    const Fq2& b,
+    int cond
+) {
+    field_cmov(result.c0, a.c0, b.c0, cond);
+    field_cmov(result.c1, a.c1, b.c1, cond);
+}
+
+/**
+ * @brief Constant-time conditional selection for G2Projective: result = cond ? a : b
+ */
+__device__ __forceinline__ void g2_cmov(
+    G2Projective& result,
+    const G2Projective& a,
+    const G2Projective& b,
+    int cond
+) {
+    fq2_cmov(result.X, a.X, b.X, cond);
+    fq2_cmov(result.Y, a.Y, b.Y, cond);
+    fq2_cmov(result.Z, a.Z, b.Z, cond);
+}
+
+// =============================================================================
 // G1 Point Operations
 // =============================================================================
 
@@ -361,12 +409,11 @@ __device__ __forceinline__ G2Projective g2_affine_to_projective(const G2Affine& 
  * Cost: 1S + 5M + 8add
  * 
  * NOTE: This function is safe for in-place operation (result == p)
+ * NOTE: Uses constant-time selection for identity handling
  */
 __device__ __forceinline__ void g1_double(G1Projective& result, const G1Projective& p) {
-    if (p.is_identity()) {
-        result = p;
-        return;
-    }
+    // Check identity upfront - will use cmov at end for constant-time handling
+    int is_identity = p.is_identity() ? 1 : 0;
 
     Fq t0, t1, t2, t3;
     
@@ -407,27 +454,32 @@ __device__ __forceinline__ void g1_double(G1Projective& result, const G1Projecti
     field_mul(new_Z, p.Y, p.Z);
     field_add(new_Z, new_Z, new_Z);
     
-    // Now write to result
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Compute the result
+    G1Projective computed;
+    computed.X = new_X;
+    computed.Y = new_Y;
+    computed.Z = new_Z;
+    
+    // Constant-time: select identity or computed result
+    G1Projective identity_point = G1Projective::identity();
+    g1_cmov(result, identity_point, computed, is_identity);
 }
 
 /**
- * @brief Add two projective points: result = P + Q
+ * @brief Add two projective points: result = P + Q (Constant-Time)
  * 
- * Uses complete addition formula.
+ * Uses complete addition formula with constant-time edge case handling.
+ * Computes all three cases (add, double, identity) and uses cmov to select.
+ * 
  * NOTE: This function is safe for in-place operation (result == p or result == q)
+ * 
+ * SECURITY: No branches that depend on point values. All edge cases handled
+ * via constant-time selection (cmov).
  */
 __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective& p, const G1Projective& q) {
-    if (p.is_identity()) {
-        result = q;
-        return;
-    }
-    if (q.is_identity()) {
-        result = p;
-        return;
-    }
+    // Pre-compute conditions (will use cmov at end)
+    int p_is_identity = p.is_identity() ? 1 : 0;
+    int q_is_identity = q.is_identity() ? 1 : 0;
 
     Fq z1z1, z2z2, u1, u2, s1, s2, h, i, j, r, v;
     
@@ -451,23 +503,11 @@ __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective&
     // H = U2 - U1
     field_sub(h, u2, u1);
     
-    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
-    // This means either P == Q (doubling case) or P == -Q (sum is point at infinity)
-    // We check S2 - S1 to distinguish:
-    //   - If S2 == S1: points are equal → use doubling formula
-    //   - If S2 != S1: points are negatives → result is identity
-    if (h.is_zero()) {
-        Fq diff;
-        field_sub(diff, s2, s1);
-        if (diff.is_zero()) {
-            g1_double(result, p);
-            return;
-        } else {
-            // P + (-P) = Identity
-            result = G1Projective::identity();
-            return;
-        }
-    }
+    // Compute conditions for edge cases (constant-time)
+    int h_is_zero = h.is_zero() ? 1 : 0;
+    Fq s_diff;
+    field_sub(s_diff, s2, s1);
+    int s_diff_is_zero = s_diff.is_zero() ? 1 : 0;
     
     // I = (2*H)^2
     field_add(i, h, h);
@@ -512,27 +552,51 @@ __device__ __forceinline__ void g1_add(G1Projective& result, const G1Projective&
     field_sub(new_Z, new_Z, z2z2);
     field_mul(new_Z, new_Z, h);
     
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Standard addition result
+    G1Projective add_result;
+    add_result.X = new_X;
+    add_result.Y = new_Y;
+    add_result.Z = new_Z;
+    
+    // Compute doubled result (for when P == Q)
+    G1Projective doubled;
+    g1_double(doubled, p);
+    
+    // Identity point
+    G1Projective identity_point = G1Projective::identity();
+    
+    // Constant-time selection of result:
+    // 1. If h == 0 and s_diff == 0: P == Q, use doubled
+    // 2. If h == 0 and s_diff != 0: P == -Q, use identity
+    // 3. Otherwise: use add_result
+    
+    // Start with add_result, then override based on conditions
+    result = add_result;
+    
+    // If h is zero, select between doubled and identity based on s_diff
+    int use_doubled = h_is_zero & s_diff_is_zero;
+    int use_identity = h_is_zero & (!s_diff_is_zero);
+    
+    g1_cmov(result, doubled, result, use_doubled);
+    g1_cmov(result, identity_point, result, use_identity);
+    
+    // Handle input identity cases
+    g1_cmov(result, q, result, p_is_identity);
+    g1_cmov(result, p, result, q_is_identity);
 }
 
 /**
- * @brief Mixed addition: result = P + Q where Q is affine
+ * @brief Mixed addition: result = P + Q where Q is affine (Constant-Time)
  * 
  * More efficient than general addition when one point is affine.
  * NOTE: This function is safe for in-place operation (result == p)
+ * 
+ * SECURITY: Uses constant-time selection for all edge cases.
  */
 __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Projective& p, const G1Affine& q) {
-    if (p.is_identity()) {
-        result = G1Projective::from_affine(q);
-        return;
-    }
-    if (q.is_identity()) {
-        result = p;
-        return;
-    }
+    // Pre-compute conditions
+    int p_is_identity = p.is_identity() ? 1 : 0;
+    int q_is_identity = q.is_identity() ? 1 : 0;
 
     Fq z1z1, u2, s2, h, hh, i, j, r, v;
     
@@ -549,19 +613,11 @@ __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Proje
     // H = U2 - X1
     field_sub(h, u2, p.X);
     
-    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
-    // Check S2 - Y1 to distinguish doubling from negation
-    if (h.is_zero()) {
-        Fq diff;
-        field_sub(diff, s2, p.Y);
-        if (diff.is_zero()) {
-            g1_double(result, p);
-            return;
-        } else {
-            result = G1Projective::identity();
-            return;
-        }
-    }
+    // Compute conditions for edge cases (constant-time)
+    int h_is_zero = h.is_zero() ? 1 : 0;
+    Fq s_diff;
+    field_sub(s_diff, s2, p.Y);
+    int s_diff_is_zero = s_diff.is_zero() ? 1 : 0;
     
     // HH = H^2
     field_sqr(hh, h);
@@ -607,10 +663,32 @@ __device__ __forceinline__ void g1_add_mixed(G1Projective& result, const G1Proje
     field_sub(new_Z, new_Z, z1z1);
     field_sub(new_Z, new_Z, hh);
     
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Standard addition result
+    G1Projective add_result;
+    add_result.X = new_X;
+    add_result.Y = new_Y;
+    add_result.Z = new_Z;
+    
+    // Compute doubled result (for when P == Q)
+    G1Projective doubled;
+    g1_double(doubled, p);
+    
+    // Identity point
+    G1Projective identity_point = G1Projective::identity();
+    
+    // Constant-time selection of result
+    result = add_result;
+    
+    int use_doubled = h_is_zero & s_diff_is_zero;
+    int use_identity = h_is_zero & (!s_diff_is_zero);
+    
+    g1_cmov(result, doubled, result, use_doubled);
+    g1_cmov(result, identity_point, result, use_identity);
+    
+    // Handle input identity cases
+    G1Projective q_proj = G1Projective::from_affine(q);
+    g1_cmov(result, q_proj, result, p_is_identity);
+    g1_cmov(result, p, result, q_is_identity);
 }
 
 /**

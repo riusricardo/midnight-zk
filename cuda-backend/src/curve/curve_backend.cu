@@ -188,6 +188,7 @@ eIcicleError bls12_381_g1_from_montgomery(
     G1Projective* output
 ) {
     cudaStream_t stream = static_cast<cudaStream_t>(config->stream);
+    cudaError_t err;
     
     const G1Projective* d_input = input;
     G1Projective* d_output = output;
@@ -196,11 +197,23 @@ eIcicleError bls12_381_g1_from_montgomery(
     bool need_alloc_output = !config->is_result_on_device;
     
     if (need_alloc_input) {
-        cudaMalloc((void**)&d_input, size * sizeof(G1Projective));
-        cudaMemcpy((void*)d_input, input, size * sizeof(G1Projective), cudaMemcpyHostToDevice);
+        err = cudaMalloc((void**)&d_input, size * sizeof(G1Projective));
+        if (err != cudaSuccess) return eIcicleError::ALLOCATION_FAILED;
+        
+        // Use async copy with stream
+        err = cudaMemcpyAsync((void*)d_input, input, size * sizeof(G1Projective), 
+                              cudaMemcpyHostToDevice, stream);
+        if (err != cudaSuccess) {
+            cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
     }
     if (need_alloc_output) {
-        cudaMalloc(&d_output, size * sizeof(G1Projective));
+        err = cudaMalloc(&d_output, size * sizeof(G1Projective));
+        if (err != cudaSuccess) {
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::ALLOCATION_FAILED;
+        }
     }
     
     const int threads = 256;
@@ -209,8 +222,40 @@ eIcicleError bls12_381_g1_from_montgomery(
         d_output, d_input, size
     );
     
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        if (need_alloc_output) cudaFree(d_output);
+        if (need_alloc_input) cudaFree((void*)d_input);
+        return eIcicleError::UNKNOWN_ERROR;
+    }
+    
     if (need_alloc_output) {
-        cudaMemcpy(output, d_output, size * sizeof(G1Projective), cudaMemcpyDeviceToHost);
+        // Use async copy with stream
+        err = cudaMemcpyAsync(output, d_output, size * sizeof(G1Projective), 
+                              cudaMemcpyDeviceToHost, stream);
+        if (err != cudaSuccess) {
+            cudaFree(d_output);
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::COPY_FAILED;
+        }
+    }
+    
+    // Synchronize if not async mode
+    if (!config->is_async) {
+        err = cudaStreamSynchronize(stream);
+        if (err != cudaSuccess) {
+            if (need_alloc_output) cudaFree(d_output);
+            if (need_alloc_input) cudaFree((void*)d_input);
+            return eIcicleError::UNKNOWN_ERROR;
+        }
+    }
+    
+    // Cleanup allocations (must sync before freeing in async mode)
+    if (config->is_async && (need_alloc_input || need_alloc_output)) {
+        cudaStreamSynchronize(stream);
+    }
+    
+    if (need_alloc_output) {
         cudaFree(d_output);
     }
     if (need_alloc_input) {
