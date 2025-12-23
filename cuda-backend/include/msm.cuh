@@ -57,11 +57,6 @@
  * - Signed digit representation for smaller bucket count
  * - CUB library for efficient parallel sorting
  * 
- * Typical performance (RTX 3090):
- *   - 2^16 points: ~5ms
- *   - 2^18 points: ~15ms
- *   - 2^20 points: ~50ms
- * 
  * Kernels:
  * - compute_bucket_indices_kernel: Decompose scalars into bucket indices
  * - accumulate_sorted_kernel: Sort-Reduce bucket accumulation
@@ -729,12 +724,6 @@ cudaError_t msm_cuda(
         histogram_atomic_kernel<<<blocks, threads, 0, stream>>>(
             d_bucket_sizes, d_bucket_indices, num_contributions, total_buckets);
         MSM_CUDA_CHECK(cudaGetLastError());
-        
-        // Ensure histogram completes before proceeding to scan
-        // This prevents race conditions in bucket size computation
-        if (!config.is_async) {
-            MSM_CUDA_CHECK(cudaStreamSynchronize(stream));
-        }
     }
     
     // 3. Scan (Compute bucket offsets)

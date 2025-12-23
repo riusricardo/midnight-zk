@@ -101,10 +101,11 @@ using MsmPreComputeImpl = std::function<eIcicleError(
     const MSMConfig& config,
     icicle_affine_t* output_bases)>;
 
-// These functions are provided by libicicle_curve_bls12_381.so
-// They're declared here so we can call them at registration time
-extern void register_msm(const std::string& deviceType, MsmImpl impl);
-extern void register_msm_precompute_bases(const std::string& deviceType, MsmPreComputeImpl impl);
+// G1 MSM registration functions - provided by ICICLE runtime (libicicle_curve_bls12_381.so)
+// These are called at library load time when our backend is dlopen'd by ICICLE.
+// Declared as weak symbols so they can be undefined when testing standalone.
+__attribute__((weak)) void register_msm(const std::string& deviceType, MsmImpl impl);
+__attribute__((weak)) void register_msm_precompute_bases(const std::string& deviceType, MsmPreComputeImpl impl);
 
 // =============================================================================
 // G2 MSM Registration
@@ -145,10 +146,13 @@ void register_g2_msm_precompute_bases(const std::string& deviceType, MsmG2PreCom
 #define ICICLE_UNIQUE(prefix) ICICLE_CONCAT(prefix, __COUNTER__)
 
 // G1 MSM Registration
+// Check if registration functions are available (they're weak symbols)
 #define REGISTER_MSM_BACKEND(DEVICE_TYPE, FUNC)                    \
     namespace {                                                     \
         static bool ICICLE_UNIQUE(_reg_msm_) = []() -> bool {      \
-            icicle::register_msm(DEVICE_TYPE, FUNC);               \
+            if (icicle::register_msm) {                            \
+                icicle::register_msm(DEVICE_TYPE, FUNC);           \
+            }                                                       \
             return true;                                            \
         }();                                                        \
     }
@@ -156,7 +160,9 @@ void register_g2_msm_precompute_bases(const std::string& deviceType, MsmG2PreCom
 #define REGISTER_MSM_PRE_COMPUTE_BASES_BACKEND(DEVICE_TYPE, FUNC)  \
     namespace {                                                     \
         static bool ICICLE_UNIQUE(_reg_msm_pre_) = []() -> bool {  \
-            icicle::register_msm_precompute_bases(DEVICE_TYPE, FUNC); \
+            if (icicle::register_msm_precompute_bases) {           \
+                icicle::register_msm_precompute_bases(DEVICE_TYPE, FUNC); \
+            }                                                       \
             return true;                                            \
         }();                                                        \
     }

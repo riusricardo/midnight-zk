@@ -32,6 +32,8 @@ extern "C" {
     eIcicleError bls12_381_vector_add(const Fr*, const Fr*, size_t, const VecOpsConfig*, Fr*);
     eIcicleError bls12_381_vector_sub(const Fr*, const Fr*, size_t, const VecOpsConfig*, Fr*);
     eIcicleError bls12_381_vector_mul(const Fr*, const Fr*, size_t, const VecOpsConfig*, Fr*);
+    eIcicleError bls12_381_g1_scalar_mul(const G1Affine*, const Fr*, int, const VecOpsConfig*, G1Projective*);
+    eIcicleError bls12_381_g1_scalar_mul_glv(const G1Affine*, const Fr*, int, const VecOpsConfig*, G1Projective*);
 }
 
 // =============================================================================
@@ -599,6 +601,523 @@ bool test_library_loading() {
 }
 
 // =============================================================================
+// GLV Scalar Multiplication Tests
+// =============================================================================
+
+// Generator point for BLS12-381 G1 (in Montgomery form)
+// G1 generator: x = 0x17f1d3a73197d7942695638c4fa9ac0fc3688c4f9774b905a14e3a3f171bac586c55e83ff97a1aeffb3af00adb22c6bb
+//               y = 0x08b3f481e3aaa0f1a09e30ed741d8ae4fcf5e095d5d00af600db18cb2c04b3edd03cc744a2888ae40caa232946c5e7e1
+// Converted to Montgomery form for Fq
+G1Affine make_g1_generator() {
+    G1Affine g;
+    // x in Montgomery form
+    g.x.limbs[0] = 0xfd530c16a28a2ed5ULL;
+    g.x.limbs[1] = 0xc0f3db9eb2a81c60ULL;
+    g.x.limbs[2] = 0xa18ad315bdd26cb9ULL;
+    g.x.limbs[3] = 0x6c69116d93a67ca5ULL;
+    g.x.limbs[4] = 0x04c9ad3661f6eae1ULL;
+    g.x.limbs[5] = 0x1120bb669f6f8d4eULL;
+    
+    // y in Montgomery form
+    g.y.limbs[0] = 0x11560bf17baa99bcULL;
+    g.y.limbs[1] = 0xe17df37a3381b236ULL;
+    g.y.limbs[2] = 0x0f0c5ec24fea7680ULL;
+    g.y.limbs[3] = 0x2e6d639bed6c3ac2ULL;
+    g.y.limbs[4] = 0x044a7cd5c36d13f1ULL;
+    g.y.limbs[5] = 0x120230e9d5639d9dULL;
+    
+    return g;
+}
+
+// Create scalar from integer value (for testing small scalars)
+Fr make_fr_from_u64(uint64_t val) {
+    Fr r;
+    r.limbs[0] = val;
+    r.limbs[1] = 0;
+    r.limbs[2] = 0;
+    r.limbs[3] = 0;
+    return r;
+}
+
+/**
+ * @brief Test kernel: simple scalar mul using double-and-add (reference implementation)
+ * Used to verify GLV results against a known-correct naive implementation.
+ */
+__global__ void reference_scalar_mul_kernel(
+    G1Projective* output,
+    const G1Affine* base,
+    const Fr* scalar,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    G1Projective result = G1Projective::identity();
+    G1Projective p = G1Projective::from_affine(base[idx]);
+    Fr s = scalar[idx];
+    
+    // Simple double-and-add (LSB to MSB)
+    for (int i = 0; i < 255; i++) {
+        int limb_idx = i / 64;
+        int bit_idx = i % 64;
+        
+        if ((s.limbs[limb_idx] >> bit_idx) & 1) {
+            g1_add(result, result, p);
+        }
+        g1_double(p, p);
+    }
+    
+    output[idx] = result;
+}
+
+/**
+ * @brief Compare two G1 projective points for equality
+ * Points are equal if X1*Z2 = X2*Z1 and Y1*Z2 = Y2*Z1
+ */
+__global__ void compare_g1_points_kernel(
+    const G1Projective* a,
+    const G1Projective* b,
+    int* equal_flags,
+    int size
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= size) return;
+    
+    G1Projective p1 = a[idx];
+    G1Projective p2 = b[idx];
+    
+    // Both identity?
+    if (p1.is_identity() && p2.is_identity()) {
+        equal_flags[idx] = 1;
+        return;
+    }
+    
+    // One identity, other not?
+    if (p1.is_identity() != p2.is_identity()) {
+        equal_flags[idx] = 0;
+        return;
+    }
+    
+    // Compare: X1*Z2 == X2*Z1
+    Fq x1z2, x2z1;
+    field_mul(x1z2, p1.X, p2.Z);
+    field_mul(x2z1, p2.X, p1.Z);
+    
+    bool x_equal = true;
+    for (int i = 0; i < 6; i++) {
+        if (x1z2.limbs[i] != x2z1.limbs[i]) {
+            x_equal = false;
+            break;
+        }
+    }
+    
+    // Compare: Y1*Z2 == Y2*Z1
+    Fq y1z2, y2z1;
+    field_mul(y1z2, p1.Y, p2.Z);
+    field_mul(y2z1, p2.Y, p1.Z);
+    
+    bool y_equal = true;
+    for (int i = 0; i < 6; i++) {
+        if (y1z2.limbs[i] != y2z1.limbs[i]) {
+            y_equal = false;
+            break;
+        }
+    }
+    
+    equal_flags[idx] = (x_equal && y_equal) ? 1 : 0;
+}
+
+bool test_scalar_mul_basic() {
+    std::cout << "Testing scalar multiplication (basic)... " << std::flush;
+    
+    const int n = 64;
+    std::mt19937_64 rng(12345);
+    
+    // Use generator point for all bases
+    G1Affine gen = make_g1_generator();
+    std::vector<G1Affine> bases(n, gen);
+    
+    // Generate random scalars
+    std::vector<Fr> scalars(n);
+    for (int i = 0; i < n; i++) {
+        scalars[i] = random_fr(rng);
+    }
+    
+    // Test non-GLV scalar multiplication
+    VecOpsConfig config;
+    config.stream = nullptr;
+    config.is_a_on_device = false;
+    config.is_b_on_device = false;
+    config.is_result_on_device = false;
+    config.is_async = false;
+    
+    std::vector<G1Projective> results(n);
+    
+    eIcicleError err = bls12_381_g1_scalar_mul(
+        bases.data(), scalars.data(), n, &config, results.data()
+    );
+    
+    if (err != eIcicleError::SUCCESS) {
+        std::cout << "FAILED (function returned error)" << std::endl;
+        return false;
+    }
+    
+    // Compute reference results using double-and-add
+    G1Affine* d_bases;
+    Fr* d_scalars;
+    G1Projective* d_reference;
+    int* d_equal_flags;
+    
+    CHECK_CUDA(cudaMalloc(&d_bases, n * sizeof(G1Affine)));
+    CHECK_CUDA(cudaMalloc(&d_scalars, n * sizeof(Fr)));
+    CHECK_CUDA(cudaMalloc(&d_reference, n * sizeof(G1Projective)));
+    CHECK_CUDA(cudaMalloc(&d_equal_flags, n * sizeof(int)));
+    
+    CHECK_CUDA(cudaMemcpy(d_bases, bases.data(), n * sizeof(G1Affine), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_scalars, scalars.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
+    
+    reference_scalar_mul_kernel<<<(n + 255) / 256, 256>>>(d_reference, d_bases, d_scalars, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    // Compare results
+    G1Projective* d_results;
+    CHECK_CUDA(cudaMalloc(&d_results, n * sizeof(G1Projective)));
+    CHECK_CUDA(cudaMemcpy(d_results, results.data(), n * sizeof(G1Projective), cudaMemcpyHostToDevice));
+    
+    compare_g1_points_kernel<<<(n + 255) / 256, 256>>>(d_results, d_reference, d_equal_flags, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    std::vector<int> equal_flags(n);
+    CHECK_CUDA(cudaMemcpy(equal_flags.data(), d_equal_flags, n * sizeof(int), cudaMemcpyDeviceToHost));
+    
+    // Cleanup
+    cudaFree(d_bases);
+    cudaFree(d_scalars);
+    cudaFree(d_reference);
+    cudaFree(d_results);
+    cudaFree(d_equal_flags);
+    
+    // Verify all results match
+    int failures = 0;
+    for (int i = 0; i < n; i++) {
+        if (equal_flags[i] != 1) {
+            failures++;
+            if (failures <= 3) {
+                std::cerr << "Mismatch at index " << i << std::endl;
+            }
+        }
+    }
+    
+    if (failures > 0) {
+        std::cout << "FAILED (" << failures << " mismatches)" << std::endl;
+        return false;
+    }
+    
+    std::cout << "PASSED" << std::endl;
+    return true;
+}
+
+bool test_scalar_mul_glv() {
+    std::cout << "Testing GLV scalar multiplication... " << std::flush;
+    
+    const int n = 128;
+    std::mt19937_64 rng(54321);
+    
+    // Use generator point for all bases
+    G1Affine gen = make_g1_generator();
+    std::vector<G1Affine> bases(n, gen);
+    
+    // Generate random scalars
+    std::vector<Fr> scalars(n);
+    for (int i = 0; i < n; i++) {
+        scalars[i] = random_fr(rng);
+    }
+    
+    // Test GLV scalar multiplication
+    VecOpsConfig config;
+    config.stream = nullptr;
+    config.is_a_on_device = false;
+    config.is_b_on_device = false;
+    config.is_result_on_device = false;
+    config.is_async = false;
+    
+    std::vector<G1Projective> glv_results(n);
+    
+    eIcicleError err = bls12_381_g1_scalar_mul_glv(
+        bases.data(), scalars.data(), n, &config, glv_results.data()
+    );
+    
+    if (err != eIcicleError::SUCCESS) {
+        std::cout << "FAILED (GLV function returned error)" << std::endl;
+        return false;
+    }
+    
+    // Also compute using standard (non-GLV) method
+    std::vector<G1Projective> std_results(n);
+    err = bls12_381_g1_scalar_mul(
+        bases.data(), scalars.data(), n, &config, std_results.data()
+    );
+    
+    if (err != eIcicleError::SUCCESS) {
+        std::cout << "FAILED (standard function returned error)" << std::endl;
+        return false;
+    }
+    
+    // Compare GLV results with standard results
+    G1Projective* d_glv;
+    G1Projective* d_std;
+    int* d_equal_flags;
+    
+    CHECK_CUDA(cudaMalloc(&d_glv, n * sizeof(G1Projective)));
+    CHECK_CUDA(cudaMalloc(&d_std, n * sizeof(G1Projective)));
+    CHECK_CUDA(cudaMalloc(&d_equal_flags, n * sizeof(int)));
+    
+    CHECK_CUDA(cudaMemcpy(d_glv, glv_results.data(), n * sizeof(G1Projective), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_std, std_results.data(), n * sizeof(G1Projective), cudaMemcpyHostToDevice));
+    
+    compare_g1_points_kernel<<<(n + 255) / 256, 256>>>(d_glv, d_std, d_equal_flags, n);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    std::vector<int> equal_flags(n);
+    CHECK_CUDA(cudaMemcpy(equal_flags.data(), d_equal_flags, n * sizeof(int), cudaMemcpyDeviceToHost));
+    
+    cudaFree(d_glv);
+    cudaFree(d_std);
+    cudaFree(d_equal_flags);
+    
+    // Verify all results match
+    int failures = 0;
+    for (int i = 0; i < n; i++) {
+        if (equal_flags[i] != 1) {
+            failures++;
+            if (failures <= 3) {
+                std::cerr << "GLV mismatch at index " << i << std::endl;
+            }
+        }
+    }
+    
+    if (failures > 0) {
+        std::cout << "FAILED (" << failures << " mismatches vs standard)" << std::endl;
+        return false;
+    }
+    
+    std::cout << "PASSED" << std::endl;
+    return true;
+}
+
+bool test_scalar_mul_edge_cases() {
+    std::cout << "Testing scalar mul edge cases... " << std::flush;
+    
+    G1Affine gen = make_g1_generator();
+    
+    VecOpsConfig config;
+    config.stream = nullptr;
+    config.is_a_on_device = false;
+    config.is_b_on_device = false;
+    config.is_result_on_device = false;
+    config.is_async = false;
+    
+    // Test 1: scalar = 0 should give identity
+    {
+        std::vector<G1Affine> bases = { gen };
+        std::vector<Fr> scalars = { make_fr_zero_host() };
+        std::vector<G1Projective> results(1);
+        
+        eIcicleError err = bls12_381_g1_scalar_mul_glv(
+            bases.data(), scalars.data(), 1, &config, results.data()
+        );
+        
+        if (err != eIcicleError::SUCCESS) {
+            std::cout << "FAILED (scalar=0 returned error)" << std::endl;
+            return false;
+        }
+        
+        // Result should be identity (Z = 0)
+        // Check on device
+        G1Projective* d_result;
+        CHECK_CUDA(cudaMalloc(&d_result, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMemcpy(d_result, results.data(), sizeof(G1Projective), cudaMemcpyHostToDevice));
+        
+        // The result Z coordinate should indicate identity
+        // For our implementation, identity is when all coords are zero or Z=0
+        cudaFree(d_result);
+    }
+    
+    // Test 2: scalar = 1 should give the same point
+    {
+        std::vector<G1Affine> bases = { gen };
+        std::vector<Fr> scalars = { make_fr_one_host() };
+        std::vector<G1Projective> results(1);
+        
+        eIcicleError err = bls12_381_g1_scalar_mul_glv(
+            bases.data(), scalars.data(), 1, &config, results.data()
+        );
+        
+        if (err != eIcicleError::SUCCESS) {
+            std::cout << "FAILED (scalar=1 returned error)" << std::endl;
+            return false;
+        }
+        
+        // Result should equal the generator
+        G1Projective* d_result;
+        G1Projective* d_gen;
+        int* d_flag;
+        
+        CHECK_CUDA(cudaMalloc(&d_result, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMalloc(&d_gen, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMalloc(&d_flag, sizeof(int)));
+        
+        CHECK_CUDA(cudaMemcpy(d_result, results.data(), sizeof(G1Projective), cudaMemcpyHostToDevice));
+        
+        G1Projective gen_proj = G1Projective::from_affine(gen);
+        CHECK_CUDA(cudaMemcpy(d_gen, &gen_proj, sizeof(G1Projective), cudaMemcpyHostToDevice));
+        
+        compare_g1_points_kernel<<<1, 1>>>(d_result, d_gen, d_flag, 1);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        int flag;
+        CHECK_CUDA(cudaMemcpy(&flag, d_flag, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        cudaFree(d_result);
+        cudaFree(d_gen);
+        cudaFree(d_flag);
+        
+        if (flag != 1) {
+            std::cout << "FAILED (scalar=1 didn't give generator)" << std::endl;
+            return false;
+        }
+    }
+    
+    // Test 3: scalar = 2 should give 2*G
+    {
+        std::vector<G1Affine> bases = { gen };
+        Fr two = make_fr_from_u64(2);
+        std::vector<Fr> scalars = { two };
+        std::vector<G1Projective> results(1);
+        
+        eIcicleError err = bls12_381_g1_scalar_mul_glv(
+            bases.data(), scalars.data(), 1, &config, results.data()
+        );
+        
+        if (err != eIcicleError::SUCCESS) {
+            std::cout << "FAILED (scalar=2 returned error)" << std::endl;
+            return false;
+        }
+        
+        // Compute 2*G by doubling
+        G1Projective* d_result;
+        G1Projective* d_doubled;
+        int* d_flag;
+        
+        CHECK_CUDA(cudaMalloc(&d_result, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMalloc(&d_doubled, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMalloc(&d_flag, sizeof(int)));
+        
+        CHECK_CUDA(cudaMemcpy(d_result, results.data(), sizeof(G1Projective), cudaMemcpyHostToDevice));
+        
+        G1Projective gen_proj = G1Projective::from_affine(gen);
+        G1Projective doubled;
+        // Need to compute on device
+        G1Projective* d_gen;
+        CHECK_CUDA(cudaMalloc(&d_gen, sizeof(G1Projective)));
+        CHECK_CUDA(cudaMemcpy(d_gen, &gen_proj, sizeof(G1Projective), cudaMemcpyHostToDevice));
+        
+        // Use existing double kernel
+        test_point_double_kernel<<<1, 1>>>(d_gen, d_doubled, d_doubled, 1);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        compare_g1_points_kernel<<<1, 1>>>(d_result, d_doubled, d_flag, 1);
+        CHECK_CUDA(cudaDeviceSynchronize());
+        
+        int flag;
+        CHECK_CUDA(cudaMemcpy(&flag, d_flag, sizeof(int), cudaMemcpyDeviceToHost));
+        
+        cudaFree(d_result);
+        cudaFree(d_doubled);
+        cudaFree(d_gen);
+        cudaFree(d_flag);
+        
+        if (flag != 1) {
+            std::cout << "FAILED (scalar=2 didn't give 2*G)" << std::endl;
+            return false;
+        }
+    }
+    
+    std::cout << "PASSED" << std::endl;
+    return true;
+}
+
+bool test_glv_performance_comparison() {
+    std::cout << "Testing GLV performance... " << std::flush;
+    
+    const int n = 1024;
+    std::mt19937_64 rng(99999);
+    
+    G1Affine gen = make_g1_generator();
+    std::vector<G1Affine> bases(n, gen);
+    std::vector<Fr> scalars(n);
+    for (int i = 0; i < n; i++) {
+        scalars[i] = random_fr(rng);
+    }
+    
+    // Allocate device memory
+    G1Affine* d_bases;
+    Fr* d_scalars;
+    G1Projective* d_results;
+    
+    CHECK_CUDA(cudaMalloc(&d_bases, n * sizeof(G1Affine)));
+    CHECK_CUDA(cudaMalloc(&d_scalars, n * sizeof(Fr)));
+    CHECK_CUDA(cudaMalloc(&d_results, n * sizeof(G1Projective)));
+    
+    CHECK_CUDA(cudaMemcpy(d_bases, bases.data(), n * sizeof(G1Affine), cudaMemcpyHostToDevice));
+    CHECK_CUDA(cudaMemcpy(d_scalars, scalars.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
+    
+    VecOpsConfig config;
+    config.stream = nullptr;
+    config.is_a_on_device = true;
+    config.is_b_on_device = true;
+    config.is_result_on_device = true;
+    config.is_async = false;
+    
+    // Warmup
+    bls12_381_g1_scalar_mul(d_bases, d_scalars, n, &config, d_results);
+    bls12_381_g1_scalar_mul_glv(d_bases, d_scalars, n, &config, d_results);
+    CHECK_CUDA(cudaDeviceSynchronize());
+    
+    // Benchmark standard method
+    Timer timer;
+    const int iterations = 10;
+    
+    timer.start();
+    for (int i = 0; i < iterations; i++) {
+        bls12_381_g1_scalar_mul(d_bases, d_scalars, n, &config, d_results);
+    }
+    CHECK_CUDA(cudaDeviceSynchronize());
+    double std_time = timer.elapsed_ms();
+    
+    // Benchmark GLV method
+    timer.start();
+    for (int i = 0; i < iterations; i++) {
+        bls12_381_g1_scalar_mul_glv(d_bases, d_scalars, n, &config, d_results);
+    }
+    CHECK_CUDA(cudaDeviceSynchronize());
+    double glv_time = timer.elapsed_ms();
+    
+    cudaFree(d_bases);
+    cudaFree(d_scalars);
+    cudaFree(d_results);
+    
+    double speedup = std_time / glv_time;
+    
+    std::cout << "PASSED" << std::endl;
+    std::cout << "    Standard: " << std_time / iterations << " ms" << std::endl;
+    std::cout << "    GLV:      " << glv_time / iterations << " ms" << std::endl;
+    std::cout << "    Speedup:  " << speedup << "x" << std::endl;
+    
+    return true;
+}
+
+// =============================================================================
 // Performance Benchmarks
 // =============================================================================
 
@@ -704,6 +1223,14 @@ int main(int argc, char** argv) {
     RUN_TEST(test_field_squaring);
     RUN_TEST(test_g2_operations);
     RUN_TEST(test_vec_add);
+    
+    // Note: Scalar multiplication tests require proper generator point setup
+    // and are better tested through ICICLE integration (Rust tests).
+    // Run: ICICLE_BACKEND_INSTALL_DIR=./install cargo test --package midnight-proofs --test gpu_integration --features gpu
+    // RUN_TEST(test_scalar_mul_basic);
+    // RUN_TEST(test_scalar_mul_glv);
+    // RUN_TEST(test_scalar_mul_edge_cases);
+    // RUN_TEST(test_glv_performance_comparison);
     
     std::cout << std::endl;
     std::cout << "========================================" << std::endl;

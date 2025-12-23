@@ -10,8 +10,9 @@
  * these registration functions. This creates a simple dispatcher that
  * stores the registered backend implementation and calls it when needed.
  * 
- * The C API functions (bls12_381_g2_msm_cuda, etc.) call into this
- * dispatcher to find and invoke the registered backend.
+ * NOTE: G1 registration (register_msm, register_msm_precompute_bases) is
+ * provided by the ICICLE runtime library (libicicle_curve_bls12_381.so).
+ * Tests should be run through ICICLE/Rust integration, not standalone.
  */
 
 #include "icicle_backend_api.cuh"
@@ -23,31 +24,46 @@ namespace icicle {
 // =============================================================================
 // G2 MSM Dispatcher Registry
 // =============================================================================
+// Uses function-local statics (Meyer's Singleton) to avoid static initialization
+// order fiasco. The maps are created on first use, not at library load time.
 
 namespace {
-    // Thread-safe registry for G2 MSM backends
-    std::mutex g_g2_registry_mutex;
-    std::unordered_map<std::string, MsmG2Impl> g_g2_msm_backends;
-    std::unordered_map<std::string, MsmG2PreComputeImpl> g_g2_precompute_backends;
+    // Thread-safe accessor for G2 MSM backends registry
+    std::unordered_map<std::string, MsmG2Impl>& get_g2_msm_backends() {
+        static std::unordered_map<std::string, MsmG2Impl> backends;
+        return backends;
+    }
+    
+    // Thread-safe accessor for G2 precompute backends registry
+    std::unordered_map<std::string, MsmG2PreComputeImpl>& get_g2_precompute_backends() {
+        static std::unordered_map<std::string, MsmG2PreComputeImpl> backends;
+        return backends;
+    }
+    
+    // Thread-safe accessor for the registry mutex
+    std::mutex& get_g2_registry_mutex() {
+        static std::mutex mtx;
+        return mtx;
+    }
 }
 
 // Register a G2 MSM implementation for a device type
 void register_g2_msm(const std::string& deviceType, MsmG2Impl impl) {
-    std::lock_guard<std::mutex> lock(g_g2_registry_mutex);
-    g_g2_msm_backends[deviceType] = impl;
+    std::lock_guard<std::mutex> lock(get_g2_registry_mutex());
+    get_g2_msm_backends()[deviceType] = impl;
 }
 
 // Register a G2 MSM precompute implementation for a device type
 void register_g2_msm_precompute_bases(const std::string& deviceType, MsmG2PreComputeImpl impl) {
-    std::lock_guard<std::mutex> lock(g_g2_registry_mutex);
-    g_g2_precompute_backends[deviceType] = impl;
+    std::lock_guard<std::mutex> lock(get_g2_registry_mutex());
+    get_g2_precompute_backends()[deviceType] = impl;
 }
 
 // Get the registered G2 MSM implementation for a device type
 MsmG2Impl get_g2_msm_backend(const std::string& deviceType) {
-    std::lock_guard<std::mutex> lock(g_g2_registry_mutex);
-    auto it = g_g2_msm_backends.find(deviceType);
-    if (it != g_g2_msm_backends.end()) {
+    std::lock_guard<std::mutex> lock(get_g2_registry_mutex());
+    auto it = get_g2_msm_backends().find(deviceType);
+    if (it != get_g2_msm_backends().end()) {
         return it->second;
     }
     return nullptr;
@@ -55,9 +71,9 @@ MsmG2Impl get_g2_msm_backend(const std::string& deviceType) {
 
 // Get the registered G2 MSM precompute implementation for a device type
 MsmG2PreComputeImpl get_g2_precompute_backend(const std::string& deviceType) {
-    std::lock_guard<std::mutex> lock(g_g2_registry_mutex);
-    auto it = g_g2_precompute_backends.find(deviceType);
-    if (it != g_g2_precompute_backends.end()) {
+    std::lock_guard<std::mutex> lock(get_g2_registry_mutex());
+    auto it = get_g2_precompute_backends().find(deviceType);
+    if (it != get_g2_precompute_backends().end()) {
         return it->second;
     }
     return nullptr;
