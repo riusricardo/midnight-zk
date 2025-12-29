@@ -309,6 +309,7 @@ struct Projective {
     }
     
     // Convert to affine coordinates
+    // For Jacobian: x = X/Z², y = Y/Z³
     __device__ __forceinline__ Affine<BaseField> to_affine() const {
         if (is_identity()) {
             return Affine<BaseField>::identity();
@@ -320,11 +321,14 @@ struct Projective {
             return Affine<BaseField>::identity();
         }
         
-        BaseField z_inv;
+        BaseField z_inv, z_inv_sq, z_inv_cu;
         field_inv(z_inv, Z);
+        field_mul(z_inv_sq, z_inv, z_inv);   // z_inv^2
+        field_mul(z_inv_cu, z_inv_sq, z_inv); // z_inv^3
+        
         BaseField ax, ay;
-        field_mul(ax, X, z_inv);
-        field_mul(ay, Y, z_inv);
+        field_mul(ax, X, z_inv_sq);   // x = X / Z²
+        field_mul(ay, Y, z_inv_cu);   // y = Y / Z³
         return Affine<BaseField>(ax, ay);
     }
 };

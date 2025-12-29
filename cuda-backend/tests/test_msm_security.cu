@@ -101,7 +101,9 @@ __global__ void reference_scalar_mul_kernel(
 }
 
 /**
- * @brief Compare two projective points
+ * @brief Compare two Jacobian projective points
+ * For Jacobian coordinates: x = X/Z², y = Y/Z³
+ * Points are equal iff X1*Z2² = X2*Z1² AND Y1*Z2³ = Y2*Z1³
  */
 __global__ void compare_projective_kernel(
     const G1Projective* a,
@@ -119,13 +121,24 @@ __global__ void compare_projective_kernel(
         return;
     }
     
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, a->X, b->Z);
-    field_mul(xz2, b->X, a->Z);
-    field_mul(yz1, a->Y, b->Z);
-    field_mul(yz2, b->Y, a->Z);
+    // Compute Z squares and cubes for proper Jacobian comparison
+    Fq z1_sq, z2_sq, z1_cu, z2_cu;
+    field_sqr(z1_sq, a->Z);
+    field_sqr(z2_sq, b->Z);
+    field_mul(z1_cu, z1_sq, a->Z);
+    field_mul(z2_cu, z2_sq, b->Z);
     
-    *result = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare X coordinates: X1 * Z2² = X2 * Z1²
+    Fq lhs_x, rhs_x;
+    field_mul(lhs_x, a->X, z2_sq);
+    field_mul(rhs_x, b->X, z1_sq);
+    
+    // Compare Y coordinates: Y1 * Z2³ = Y2 * Z1³
+    Fq lhs_y, rhs_y;
+    field_mul(lhs_y, a->Y, z2_cu);
+    field_mul(rhs_y, b->Y, z1_cu);
+    
+    *result = ((lhs_x == rhs_x) && (lhs_y == rhs_y)) ? 1 : 0;
 }
 
 /**
@@ -173,7 +186,7 @@ __global__ void msm_generate_bases_kernel(
  */
 TestResult test_msm_single_scalar_one() {
     G1Affine gen = make_g1_generator();
-    Fr one = make_fr_one_host();
+    Fr one = make_fr_one_integer();  // MSM expects integer-form scalars
     
     MSMConfig config = icicle::default_msm_config();
     config.stream = nullptr;
@@ -293,7 +306,7 @@ TestResult test_msm_all_zeros() {
 TestResult test_msm_all_ones() {
     const int n = 32;
     G1Affine gen = make_g1_generator();
-    Fr one = make_fr_one_host();
+    Fr one = make_fr_one_integer();  // MSM expects integer-form scalars
     
     // Generate distinct points on GPU: G, 2G, 4G, 8G, ...
     G1Affine* d_gen;
@@ -379,10 +392,10 @@ TestResult test_msm_vs_reference() {
     
     G1Affine gen = make_g1_generator();
     
-    // Generate random scalars
+    // Generate random scalars in integer form (MSM expects non-Montgomery)
     std::vector<Fr> scalars(n);
     for (int i = 0; i < n; i++) {
-        scalars[i] = random_fr_montgomery(rng);
+        scalars[i] = random_fr_integer(rng);
     }
     
     // Generate distinct base points on GPU
@@ -498,9 +511,9 @@ TestResult test_msm_mixed_zeros() {
     }
     cudaFree(d_bases_temp);
     
-    // Set every other scalar to zero
+    // Set every other scalar to zero (using integer form for MSM)
     std::vector<Fr> scalars(n);
-    Fr one = make_fr_one_host();
+    Fr one = make_fr_one_integer();  // MSM expects integer-form scalars
     Fr zero = make_fr_zero_host();
     for (int i = 0; i < n; i++) {
         scalars[i] = (i % 2 == 0) ? one : zero;
@@ -601,9 +614,10 @@ TestResult test_msm_medium_size() {
     
     G1Affine gen = make_g1_generator();
     
+    // Generate random scalars in integer form (MSM expects non-Montgomery)
     std::vector<Fr> scalars(n);
     for (int i = 0; i < n; i++) {
-        scalars[i] = random_fr_montgomery(rng);
+        scalars[i] = random_fr_integer(rng);
     }
     
     // Use generator for all bases (simpler test)
@@ -649,9 +663,10 @@ TestResult test_msm_window_consistency() {
     
     G1Affine gen = make_g1_generator();
     
+    // Generate random scalars in integer form (MSM expects non-Montgomery)
     std::vector<Fr> scalars(n);
     for (int i = 0; i < n; i++) {
-        scalars[i] = random_fr_montgomery(rng);
+        scalars[i] = random_fr_integer(rng);
     }
     
     // Generate bases on GPU

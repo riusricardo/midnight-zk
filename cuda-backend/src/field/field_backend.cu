@@ -249,7 +249,7 @@ __global__ void intt_shared_memory_kernel(
     }
     __syncthreads();
     
-    // Butterfly stages in reverse order
+    // Butterfly stages in reverse order (DIF structure for inverse)
     for (int s = log_size; s >= 1; s--) {
         int m = 1 << s;
         int half_m = m / 2;
@@ -264,16 +264,17 @@ __global__ void intt_shared_memory_kernel(
             int twiddle_idx = pos * (size / m);
             Fr omega_inv = inv_twiddles[twiddle_idx];
             
+            // DIF butterfly: add/sub first, then multiply
             Fr u = sdata[i0];
-            Fr t = sdata[i1] * omega_inv;
+            Fr v = sdata[i1];
             
-            sdata[i0] = u + t;
-            sdata[i1] = u - t;
+            sdata[i0] = u + v;
+            sdata[i1] = (u - v) * omega_inv;
         }
         __syncthreads();
     }
     
-    // Bit-reverse and scale, write back to global memory
+    // DIF output is bit-reversed; bit-reverse and scale on write
     if (tid < size) {
         unsigned int rev = 0;
         unsigned int n = tid;
@@ -375,6 +376,134 @@ __global__ void ntt_butterfly_fused_2stage_kernel(
     data[i1] = x1;
     data[i2] = x2;
     data[i3] = x3;
+}
+
+/**
+ * @brief Inverse fused 2-stage butterfly kernel (DIF structure)
+ * 
+ * For inverse NTT, we need DIF structure: add/sub first, then multiply by twiddle.
+ * This is the inverse of the forward DIT kernel.
+ * 
+ * We process stages in REVERSE order compared to forward:
+ *   - First: stage s (higher) with group_size = 4*stride, half_m = 2*stride
+ *   - Then: stage s-1 (lower) with group_size = 2*stride, half_m = stride
+ * 
+ * @param data Input/output array
+ * @param inv_twiddles Precomputed inverse twiddle factors
+ * @param n Total NTT size
+ * @param stride half_m of the LOWER stage = 2^(s-2)
+ */
+__global__ void intt_butterfly_fused_2stage_kernel(
+    Fr* data,
+    const Fr* inv_twiddles,
+    int n,
+    int stride  // half_m of the lower stage (same as forward kernel)
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_quads = n / 4;
+    
+    if (idx >= num_quads) return;
+    
+    // Each thread handles a group of 4 consecutive elements
+    // Group size for fused 2 stages = 4 * stride (same indexing as forward)
+    int quad_m = 4 * stride;
+    int group = idx / stride;
+    int pos = idx % stride;
+    
+    int base = group * quad_m + pos;
+    
+    int i0 = base;
+    int i1 = base + stride;
+    int i2 = base + 2 * stride;
+    int i3 = base + 3 * stride;
+    
+    // Load 4 elements
+    Fr x0 = data[i0];
+    Fr x1 = data[i1];
+    Fr x2 = data[i2];
+    Fr x3 = data[i3];
+    
+    // ---------------------------------------------------------
+    // Stage 1 (HIGHER stage first in DIF): group size = 4*stride, half_m = 2*stride
+    // ---------------------------------------------------------
+    // DIF butterfly: add/sub first, then multiply
+    // Pairs: (x0, x2) and (x1, x3) - with distance 2*stride
+    
+    int tw_idx_1a = pos * (n / (4 * stride));
+    Fr w1a = inv_twiddles[tw_idx_1a];
+    
+    // DIF butterfly on (x0, x2)
+    Fr u0 = x0;
+    Fr u2 = x2;
+    x0 = u0 + u2;
+    x2 = (u0 - u2) * w1a;
+    
+    // DIF butterfly on (x1, x3)
+    int tw_idx_1b = (pos + stride) * (n / (4 * stride));
+    Fr w1b = inv_twiddles[tw_idx_1b];
+    
+    Fr u1 = x1;
+    Fr u3 = x3;
+    x1 = u1 + u3;
+    x3 = (u1 - u3) * w1b;
+    
+    // ---------------------------------------------------------
+    // Stage 2 (LOWER stage in DIF): group size = 2*stride, half_m = stride
+    // ---------------------------------------------------------
+    // Pairs: (x0, x1) and (x2, x3) - with distance stride
+    
+    int tw_idx_2 = pos * (n / (2 * stride));
+    Fr w2 = inv_twiddles[tw_idx_2];
+    
+    // DIF butterfly on (x0, x1)
+    Fr v0 = x0;
+    Fr v1 = x1;
+    x0 = v0 + v1;
+    x1 = (v0 - v1) * w2;
+    
+    // DIF butterfly on (x2, x3) with same twiddle
+    Fr v2 = x2;
+    Fr v3 = x3;
+    x2 = v2 + v3;
+    x3 = (v2 - v3) * w2;
+    
+    // Store 4 elements
+    data[i0] = x0;
+    data[i1] = x1;
+    data[i2] = x2;
+    data[i3] = x3;
+}
+
+/**
+ * @brief Inverse single butterfly kernel (DIF structure)
+ */
+__global__ void intt_butterfly_kernel(
+    Fr* data,
+    const Fr* inv_twiddles,
+    int n,
+    int m,
+    int half_m
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int num_pairs = n / 2;
+    
+    if (idx >= num_pairs) return;
+    
+    int group = idx / half_m;
+    int pos = idx % half_m;
+    
+    int i0 = group * m + pos;
+    int i1 = i0 + half_m;
+    
+    int twiddle_idx = pos * (n / m);
+    Fr omega_inv = inv_twiddles[twiddle_idx];
+    
+    // DIF butterfly: add/sub first, then multiply
+    Fr u = data[i0];
+    Fr v = data[i1];
+    
+    data[i0] = u + v;
+    data[i1] = (u - v) * omega_inv;
 }
 
 /**
@@ -649,20 +778,23 @@ eIcicleError ntt_inverse_impl(
         // Standard approach with fused 2-stage optimization
         
         // =====================================================================
-        // OPTIMIZATION: Use fused 2-stage butterflies in reverse order
+        // OPTIMIZATION: Use DIF fused 2-stage butterflies in reverse order
         // =====================================================================
-        // For inverse NTT, we go from stage log_size down to 1
+        // For inverse NTT (DIF), we go from stage log_size down to 1
+        // DIF = add/sub first, then multiply by inverse twiddle
         // Fuse pairs: (log_size, log_size-1), (log_size-2, log_size-3), ...
         
         int s = log_size;
         while (s - 1 >= 1) {
-            // Fuse stages s and s-1 (in reverse order)
-            // For the fused kernel, we need stride = half_m of the LOWER stage (s-1)
-            // half_m of stage s-1 = 2^(s-2)
+            // Fuse stages s and s-1 (going from high to low)
+            // For the DIF fused kernel, we process:
+            //   - First: stage s with half_m = 2^(s-1)
+            //   - Then: stage s-1 with half_m = 2^(s-2)
+            // The kernel uses stride = half_m of LOWER stage = 2^(s-2)
             int stride = 1 << (s - 2);
             
             int blocks = (size / 4 + threads - 1) / threads;
-            ntt_butterfly_fused_2stage_kernel<<<blocks, threads>>>(
+            intt_butterfly_fused_2stage_kernel<<<blocks, threads>>>(
                 d_data, domain->inv_twiddles, size, stride
             );
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -676,7 +808,7 @@ eIcicleError ntt_inverse_impl(
             int half_m = m / 2;
             
             int blocks = (size / 2 + threads - 1) / threads;
-            ntt_butterfly_kernel<<<blocks, threads>>>(
+            intt_butterfly_kernel<<<blocks, threads>>>(
                 d_data, domain->inv_twiddles, size, m, half_m
             );
             CUDA_CHECK(cudaDeviceSynchronize());
@@ -717,6 +849,8 @@ eIcicleError ntt_inverse_impl(
 
 /**
  * @brief Main NTT entry point
+ * 
+ * Handles batch processing by calling the underlying impl for each batch element.
  */
 template<typename F>
 eIcicleError ntt_cuda_impl(
@@ -726,11 +860,26 @@ eIcicleError ntt_cuda_impl(
     const NTTConfig& config,
     F* output
 ) {
-    if (direction == NTTDir::kForward) {
-        return ntt_forward_impl(input, size, config, output);
-    } else {
-        return ntt_inverse_impl(input, size, config, output);
+    int batch_size = config.batch_size > 0 ? config.batch_size : 1;
+    
+    // Process each batch element
+    for (int b = 0; b < batch_size; b++) {
+        const F* batch_input = input + b * size;
+        F* batch_output = output + b * size;
+        
+        eIcicleError err;
+        if (direction == NTTDir::kForward) {
+            err = ntt_forward_impl(batch_input, size, config, batch_output);
+        } else {
+            err = ntt_inverse_impl(batch_input, size, config, batch_output);
+        }
+        
+        if (err != eIcicleError::SUCCESS) {
+            return err;
+        }
     }
+    
+    return eIcicleError::SUCCESS;
 }
 
 /**

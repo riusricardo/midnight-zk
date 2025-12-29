@@ -344,12 +344,53 @@ inline Fr random_fr_nonzero(std::mt19937_64& rng) {
     return result;
 }
 
+// Scalar 1 in Montgomery form (for field arithmetic)
 inline Fr make_fr_one_host() {
     Fr r;
     r.limbs[0] = FR_ONE_HOST[0];
     r.limbs[1] = FR_ONE_HOST[1];
     r.limbs[2] = FR_ONE_HOST[2];
     r.limbs[3] = FR_ONE_HOST[3];
+    return r;
+}
+
+// Scalar 1 in standard integer form (for MSM - raw bit extraction)
+// MSM expects scalars as plain integers, not Montgomery form
+inline Fr make_fr_one_integer() {
+    Fr r;
+    r.limbs[0] = 1;
+    r.limbs[1] = 0;
+    r.limbs[2] = 0;
+    r.limbs[3] = 0;
+    return r;
+}
+
+// Create scalar from small integer (non-Montgomery form for MSM)
+inline Fr make_fr_from_int(uint64_t val) {
+    Fr r;
+    r.limbs[0] = val;
+    r.limbs[1] = 0;
+    r.limbs[2] = 0;
+    r.limbs[3] = 0;
+    return r;
+}
+
+// Generate random scalar in standard integer form (for MSM)
+inline Fr random_fr_integer(std::mt19937_64& rng) {
+    uint256_t val;
+    uint256_t modulus(FR_MODULUS_HOST);
+    
+    do {
+        for (int i = 0; i < 4; i++) {
+            val.limbs[i] = rng();
+        }
+        val.limbs[3] &= 0x7fffffffffffffffULL;
+    } while (val >= modulus);
+    
+    Fr r;
+    for (int i = 0; i < 4; i++) {
+        r.limbs[i] = val.limbs[i];
+    }
     return r;
 }
 

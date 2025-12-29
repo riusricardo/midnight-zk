@@ -40,6 +40,73 @@
 using namespace security_tests;
 
 // =============================================================================
+// Jacobian Point Comparison Helper
+// =============================================================================
+// For Jacobian coordinates (X, Y, Z) representing affine (x, y) where:
+//   x = X/Z²
+//   y = Y/Z³
+// Two points (X1, Y1, Z1) and (X2, Y2, Z2) are equal iff:
+//   X1 * Z2² = X2 * Z1²  AND  Y1 * Z2³ = Y2 * Z1³
+
+__device__ __forceinline__ bool g1_projective_equal(
+    const G1Projective& a, const G1Projective& b
+) {
+    // Handle identity cases
+    bool a_id = a.is_identity();
+    bool b_id = b.is_identity();
+    if (a_id && b_id) return true;
+    if (a_id || b_id) return false;
+    
+    // Compute Z squares and cubes
+    Fq z1_sq, z2_sq, z1_cu, z2_cu;
+    field_sqr(z1_sq, a.Z);
+    field_sqr(z2_sq, b.Z);
+    field_mul(z1_cu, z1_sq, a.Z);
+    field_mul(z2_cu, z2_sq, b.Z);
+    
+    // Compare X coordinates: X1 * Z2² = X2 * Z1²
+    Fq lhs_x, rhs_x;
+    field_mul(lhs_x, a.X, z2_sq);
+    field_mul(rhs_x, b.X, z1_sq);
+    
+    // Compare Y coordinates: Y1 * Z2³ = Y2 * Z1³
+    Fq lhs_y, rhs_y;
+    field_mul(lhs_y, a.Y, z2_cu);
+    field_mul(rhs_y, b.Y, z1_cu);
+    
+    return (lhs_x == rhs_x) && (lhs_y == rhs_y);
+}
+
+__device__ __forceinline__ bool g2_projective_equal(
+    const G2Projective& a, const G2Projective& b
+) {
+    // Handle identity cases
+    bool a_id = a.is_identity();
+    bool b_id = b.is_identity();
+    if (a_id && b_id) return true;
+    if (a_id || b_id) return false;
+    
+    // Compute Z squares and cubes for Fq2
+    Fq2 z1_sq, z2_sq, z1_cu, z2_cu;
+    fq2_sqr(z1_sq, a.Z);
+    fq2_sqr(z2_sq, b.Z);
+    fq2_mul(z1_cu, z1_sq, a.Z);
+    fq2_mul(z2_cu, z2_sq, b.Z);
+    
+    // Compare X coordinates: X1 * Z2² = X2 * Z1²
+    Fq2 lhs_x, rhs_x;
+    fq2_mul(lhs_x, a.X, z2_sq);
+    fq2_mul(rhs_x, b.X, z1_sq);
+    
+    // Compare Y coordinates: Y1 * Z2³ = Y2 * Z1³
+    Fq2 lhs_y, rhs_y;
+    fq2_mul(lhs_y, a.Y, z2_cu);
+    fq2_mul(rhs_y, b.Y, z1_cu);
+    
+    return (lhs_x == rhs_x) && (lhs_y == rhs_y);
+}
+
+// =============================================================================
 // G1 Generator Constants (Montgomery form)
 // =============================================================================
 
@@ -204,25 +271,8 @@ __global__ void g1_add_identity_test_kernel(
     G1Projective sum;
     g1_add(sum, p[idx], identity);
     
-    // Check if sum equals p[idx]
-    // Compare using projective equality
-    if (p[idx].is_identity() && sum.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    
-    if (p[idx].is_identity() || sum.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, p[idx].X, sum.Z);
-    field_mul(xz2, sum.X, p[idx].Z);
-    field_mul(yz1, p[idx].Y, sum.Z);
-    field_mul(yz2, sum.Y, p[idx].Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(sum, p[idx]) ? 1 : 0;
 }
 
 /**
@@ -256,23 +306,8 @@ __global__ void g1_add_commutative_test_kernel(
     g1_add(pq, p[idx], q[idx]);
     g1_add(qp, q[idx], p[idx]);
     
-    // Compare pq == qp
-    if (pq.is_identity() && qp.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    if (pq.is_identity() || qp.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, pq.X, qp.Z);
-    field_mul(xz2, qp.X, pq.Z);
-    field_mul(yz1, pq.Y, qp.Z);
-    field_mul(yz2, qp.Y, pq.Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(pq, qp) ? 1 : 0;
 }
 
 /**
@@ -293,23 +328,8 @@ __global__ void g1_add_associative_test_kernel(
     g1_add(qr, q[idx], r[idx]);
     g1_add(p_qr, p[idx], qr);  // P + (Q + R)
     
-    // Compare pq_r == p_qr
-    if (pq_r.is_identity() && p_qr.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    if (pq_r.is_identity() || p_qr.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, pq_r.X, p_qr.Z);
-    field_mul(xz2, p_qr.X, pq_r.Z);
-    field_mul(yz1, pq_r.Y, p_qr.Z);
-    field_mul(yz2, p_qr.Y, pq_r.Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(pq_r, p_qr) ? 1 : 0;
 }
 
 /**
@@ -325,23 +345,8 @@ __global__ void g1_double_vs_add_test_kernel(
     g1_double(doubled, p[idx]);
     g1_add(added, p[idx], p[idx]);
     
-    // Compare
-    if (doubled.is_identity() && added.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    if (doubled.is_identity() || added.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, doubled.X, added.Z);
-    field_mul(xz2, added.X, doubled.Z);
-    field_mul(yz1, doubled.Y, added.Z);
-    field_mul(yz2, added.Y, doubled.Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(doubled, added) ? 1 : 0;
 }
 
 /**
@@ -363,23 +368,8 @@ __global__ void g1_triple_point_test_kernel(
     g1_add(p_plus_p, p[idx], p[idx]);
     g1_add(three_p_b, p_plus_p, p[idx]);
     
-    // Compare
-    if (three_p_a.is_identity() && three_p_b.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    if (three_p_a.is_identity() || three_p_b.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, three_p_a.X, three_p_b.Z);
-    field_mul(xz2, three_p_b.X, three_p_a.Z);
-    field_mul(yz1, three_p_a.Y, three_p_b.Z);
-    field_mul(yz2, three_p_b.Y, three_p_a.Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(three_p_a, three_p_b) ? 1 : 0;
 }
 
 /**
@@ -400,23 +390,8 @@ __global__ void g1_mixed_addition_test_kernel(
     G1Projective standard_result;
     g1_add(standard_result, p[idx], q_proj);
     
-    // Compare
-    if (mixed_result.is_identity() && standard_result.is_identity()) {
-        result[idx] = 1;
-        return;
-    }
-    if (mixed_result.is_identity() || standard_result.is_identity()) {
-        result[idx] = 0;
-        return;
-    }
-    
-    Fq xz1, xz2, yz1, yz2;
-    field_mul(xz1, mixed_result.X, standard_result.Z);
-    field_mul(xz2, standard_result.X, mixed_result.Z);
-    field_mul(yz1, mixed_result.Y, standard_result.Z);
-    field_mul(yz2, standard_result.Y, mixed_result.Z);
-    
-    result[idx] = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    // Compare using proper Jacobian equality
+    result[idx] = g1_projective_equal(mixed_result, standard_result) ? 1 : 0;
 }
 
 /**
