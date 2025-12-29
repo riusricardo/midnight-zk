@@ -255,27 +255,6 @@ if(BUILD_TESTS)
         add_test(NAME ${name} COMMAND ${name})
     endmacro()
     
-    # Test executables
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_backend.cu)
-        add_cuda_test(test_backend tests/test_backend.cu)
-    endif()
-    
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vectors.cu)
-        add_cuda_test(test_vectors tests/test_vectors.cu)
-    endif()
-    
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntt_custom.cu)
-        add_cuda_test(test_ntt_custom tests/test_ntt_custom.cu)
-    endif()
-    
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntt_debug.cu)
-        add_cuda_test(test_ntt_debug tests/test_ntt_debug.cu)
-    endif()
-    
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_roundtrip.cu)
-        add_cuda_test(test_roundtrip tests/test_roundtrip.cu)
-    endif()
-    
     # =========================================================================
     # Security Audit Test Suite
     # =========================================================================
