@@ -275,6 +275,56 @@ if(BUILD_TESTS)
     if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_roundtrip.cu)
         add_cuda_test(test_roundtrip tests/test_roundtrip.cu)
     endif()
+    
+    # =========================================================================
+    # Security Audit Test Suite
+    # =========================================================================
+    # These tests are designed for comprehensive security audits of the
+    # BLS12-381 CUDA implementation. They cover:
+    # - Known Answer Tests (KAT) from official specifications
+    # - Field arithmetic algebraic properties
+    # - Curve operation correctness
+    # - MSM correctness and edge cases
+    # - NTT correctness and properties
+    # - Security edge cases and constant-time operations
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_known_answer_vectors.cu)
+        add_cuda_test(test_known_answer_vectors tests/test_known_answer_vectors.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_field_properties.cu)
+        add_cuda_test(test_field_properties tests/test_field_properties.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_curve_operations.cu)
+        add_cuda_test(test_curve_operations tests/test_curve_operations.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_msm_security.cu)
+        add_cuda_test(test_msm_security tests/test_msm_security.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_ntt_security.cu)
+        add_cuda_test(test_ntt_security tests/test_ntt_security.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_security_edge_cases.cu)
+        add_cuda_test(test_security_edge_cases tests/test_security_edge_cases.cu)
+    endif()
+    
+    # Convenience target to run all security audit tests
+    add_custom_target(security-audit
+        COMMAND ${CMAKE_CTEST_COMMAND} -R "test_known_answer_vectors|test_field_properties|test_curve_operations|test_msm_security|test_ntt_security|test_security_edge_cases" --output-on-failure
+        DEPENDS 
+            test_known_answer_vectors
+            test_field_properties
+            test_curve_operations
+            test_msm_security
+            test_ntt_security
+            test_security_edge_cases
+        COMMENT "Running security audit test suite"
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    )
 endif()
 
 # =============================================================================
