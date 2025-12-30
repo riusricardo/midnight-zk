@@ -32,11 +32,12 @@ std::string demangle()
 }
 
 // Debug
+__attribute__((unused))
 static void print_bytes(const std::byte* data, const uint nof_elements, const uint element_size)
 {
   for (uint element_idx = 0; element_idx < nof_elements; ++element_idx) {
     std::cout << "0x";
-    for (int byte_idx = 0; byte_idx < element_size; ++byte_idx) {
+    for (uint byte_idx = 0; byte_idx < element_size; ++byte_idx) {
       std::cout << std::hex << std::setw(2) << std::setfill('0')
                 << static_cast<int>(data[element_idx * element_size + byte_idx]);
     }

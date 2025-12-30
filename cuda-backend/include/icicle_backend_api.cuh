@@ -350,3 +350,4 @@ void register_g2_msm_precompute_bases(const std::string& deviceType, MsmG2PreCom
             return true;                                            \
         }();                                                        \
     }
+
