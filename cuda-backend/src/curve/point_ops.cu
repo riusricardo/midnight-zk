@@ -11,13 +11,14 @@
  * 
  * Operations provided:
  * - Batch affine ↔ projective conversion
- * - Batch point addition
- * - Batch point doubling
- * - Batch point negation
- * - Batch scalar multiplication
+ * - Batch point addition/doubling/negation (unused, kept for potential future use)
  * 
- * Performance note: These kernels use naive per-element operations.
- * For MSM, use the specialized Pippenger implementation in msm.cu.
+ * EXPERIMENTAL (GLV_ENABLED flag):
+ * - GLV endomorphism for ~2x faster scalar multiplication
+ * - Batch scalar multiplication APIs
+ * - Currently NOT USED: MSM uses Pippenger algorithm in msm.cu instead
+ * 
+ * Performance note: For MSM, use the specialized Pippenger implementation in msm.cu.
  */
 
 #include "point.cuh"
@@ -121,8 +122,9 @@ __global__ void batch_negate_g1_kernel(
     g1_neg(output[idx], p);
 }
 
+#ifdef GLV_ENABLED
 // =============================================================================
-// GLV Endomorphism Constants for BLS12-381
+// GLV Endomorphism Constants for BLS12-381 (EXPERIMENTAL)
 // =============================================================================
 // For BLS12-381 G1, the curve has an efficient endomorphism:
 //   φ(P) = (β*x, y) where β is a cube root of unity in Fq
@@ -565,6 +567,8 @@ __global__ void batch_scalar_mul_g1_kernel(
     
     output[idx] = result;
 }
+
+#endif // GLV_ENABLED
 
 // =============================================================================
 // G2 Operations
@@ -1037,6 +1041,7 @@ eIcicleError bls12_381_g2_projective_to_affine(
     return eIcicleError::SUCCESS;
 }
 
+#ifdef GLV_ENABLED
 /**
  * @brief Exported batch scalar multiplication for G1 using GLV optimization
  * 
@@ -1306,5 +1311,6 @@ eIcicleError bls12_381_g1_scalar_mul(
     
     return eIcicleError::SUCCESS;
 }
+#endif // GLV_ENABLED
 
 } // extern "C"

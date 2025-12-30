@@ -1,10 +1,20 @@
 /**
  * @file icicle_curve_api.cu
- * @brief Icicle-compatible MSM Backend Registration
+ * @brief MSM Implementation, Backend Registration, and C API
  * 
- * This file registers our MSM implementation with Icicle's dispatcher system.
- * It uses the REGISTER_MSM_BACKEND macro to register at library load time.
+ * This is the main MSM entry point file. It provides:
  * 
+ * FILE STRUCTURE:
+ * ===============
+ * 1. Internal helper kernels (Montgomery/coordinate conversions)
+ * 2. MSM implementation wrappers (G1 and G2)
+ * 3. Precompute bases wrappers (G1 and G2)
+ * 4. Template instantiations for G1 and G2 MSM
+ * 5. Test C APIs (bls12_381_g1_msm_cuda, bls12_381_g2_msm_cuda)
+ * 6. ICICLE backend registration (at bottom - static initializers)
+ * 
+ * ICICLE REGISTRATION:
+ * ====================
  * The registration mechanism works as follows:
  * 1. This library is loaded via dlopen() by Icicle runtime
  * 2. Static initializers run the REGISTER_MSM_BACKEND macro
@@ -34,13 +44,13 @@
 #include "field.cuh"
 #include "point.cuh"
 
-// Forward declarations only - avoid including full msm.cuh to prevent duplicate kernel instantiation
-#include "msm_fwd.cuh"
+// Include full MSM template definitions - this file provides the instantiations
+#include "msm.cuh"
 
 using namespace bls12_381;
 
 // =============================================================================
-// Montgomery Conversion Kernels  
+// Internal Helper Kernels (Montgomery and Coordinate Conversions)
 // =============================================================================
 
 // NOTE: Scalars are NOT converted to Montgomery form!
@@ -186,9 +196,17 @@ __global__ void g2_jacobian_to_standard_projective_kernel(G2Projective* result, 
 }
 
 // =============================================================================
-// MSM Implementation Wrapper  
+// G1 MSM Implementation
 // =============================================================================
 
+/**
+ * @brief G1 MSM wrapper for ICICLE backend
+ * 
+ * Handles Montgomery form conversions and coordinate system conversions:
+ * - Input: Standard form affine points + scalars
+ * - Internal: Montgomery form for field arithmetic
+ * - Output: Standard form standard projective (x=X/Z, y=Y/Z)
+ */
 static icicle::eIcicleError msm_cuda_impl(
     const icicle::Device& device,
     const icicle::icicle_scalar_t* scalars,
@@ -328,7 +346,12 @@ cleanup:
     return (err == cudaSuccess) ? icicle::eIcicleError::SUCCESS : icicle::eIcicleError::UNKNOWN_ERROR;
 }
 
-// Precompute bases wrapper
+/**
+ * @brief G1 MSM precompute bases wrapper
+ * 
+ * Our MSM doesn't require precomputation - this is a no-op that just
+ * copies data if needed for ICICLE API compatibility.
+ */
 static icicle::eIcicleError msm_precompute_bases_cuda_impl(
     const icicle::Device& device,
     const icicle::icicle_affine_t* input_bases,
@@ -338,7 +361,7 @@ static icicle::eIcicleError msm_precompute_bases_cuda_impl(
 {
     (void)device; // Unused - we always use CUDA context
     
-    // Our MSM doesn't require precomputation - just copy if needed
+    // No-op: Our MSM doesn't use precomputation, but copy if different buffers
     if (output_bases != input_bases && config.are_points_on_device) {
         // Use Icicle's type size for the copy since that's what the caller expects
         // Icicle affine_t is 2 * 48 bytes = 96 bytes
@@ -357,9 +380,17 @@ static icicle::eIcicleError msm_precompute_bases_cuda_impl(
 }
 
 // =============================================================================
-// G2 MSM Implementation Wrapper  
+// G2 MSM Implementation
 // =============================================================================
 
+/**
+ * @brief G2 MSM wrapper for ICICLE backend
+ * 
+ * Handles Montgomery form conversions and coordinate system conversions:
+ * - Input: Standard form G2 affine points (Fq2 coordinates) + scalars
+ * - Internal: Montgomery form for field arithmetic
+ * - Output: Standard form standard projective (x=X/Z, y=Y/Z)
+ */
 static icicle::eIcicleError msm_g2_cuda_impl(
     const icicle::Device& device,
     const icicle::icicle_scalar_t* scalars,
@@ -499,7 +530,12 @@ cleanup:
     return (err == cudaSuccess) ? icicle::eIcicleError::SUCCESS : icicle::eIcicleError::UNKNOWN_ERROR;
 }
 
-// G2 precompute bases wrapper
+/**
+ * @brief G2 MSM precompute bases wrapper
+ * 
+ * Our MSM doesn't require precomputation - this is a no-op that just
+ * copies data if needed for ICICLE API compatibility.
+ */
 static icicle::eIcicleError msm_g2_precompute_bases_cuda_impl(
     const icicle::Device& device,
     const icicle::icicle_g2_affine_t* input_bases,
@@ -509,7 +545,7 @@ static icicle::eIcicleError msm_g2_precompute_bases_cuda_impl(
 {
     (void)device; // Unused - we always use CUDA context
     
-    // Our MSM doesn't require precomputation - just copy if needed
+    // No-op: Our MSM doesn't use precomputation, but copy if different buffers
     if (output_bases != input_bases && config.are_points_on_device) {
         // G2 affine size: 2 fields * 2 components * 48 bytes = 192 bytes
         constexpr size_t ICICLE_G2_AFFINE_SIZE = 192;
@@ -527,11 +563,76 @@ static icicle::eIcicleError msm_g2_precompute_bases_cuda_impl(
 }
 
 // =============================================================================
-// Backend Registration
+// Template Instantiations
+// =============================================================================
+
+// Explicit template instantiation for G1
+template cudaError_t msm::msm_cuda<Fr, G1Affine, G1Projective>(
+    const Fr* scalars,
+    const G1Affine* bases,
+    int msm_size,
+    const icicle::MSMConfig& config,
+    G1Projective* result
+);
+
+// Explicit template instantiation for G2
+template cudaError_t msm::msm_cuda<Fr, G2Affine, G2Projective>(
+    const Fr* scalars,
+    const G2Affine* bases,
+    int msm_size,
+    const icicle::MSMConfig& config,
+    G2Projective* result
+);
+
+// =============================================================================
+// Test C APIs (used by cuda-backend tests)
+// =============================================================================
+
+extern "C" {
+
+/**
+ * @brief G1 MSM entry point for tests
+ * 
+ * Note: This API expects data already in Montgomery form.
+ * For production use via ICICLE Rust bindings, use the registered backend instead.
+ */
+icicle::eIcicleError bls12_381_g1_msm_cuda(
+    const Fr* scalars,
+    const G1Affine* bases,
+    int msm_size,
+    const icicle::MSMConfig* config,
+    G1Projective* result
+) {
+    cudaError_t err = msm::msm_cuda<Fr, G1Affine, G1Projective>(
+        scalars, bases, msm_size, *config, result
+    );
+    return (err == cudaSuccess) ? icicle::eIcicleError::SUCCESS : icicle::eIcicleError::UNKNOWN_ERROR;
+}
+
+/**
+ * @brief G2 MSM entry point for tests
+ */
+icicle::eIcicleError bls12_381_g2_msm_cuda(
+    const Fr* scalars,
+    const G2Affine* bases,
+    int msm_size,
+    const icicle::MSMConfig* config,
+    G2Projective* result
+) {
+    cudaError_t err = msm::msm_cuda<Fr, G2Affine, G2Projective>(
+        scalars, bases, msm_size, *config, result
+    );
+    return (err == cudaSuccess) ? icicle::eIcicleError::SUCCESS : icicle::eIcicleError::UNKNOWN_ERROR;
+}
+
+} // extern "C"
+
+// =============================================================================
+// ICICLE Backend Registration (must be at file scope for static initialization)
 // =============================================================================
 
 // Register our MSM implementation with the "CUDA" device type
-// This uses Icicle's macro which creates a static initializer
+// This uses Icicle's macro which creates a static initializer that runs at load time
 
 // G1 MSM registration
 REGISTER_MSM_PRE_COMPUTE_BASES_BACKEND("CUDA", msm_precompute_bases_cuda_impl);

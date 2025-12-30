@@ -32,6 +32,8 @@ project(icicle_backend_cuda_bls12_381 LANGUAGES CXX CUDA)
 option(CUDA_STATIC_RUNTIME "Use static CUDA runtime for redistributability" ON)
 option(BUILD_TESTS "Build test executables" ON)
 option(G2_ENABLED "Enable G2 curve support" ON)
+option(ECNTT_ENABLED "Enable EC-NTT (elliptic curve NTT) - experimental, currently unused" OFF)
+option(GLV_ENABLED "Enable GLV endomorphism and batch scalar mul - experimental, not used by MSM" OFF)
 option(MULTI_GPU_ARCH "Build for multiple GPU architectures (larger binary)" ON)
 
 # ICICLE installation directory (for icicle-install target)
@@ -87,6 +89,20 @@ if(G2_ENABLED)
     message(STATUS "G2 curve support enabled")
 endif()
 
+if(ECNTT_ENABLED)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DECNTT_ENABLED")
+    message(STATUS "EC-NTT support enabled (experimental)")
+else()
+    message(STATUS "EC-NTT support disabled (not currently used)")
+endif()
+
+if(GLV_ENABLED)
+    set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -DGLV_ENABLED")
+    message(STATUS "GLV endomorphism support enabled (experimental)")
+else()
+    message(STATUS "GLV endomorphism disabled (MSM uses Pippenger instead)")
+endif()
+
 set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -use_fast_math -Xptxas -O3 --extra-device-vectorization")
 set(CMAKE_CUDA_FLAGS_DEBUG "-g -G -DDEBUG -lineinfo")
 
@@ -112,13 +128,14 @@ set(FIELD_SOURCES
 # Curve library sources (depends on field library)
 set(CURVE_SOURCES
     src/curve/point_ops.cu
-    src/curve/msm.cu
-    src/curve/ecntt.cu
-    src/curve/montgomery.cu
-    src/curve/curve_backend.cu
     src/backend/icicle_curve_api.cu
     src/backend/g2_registry.cu
 )
+
+# Optional: EC-NTT support (experimental, not currently used)
+if(ECNTT_ENABLED)
+    list(APPEND CURVE_SOURCES src/curve/ecntt.cu)
+endif()
 
 # Device library sources (standalone)
 set(DEVICE_SOURCES

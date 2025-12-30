@@ -2,8 +2,12 @@
  * @file ecntt.cu
  * @brief EC-NTT (Elliptic Curve Number Theoretic Transform)
  * 
- * Applies NTT-like operations on elliptic curve points.
- * Used in multi-scalar multiplication and polynomial commitment schemes.
+ * STATUS: EXPERIMENTAL / NOT CURRENTLY USED
+ * =========================================
+ * This module is disabled by default. Enable with -DECNTT_ENABLED=ON
+ * 
+ * EC-NTT applies NTT-like operations on elliptic curve points.
+ * Could be used for polynomial commitment schemes like KZG batch operations.
  * 
  * ARCHITECTURE:
  * =============
@@ -17,8 +21,10 @@
  * - ecntt_butterfly_kernel: EC butterfly operation
  * - ecntt_bit_reverse_kernel: Bit-reversal permutation for points
  * 
- * Use case: Accelerating polynomial commitment schemes like KZG.
+ * Potential use case: Accelerating polynomial commitment schemes like KZG.
  */
+
+#ifdef ECNTT_ENABLED
 
 #include "point.cuh"
 #include "ntt.cuh"
@@ -411,3 +417,5 @@ eIcicleError ecntt_g2_cuda(
 }
 
 } // extern "C"
+
+#endif // ECNTT_ENABLED
