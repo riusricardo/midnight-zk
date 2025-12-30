@@ -5,7 +5,7 @@
  * This file registers our CUDA implementations with ICICLE's dispatcher system.
  * The pattern follows ICICLE's backend registration API:
  * 
- * 1. Declare registration functions as weak symbols (provided by ICICLE core)
+ * 1. Registration functions and types are declared in icicle_backend_api.cuh
  * 2. Create wrapper implementations matching ICICLE's signatures
  * 3. Use REGISTER_*_BACKEND macros for static initialization
  * 
@@ -18,9 +18,7 @@
 
 #include "field.cuh"
 #include "ntt.cuh"
-#include "icicle_types.cuh"
-#include <functional>
-#include <string>
+#include "icicle_backend_api.cuh"
 
 using namespace bls12_381;
 
@@ -53,169 +51,6 @@ namespace ntt {
     template<typename Fr>
     eIcicleError release_domain_cuda();
 }
-
-// =============================================================================
-// ICICLE Registration Function Declarations (Weak Symbols)
-// =============================================================================
-// These are provided by ICICLE core library (libicicle_field_bls12_381.so)
-// Declared as weak so we can compile standalone without ICICLE
-
-namespace icicle {
-
-// NTT Registration Types (matching ICICLE's backend/ntt_backend.h)
-using NttImpl = std::function<eIcicleError(
-    const Device& device,
-    const Fr* input,
-    int size,
-    NTTDir dir,
-    const icicle::NTTConfig<Fr>& config,
-    Fr* output)>;
-
-using NttInitDomainImpl = std::function<eIcicleError(
-    const Device& device,
-    const Fr& primitive_root,
-    const NTTInitDomainConfig& config)>;
-
-using NttReleaseDomainImpl = std::function<eIcicleError(
-    const Device& device,
-    const Fr& phantom)>;
-
-using NttGetRouFromDomainImpl = std::function<eIcicleError(
-    const Device& device,
-    uint64_t logn,
-    Fr* rou)>;
-
-// VecOps Registration Types (matching ICICLE's backend/vec_ops_backend.h)
-using scalarVectorOpImpl = std::function<eIcicleError(
-    const Device& device,
-    const Fr* scalar_a,
-    const Fr* vec_b,
-    uint64_t size,
-    const VecOpsConfig& config,
-    Fr* output)>;
-
-using VectorReduceOpImpl = std::function<eIcicleError(
-    const Device& device,
-    const Fr* vec_a,
-    uint64_t size,
-    const VecOpsConfig& config,
-    Fr* output)>;
-
-// NTT registration functions (weak symbols - provided by ICICLE core)
-__attribute__((weak)) void register_ntt(const std::string& deviceType, NttImpl impl);
-__attribute__((weak)) void register_ntt_init_domain(const std::string& deviceType, NttInitDomainImpl impl);
-__attribute__((weak)) void register_ntt_release_domain(const std::string& deviceType, NttReleaseDomainImpl impl);
-__attribute__((weak)) void register_ntt_get_rou_from_domain(const std::string& deviceType, NttGetRouFromDomainImpl impl);
-
-// VecOps registration functions (weak symbols - provided by ICICLE core)
-__attribute__((weak)) void register_vector_add(const std::string& deviceType, scalarVectorOpImpl impl);
-__attribute__((weak)) void register_vector_sub(const std::string& deviceType, scalarVectorOpImpl impl);
-__attribute__((weak)) void register_vector_mul(const std::string& deviceType, scalarVectorOpImpl impl);
-__attribute__((weak)) void register_scalar_mul_vec(const std::string& deviceType, scalarVectorOpImpl impl);
-__attribute__((weak)) void register_scalar_add_vec(const std::string& deviceType, scalarVectorOpImpl impl);
-__attribute__((weak)) void register_vector_sum(const std::string& deviceType, VectorReduceOpImpl impl);
-
-} // namespace icicle
-
-// =============================================================================
-// Registration Macros
-// =============================================================================
-
-#define ICICLE_CONCAT_INNER(a, b) a##b
-#define ICICLE_CONCAT(a, b) ICICLE_CONCAT_INNER(a, b)
-#define ICICLE_UNIQUE(prefix) ICICLE_CONCAT(prefix, __COUNTER__)
-
-// NTT Registration Macros
-#define REGISTER_NTT_BACKEND(DEVICE_TYPE, FUNC)                        \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_ntt_) = []() -> bool {          \
-            if (icicle::register_ntt) {                                \
-                icicle::register_ntt(DEVICE_TYPE, FUNC);               \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_NTT_INIT_DOMAIN_BACKEND(DEVICE_TYPE, FUNC)            \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_ntt_init_) = []() -> bool {     \
-            if (icicle::register_ntt_init_domain) {                    \
-                icicle::register_ntt_init_domain(DEVICE_TYPE, FUNC);   \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_NTT_RELEASE_DOMAIN_BACKEND(DEVICE_TYPE, FUNC)         \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_ntt_rel_) = []() -> bool {      \
-            if (icicle::register_ntt_release_domain) {                 \
-                icicle::register_ntt_release_domain(DEVICE_TYPE, FUNC);\
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-// VecOps Registration Macros
-#define REGISTER_VECTOR_ADD_BACKEND(DEVICE_TYPE, FUNC)                 \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_vec_add_) = []() -> bool {      \
-            if (icicle::register_vector_add) {                         \
-                icicle::register_vector_add(DEVICE_TYPE, FUNC);        \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_VECTOR_SUB_BACKEND(DEVICE_TYPE, FUNC)                 \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_vec_sub_) = []() -> bool {      \
-            if (icicle::register_vector_sub) {                         \
-                icicle::register_vector_sub(DEVICE_TYPE, FUNC);        \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_VECTOR_MUL_BACKEND(DEVICE_TYPE, FUNC)                 \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_vec_mul_) = []() -> bool {      \
-            if (icicle::register_vector_mul) {                         \
-                icicle::register_vector_mul(DEVICE_TYPE, FUNC);        \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_SCALAR_MUL_VEC_BACKEND(DEVICE_TYPE, FUNC)             \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_smul_vec_) = []() -> bool {     \
-            if (icicle::register_scalar_mul_vec) {                     \
-                icicle::register_scalar_mul_vec(DEVICE_TYPE, FUNC);    \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_SCALAR_ADD_VEC_BACKEND(DEVICE_TYPE, FUNC)             \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_sadd_vec_) = []() -> bool {     \
-            if (icicle::register_scalar_add_vec) {                     \
-                icicle::register_scalar_add_vec(DEVICE_TYPE, FUNC);    \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
-
-#define REGISTER_VECTOR_SUM_BACKEND(DEVICE_TYPE, FUNC)                 \
-    namespace {                                                         \
-        static bool ICICLE_UNIQUE(_reg_vec_sum_) = []() -> bool {      \
-            if (icicle::register_vector_sum) {                         \
-                icicle::register_vector_sum(DEVICE_TYPE, FUNC);        \
-            }                                                           \
-            return true;                                                \
-        }();                                                            \
-    }
 
 // =============================================================================
 // ICICLE-Compatible Wrapper Implementations

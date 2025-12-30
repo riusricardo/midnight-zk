@@ -585,6 +585,21 @@ template cudaError_t msm::msm_cuda<Fr, G2Affine, G2Projective>(
 );
 
 // =============================================================================
+// ICICLE Backend Registration (must be at file scope for static initialization)
+// =============================================================================
+
+// Register our MSM implementation with the "CUDA" device type
+// This uses Icicle's macro which creates a static initializer that runs at load time
+
+// G1 MSM registration
+REGISTER_MSM_PRE_COMPUTE_BASES_BACKEND("CUDA", msm_precompute_bases_cuda_impl);
+REGISTER_MSM_BACKEND("CUDA", msm_cuda_impl);
+
+// G2 MSM registration
+REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND("CUDA", msm_g2_precompute_bases_cuda_impl);
+REGISTER_MSM_G2_BACKEND("CUDA", msm_g2_cuda_impl);
+
+// =============================================================================
 // Test C APIs (used by cuda-backend tests)
 // =============================================================================
 
@@ -626,18 +641,3 @@ icicle::eIcicleError bls12_381_g2_msm_cuda(
 }
 
 } // extern "C"
-
-// =============================================================================
-// ICICLE Backend Registration (must be at file scope for static initialization)
-// =============================================================================
-
-// Register our MSM implementation with the "CUDA" device type
-// This uses Icicle's macro which creates a static initializer that runs at load time
-
-// G1 MSM registration
-REGISTER_MSM_PRE_COMPUTE_BASES_BACKEND("CUDA", msm_precompute_bases_cuda_impl);
-REGISTER_MSM_BACKEND("CUDA", msm_cuda_impl);
-
-// G2 MSM registration
-REGISTER_MSM_G2_PRE_COMPUTE_BASES_BACKEND("CUDA", msm_g2_precompute_bases_cuda_impl);
-REGISTER_MSM_G2_BACKEND("CUDA", msm_g2_cuda_impl);
