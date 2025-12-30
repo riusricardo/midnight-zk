@@ -42,7 +42,7 @@ extern "C" {
         const Fr* input,
         int size,
         NTTDir dir,
-        const NTTConfig* config,
+        const icicle::NTTConfig<Fr>* config,
         Fr* output
     );
     
@@ -223,9 +223,9 @@ TestResult test_ntt_roundtrip() {
     SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     
     // NTT configuration
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator  // No coset
+    config.coset_gen = Fr::zero();  // Use default coset generator  // No coset
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -295,9 +295,9 @@ TestResult test_ntt_zeros() {
     
     SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -374,9 +374,9 @@ TestResult test_ntt_linearity() {
     add_fr_arrays_kernel<<<blocks, threads>>>(d_a, d_b, d_a_plus_b, n);
     SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -489,9 +489,9 @@ TestResult test_ntt_convolution() {
     SECURITY_CHECK_CUDA(cudaMemcpy(d_a, a.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     SECURITY_CHECK_CUDA(cudaMemcpy(d_b, b.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -610,9 +610,9 @@ TestResult test_ntt_constant() {
     
     SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -679,9 +679,9 @@ TestResult test_ntt_various_sizes() {
         
         SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
         
-        NTTConfig config = default_ntt_config();
+        icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
         config.stream = nullptr;
-        config.coset_gen = nullptr;  // Use default coset generator
+        config.coset_gen = Fr::zero();  // Use default coset generator
         config.batch_size = 1;
         config.columns_batch = false;
         config.ordering = Ordering::kNN;
@@ -758,9 +758,9 @@ TestResult test_ntt_batch() {
     
     SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * batch_size * sizeof(Fr), cudaMemcpyHostToDevice));
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = batch_size;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;
@@ -834,9 +834,9 @@ TestResult test_ntt_determinism() {
     
     SECURITY_CHECK_CUDA(cudaMemcpy(d_input, input.data(), n * sizeof(Fr), cudaMemcpyHostToDevice));
     
-    NTTConfig config = default_ntt_config();
+    icicle::NTTConfig<Fr> config = default_ntt_config<Fr>();
     config.stream = nullptr;
-    config.coset_gen = nullptr;  // Use default coset generator
+    config.coset_gen = Fr::zero();  // Use default coset generator
     config.batch_size = 1;
     config.columns_batch = false;
     config.ordering = Ordering::kNN;

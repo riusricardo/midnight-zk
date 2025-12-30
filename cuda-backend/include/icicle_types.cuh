@@ -75,14 +75,15 @@ enum class Ordering {
 };
 
 // =============================================================================
-// NTT Configuration (matching Icicle's NTTConfig)
+// NTT Configuration (matching Icicle's NTTConfig<S> template exactly)
 // =============================================================================
 
+template <typename S>
 struct NTTConfig {
     void* stream;                   // IcicleStreamHandle
-    void* coset_gen;                // Pointer to coset generator (optional)
+    S coset_gen;                    // Coset generator (default: S::one())
     int batch_size;
-    int columns_batch;
+    bool columns_batch;
     Ordering ordering;
     bool are_inputs_on_device;
     bool are_outputs_on_device;
@@ -91,12 +92,13 @@ struct NTTConfig {
 };
 
 // Default NTT configuration
-inline NTTConfig default_ntt_config() {
-    NTTConfig cfg;
+template <typename S>
+inline NTTConfig<S> default_ntt_config() {
+    NTTConfig<S> cfg;
     cfg.stream = nullptr;
-    cfg.coset_gen = nullptr;
+    cfg.coset_gen = S::one();
     cfg.batch_size = 1;
-    cfg.columns_batch = 0;
+    cfg.columns_batch = false;
     cfg.ordering = Ordering::kNN;
     cfg.are_inputs_on_device = false;
     cfg.are_outputs_on_device = false;
@@ -183,7 +185,8 @@ struct VecOpsConfig {
 // Make commonly used types available at global scope
 using eIcicleError = icicle::eIcicleError;
 using NTTDir = icicle::NTTDir;
-using NTTConfig = icicle::NTTConfig;
+template<typename S>
+using NTTConfig = icicle::NTTConfig<S>;
 using NTTInitDomainConfig = icicle::NTTInitDomainConfig;
 using MSMConfig = icicle::MSMConfig;
 using VecOpsConfig = icicle::VecOpsConfig;

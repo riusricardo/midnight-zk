@@ -211,7 +211,7 @@ eIcicleError ntt_cuda(
     const F* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 );
 
@@ -226,7 +226,7 @@ eIcicleError coset_ntt_cuda(
     int size,
     NTTDir direction,
     const F& coset_gen,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 );
 

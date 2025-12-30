@@ -45,13 +45,17 @@
   #define UNROLL_LOOP
 #endif
 
+// =============================================================================
+// Forward declarations - Field is in global namespace (like ICICLE)
+// =============================================================================
+template<typename Config> struct Field;
+
 namespace bls12_381 {
 
 // =============================================================================
-// Forward declarations
+// Forward declarations for config types
 // =============================================================================
 
-template<typename Config> struct Field;
 struct fp_config;
 struct fq_config;
 
@@ -163,8 +167,10 @@ struct fq_config {
     }
 };
 
+} // namespace bls12_381
+
 // =============================================================================
-// Field element storage
+// Field element storage - in global namespace to match ICICLE ABI
 // =============================================================================
 
 template<typename Config>
@@ -295,9 +301,20 @@ struct Field {
     }
 };
 
-// Type aliases
-using Fr = Field<fp_config>;  // Scalar field
-using Fq = Field<fq_config>;  // Base field
+// =============================================================================
+// BLS12-381 Type Aliases - inside namespace for compatibility
+// =============================================================================
+
+namespace bls12_381 {
+
+// Type aliases - Field is in global namespace, aliases are in bls12_381
+using Fr = ::Field<fp_config>;  // Scalar field
+using Fq = ::Field<fq_config>;  // Base field
+
+// For ICICLE compatibility: scalar_t is the standard name
+using scalar_t = Fr;
+
+} // namespace bls12_381
 
 // =============================================================================
 // Constant-Time Selection Helpers (for side-channel resistance)
@@ -913,4 +930,4 @@ __device__ __forceinline__ Field<Config> operator-(const Field<Config>& a) {
     return result;
 }
 
-} // namespace bls12_381
+// End of field.cuh - helper functions are in global namespace

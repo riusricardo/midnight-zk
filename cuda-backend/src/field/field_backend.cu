@@ -581,7 +581,7 @@ template<typename F>
 eIcicleError ntt_forward_impl(
     const F* input,
     int size,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     if (size == 0) return eIcicleError::SUCCESS;
@@ -713,7 +713,7 @@ template<typename F>
 eIcicleError ntt_inverse_impl(
     const F* input,
     int size,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     if (size == 0) return eIcicleError::SUCCESS;
@@ -857,7 +857,7 @@ eIcicleError ntt_cuda_impl(
     const F* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     int batch_size = config.batch_size > 0 ? config.batch_size : 1;
@@ -907,7 +907,7 @@ eIcicleError coset_ntt_cuda_impl(
     int size,
     NTTDir direction,
     const F& coset_gen,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     if (size == 0) return eIcicleError::SUCCESS;
@@ -978,7 +978,7 @@ eIcicleError coset_ntt_cuda_impl(
         }
         
         // Step 2: Apply regular NTT
-        NTTConfig modified_config = config;
+        NTTConfig<F> modified_config = config;
         modified_config.are_inputs_on_device = true;
         
         eIcicleError err = ntt_forward_impl(d_temp, size, modified_config, output);
@@ -989,7 +989,7 @@ eIcicleError coset_ntt_cuda_impl(
     } else {
         // Inverse coset NTT
         // Step 1: Apply inverse NTT
-        NTTConfig modified_config = config;
+        NTTConfig<F> modified_config = config;
         modified_config.are_outputs_on_device = true;
         
         eIcicleError err = ntt_inverse_impl(input, size, modified_config, d_temp);
@@ -1057,8 +1057,8 @@ eIcicleError coset_ntt_cuda_impl(
 }
 
 // Explicit instantiations
-template eIcicleError ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const NTTConfig&, Fr*);
-template eIcicleError coset_ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig&, Fr*);
+template eIcicleError ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const NTTConfig<Fr>&, Fr*);
+template eIcicleError coset_ntt_cuda_impl<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig<Fr>&, Fr*);
 
 } // namespace ntt
 
@@ -1611,7 +1611,7 @@ eIcicleError ntt_cuda(
     const F* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     return ntt_cuda_impl<F>(input, size, direction, config, output);
@@ -1623,7 +1623,7 @@ eIcicleError coset_ntt_cuda(
     int size,
     NTTDir direction,
     const F& coset_gen,
-    const NTTConfig& config,
+    const NTTConfig<F>& config,
     F* output
 ) {
     return coset_ntt_cuda_impl<F>(input, size, direction, coset_gen, config, output);
@@ -1643,8 +1643,8 @@ eIcicleError release_domain_cuda() {
 }
 
 // Explicit instantiations for symbol export
-template eIcicleError ntt_cuda<Fr>(const Fr*, int, NTTDir, const NTTConfig&, Fr*);
-template eIcicleError coset_ntt_cuda<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig&, Fr*);
+template eIcicleError ntt_cuda<Fr>(const Fr*, int, NTTDir, const NTTConfig<Fr>&, Fr*);
+template eIcicleError coset_ntt_cuda<Fr>(const Fr*, int, NTTDir, const Fr&, const NTTConfig<Fr>&, Fr*);
 template eIcicleError init_domain_cuda<Fr>(const Fr&, const NTTInitDomainConfig&);
 template eIcicleError release_domain_cuda<Fr>();
 
@@ -1660,7 +1660,7 @@ eIcicleError bls12_381_ntt_cuda(
     const bls12_381::Fr* input,
     int size,
     NTTDir dir,
-    const NTTConfig* config,
+    const NTTConfig<Fr>* config,
     bls12_381::Fr* output)
 {
     return ntt::ntt_cuda<bls12_381::Fr>(input, size, dir, *config, output);
@@ -1683,7 +1683,7 @@ eIcicleError bls12_381_coset_ntt_cuda(
     int size,
     NTTDir dir,
     const bls12_381::Fr* coset_gen,
-    const NTTConfig* config,
+    const NTTConfig<Fr>* config,
     bls12_381::Fr* output)
 {
     return ntt::coset_ntt_cuda<bls12_381::Fr>(input, size, dir, *coset_gen, *config, output);

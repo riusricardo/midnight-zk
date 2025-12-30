@@ -285,7 +285,7 @@ eIcicleError ecntt_impl(
     const Projective* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<Fr>& config,
     Projective* output
 ) {
     if (size == 0) {
@@ -376,12 +376,12 @@ eIcicleError ecntt_impl(
 
 // Template instantiation - only G1 for now
 template eIcicleError ecntt_impl<Fr, G1Affine, G1Projective>(
-    const G1Projective*, int, NTTDir, const NTTConfig&, G1Projective*
+    const G1Projective*, int, NTTDir, const NTTConfig<Fr>&, G1Projective*
 );
 
 // G2 ECNTT requires separate implementation
 // template eIcicleError ecntt_impl<Fr, G2Affine, G2Projective>(
-//     const G2Projective*, int, NTTDir, const NTTConfig&, G2Projective*
+//     const G2Projective*, int, NTTDir, const NTTConfig<Fr>&, G2Projective*
 // );
 
 } // namespace curve_backend
@@ -396,7 +396,7 @@ eIcicleError ecntt_g1_cuda(
     const bls12_381::G1Projective* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<Fr>& config,
     bls12_381::G1Projective* output
 ) {
     return curve_backend::ecntt_impl<bls12_381::Fr, bls12_381::G1Affine, bls12_381::G1Projective>(
@@ -408,7 +408,7 @@ eIcicleError ecntt_g2_cuda(
     const bls12_381::G2Projective* input,
     int size,
     NTTDir direction,
-    const NTTConfig& config,
+    const NTTConfig<Fr>& config,
     bls12_381::G2Projective* output
 ) {
     // G2 ECNTT not yet implemented
