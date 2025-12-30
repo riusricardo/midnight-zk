@@ -52,19 +52,19 @@ extern "C" {
 
 static G1Affine make_g1_generator() {
     G1Affine g;
-    g.x.limbs[0] = 0x5cb38790fd530c16ULL;
-    g.x.limbs[1] = 0x7817fc679976fff5ULL;
-    g.x.limbs[2] = 0x154f95c7143ba1c1ULL;
-    g.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
-    g.x.limbs[4] = 0xedce6ecc21dbf440ULL;
-    g.x.limbs[5] = 0x120177419e0bfb75ULL;
+    g.x.limbs[0] = G1_GEN_X_L0;
+    g.x.limbs[1] = G1_GEN_X_L1;
+    g.x.limbs[2] = G1_GEN_X_L2;
+    g.x.limbs[3] = G1_GEN_X_L3;
+    g.x.limbs[4] = G1_GEN_X_L4;
+    g.x.limbs[5] = G1_GEN_X_L5;
     
-    g.y.limbs[0] = 0xbaac93d50ce72271ULL;
-    g.y.limbs[1] = 0x8c22631a7918fd8eULL;
-    g.y.limbs[2] = 0xdd595f13570725ceULL;
-    g.y.limbs[3] = 0x51ac582950405194ULL;
-    g.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
-    g.y.limbs[5] = 0x0bbc3efc5008a26aULL;
+    g.y.limbs[0] = G1_GEN_Y_L0;
+    g.y.limbs[1] = G1_GEN_Y_L1;
+    g.y.limbs[2] = G1_GEN_Y_L2;
+    g.y.limbs[3] = G1_GEN_Y_L3;
+    g.y.limbs[4] = G1_GEN_Y_L4;
+    g.y.limbs[5] = G1_GEN_Y_L5;
     
     return g;
 }

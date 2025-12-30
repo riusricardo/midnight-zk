@@ -407,12 +407,12 @@ inline Fr make_fr_zero_host() {
 // G1 curve coefficient b = 4 in Montgomery form (from bls12_381_constants.h)
 __device__ __host__ inline Fq get_g1_b() {
     Fq b;
-    b.limbs[0] = 0xaa270000000cfff3ULL;
-    b.limbs[1] = 0x53cc0032fc34000aULL;
-    b.limbs[2] = 0x478fe97a6b0a807fULL;
-    b.limbs[3] = 0xb1d37ebee6ba24d7ULL;
-    b.limbs[4] = 0x8ec9733bbf78ab2fULL;
-    b.limbs[5] = 0x09d645513d83de7eULL;
+    b.limbs[0] = G1_B_L0;
+    b.limbs[1] = G1_B_L1;
+    b.limbs[2] = G1_B_L2;
+    b.limbs[3] = G1_B_L3;
+    b.limbs[4] = G1_B_L4;
+    b.limbs[5] = G1_B_L5;
     return b;
 }
 
@@ -492,21 +492,21 @@ __device__ __forceinline__ bool g1_projective_on_curve(const G1Projective& p) {
 __global__ void verify_g1_generator_on_curve_kernel(int* result) {
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     
-    // Load generator from bls12_381_constants.h values
+    // Load generator from bls12_381_constants.h
     G1Affine gen;
-    gen.x.limbs[0] = 0x5cb38790fd530c16ULL;
-    gen.x.limbs[1] = 0x7817fc679976fff5ULL;
-    gen.x.limbs[2] = 0x154f95c7143ba1c1ULL;
-    gen.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
-    gen.x.limbs[4] = 0xedce6ecc21dbf440ULL;
-    gen.x.limbs[5] = 0x120177419e0bfb75ULL;
+    gen.x.limbs[0] = G1_GEN_X_L0;
+    gen.x.limbs[1] = G1_GEN_X_L1;
+    gen.x.limbs[2] = G1_GEN_X_L2;
+    gen.x.limbs[3] = G1_GEN_X_L3;
+    gen.x.limbs[4] = G1_GEN_X_L4;
+    gen.x.limbs[5] = G1_GEN_X_L5;
     
-    gen.y.limbs[0] = 0xbaac93d50ce72271ULL;
-    gen.y.limbs[1] = 0x8c22631a7918fd8eULL;
-    gen.y.limbs[2] = 0xdd595f13570725ceULL;
-    gen.y.limbs[3] = 0x51ac582950405194ULL;
-    gen.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
-    gen.y.limbs[5] = 0x0bbc3efc5008a26aULL;
+    gen.y.limbs[0] = G1_GEN_Y_L0;
+    gen.y.limbs[1] = G1_GEN_Y_L1;
+    gen.y.limbs[2] = G1_GEN_Y_L2;
+    gen.y.limbs[3] = G1_GEN_Y_L3;
+    gen.y.limbs[4] = G1_GEN_Y_L4;
+    gen.y.limbs[5] = G1_GEN_Y_L5;
     
     *result = g1_affine_on_curve(gen) ? 1 : 0;
 }

@@ -112,19 +112,19 @@ __device__ __forceinline__ bool g2_projective_equal(
 
 static G1Affine make_g1_generator() {
     G1Affine g;
-    g.x.limbs[0] = 0x5cb38790fd530c16ULL;
-    g.x.limbs[1] = 0x7817fc679976fff5ULL;
-    g.x.limbs[2] = 0x154f95c7143ba1c1ULL;
-    g.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
-    g.x.limbs[4] = 0xedce6ecc21dbf440ULL;
-    g.x.limbs[5] = 0x120177419e0bfb75ULL;
+    g.x.limbs[0] = G1_GEN_X_L0;
+    g.x.limbs[1] = G1_GEN_X_L1;
+    g.x.limbs[2] = G1_GEN_X_L2;
+    g.x.limbs[3] = G1_GEN_X_L3;
+    g.x.limbs[4] = G1_GEN_X_L4;
+    g.x.limbs[5] = G1_GEN_X_L5;
     
-    g.y.limbs[0] = 0xbaac93d50ce72271ULL;
-    g.y.limbs[1] = 0x8c22631a7918fd8eULL;
-    g.y.limbs[2] = 0xdd595f13570725ceULL;
-    g.y.limbs[3] = 0x51ac582950405194ULL;
-    g.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
-    g.y.limbs[5] = 0x0bbc3efc5008a26aULL;
+    g.y.limbs[0] = G1_GEN_Y_L0;
+    g.y.limbs[1] = G1_GEN_Y_L1;
+    g.y.limbs[2] = G1_GEN_Y_L2;
+    g.y.limbs[3] = G1_GEN_Y_L3;
+    g.y.limbs[4] = G1_GEN_Y_L4;
+    g.y.limbs[5] = G1_GEN_Y_L5;
     
     return g;
 }
@@ -134,34 +134,34 @@ static G2Affine make_g2_generator() {
     G2Affine g;
     
     // x coordinate (c0 + c1*u)
-    g.x.c0.limbs[0] = 0xf5f28fa202940a10ULL;
-    g.x.c0.limbs[1] = 0xb3f5fb2687b4961aULL;
-    g.x.c0.limbs[2] = 0xa1a893b53e2ae580ULL;
-    g.x.c0.limbs[3] = 0x9894999d1a3caee9ULL;
-    g.x.c0.limbs[4] = 0x6f67b7631863366bULL;
-    g.x.c0.limbs[5] = 0x058191924350bcd7ULL;
+    g.x.c0.limbs[0] = G2_GEN_X_C0_L0;
+    g.x.c0.limbs[1] = G2_GEN_X_C0_L1;
+    g.x.c0.limbs[2] = G2_GEN_X_C0_L2;
+    g.x.c0.limbs[3] = G2_GEN_X_C0_L3;
+    g.x.c0.limbs[4] = G2_GEN_X_C0_L4;
+    g.x.c0.limbs[5] = G2_GEN_X_C0_L5;
     
-    g.x.c1.limbs[0] = 0xa5a9c0759e23f606ULL;
-    g.x.c1.limbs[1] = 0xaaa0c59dbccd60c3ULL;
-    g.x.c1.limbs[2] = 0x3bb17e18e2867806ULL;
-    g.x.c1.limbs[3] = 0x1b1ab6cc8541b367ULL;
-    g.x.c1.limbs[4] = 0xc2b6ed0ef2158547ULL;
-    g.x.c1.limbs[5] = 0x11922a097360edf3ULL;
+    g.x.c1.limbs[0] = G2_GEN_X_C1_L0;
+    g.x.c1.limbs[1] = G2_GEN_X_C1_L1;
+    g.x.c1.limbs[2] = G2_GEN_X_C1_L2;
+    g.x.c1.limbs[3] = G2_GEN_X_C1_L3;
+    g.x.c1.limbs[4] = G2_GEN_X_C1_L4;
+    g.x.c1.limbs[5] = G2_GEN_X_C1_L5;
     
     // y coordinate
-    g.y.c0.limbs[0] = 0x4c730af860494c4aULL;
-    g.y.c0.limbs[1] = 0x597cfa1f5e369c5aULL;
-    g.y.c0.limbs[2] = 0xe7e6856caa0a635aULL;
-    g.y.c0.limbs[3] = 0xbbefb5e96e0d495fULL;
-    g.y.c0.limbs[4] = 0x07d3a975f0ef25a2ULL;
-    g.y.c0.limbs[5] = 0x0083fd8e7e80dae5ULL;
+    g.y.c0.limbs[0] = G2_GEN_Y_C0_L0;
+    g.y.c0.limbs[1] = G2_GEN_Y_C0_L1;
+    g.y.c0.limbs[2] = G2_GEN_Y_C0_L2;
+    g.y.c0.limbs[3] = G2_GEN_Y_C0_L3;
+    g.y.c0.limbs[4] = G2_GEN_Y_C0_L4;
+    g.y.c0.limbs[5] = G2_GEN_Y_C0_L5;
     
-    g.y.c1.limbs[0] = 0xadc0fc92df64b05dULL;
-    g.y.c1.limbs[1] = 0x18aa270a2b1461dcULL;
-    g.y.c1.limbs[2] = 0x86adac6a3be4eba0ULL;
-    g.y.c1.limbs[3] = 0x79495c4ec93da33aULL;
-    g.y.c1.limbs[4] = 0xe7175850a43ccaedULL;
-    g.y.c1.limbs[5] = 0x0b2bc2a163de1bf2ULL;
+    g.y.c1.limbs[0] = G2_GEN_Y_C1_L0;
+    g.y.c1.limbs[1] = G2_GEN_Y_C1_L1;
+    g.y.c1.limbs[2] = G2_GEN_Y_C1_L2;
+    g.y.c1.limbs[3] = G2_GEN_Y_C1_L3;
+    g.y.c1.limbs[4] = G2_GEN_Y_C1_L4;
+    g.y.c1.limbs[5] = G2_GEN_Y_C1_L5;
     
     return g;
 }

@@ -144,77 +144,28 @@ static const uint64_t G1_GEN_Y_STANDARD[6] = {
 /**
  * G1 Generator in Montgomery form (from bls12_381_constants.h, verified against BLST):
  */
-static const uint64_t G1_GEN_X_MONTGOMERY[6] = {
-    0x5cb38790fd530c16ULL,
-    0x7817fc679976fff5ULL,
-    0x154f95c7143ba1c1ULL,
-    0xf0ae6acdf3d0e747ULL,
-    0xedce6ecc21dbf440ULL,
-    0x120177419e0bfb75ULL
-};
+static const uint64_t G1_GEN_X_MONTGOMERY[6] = G1_GEN_X_LIMBS;
 
-static const uint64_t G1_GEN_Y_MONTGOMERY[6] = {
-    0xbaac93d50ce72271ULL,
-    0x8c22631a7918fd8eULL,
-    0xdd595f13570725ceULL,
-    0x51ac582950405194ULL,
-    0x0e1c8c3fad0059c0ULL,
-    0x0bbc3efc5008a26aULL
-};
+static const uint64_t G1_GEN_Y_MONTGOMERY[6] = G1_GEN_Y_LIMBS;
 
 /**
  * Curve coefficient b = 4 for y^2 = x^3 + 4 (in Montgomery form)
  */
-static const uint64_t G1_B_MONTGOMERY[6] = {
-    0xaa270000000cfff3ULL,
-    0x53cc0032fc34000aULL,
-    0x478fe97a6b0a807fULL,
-    0xb1d37ebee6ba24d7ULL,
-    0x8ec9733bbf78ab2fULL,
-    0x09d645513d83de7eULL
-};
+static const uint64_t G1_B_MONTGOMERY[6] = G1_B_LIMBS;
 
 /**
  * G2 Generator x coordinate (Fq2 = c0 + c1*u) in Montgomery form (from bls12_381_constants.h):
  */
-static const uint64_t G2_GEN_X_C0_MONTGOMERY[6] = {
-    0xf5f28fa202940a10ULL,
-    0xb3f5fb2687b4961aULL,
-    0xa1a893b53e2ae580ULL,
-    0x9894999d1a3caee9ULL,
-    0x6f67b7631863366bULL,
-    0x058191924350bcd7ULL
-};
+static const uint64_t G2_GEN_X_C0_MONTGOMERY[6] = G2_GEN_X_C0_LIMBS;
 
-static const uint64_t G2_GEN_X_C1_MONTGOMERY[6] = {
-    0xa5a9c0759e23f606ULL,
-    0xaaa0c59dbccd60c3ULL,
-    0x3bb17e18e2867806ULL,
-    0x1b1ab6cc8541b367ULL,
-    0xc2b6ed0ef2158547ULL,
-    0x11922a097360edf3ULL
-};
+static const uint64_t G2_GEN_X_C1_MONTGOMERY[6] = G2_GEN_X_C1_LIMBS;
 
 /**
  * G2 Generator y coordinate in Montgomery form (from bls12_381_constants.h):
  */
-static const uint64_t G2_GEN_Y_C0_MONTGOMERY[6] = {
-    0x4c730af860494c4aULL,
-    0x597cfa1f5e369c5aULL,
-    0xe7e6856caa0a635aULL,
-    0xbbefb5e96e0d495fULL,
-    0x07d3a975f0ef25a2ULL,
-    0x0083fd8e7e80dae5ULL
-};
+static const uint64_t G2_GEN_Y_C0_MONTGOMERY[6] = G2_GEN_Y_C0_LIMBS;
 
-static const uint64_t G2_GEN_Y_C1_MONTGOMERY[6] = {
-    0xadc0fc92df64b05dULL,
-    0x18aa270a2b1461dcULL,
-    0x86adac6a3be4eba0ULL,
-    0x79495c4ec93da33aULL,
-    0xe7175850a43ccaedULL,
-    0x0b2bc2a163de1bf2ULL
-};
+static const uint64_t G2_GEN_Y_C1_MONTGOMERY[6] = G2_GEN_Y_C1_LIMBS;
 
 /**
  * 2^32-th root of unity in Fr (for NTT with max domain 2^32)
@@ -393,20 +344,20 @@ __global__ void kat_from_int_kernel(uint64_t val, Fr* out) {
 // G1 point operations
 __global__ void kat_g1_generator_kernel(G1Affine* out) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Load generator from constants (verified against BLST/bls12_381_constants.h)
-        out->x.limbs[0] = 0x5cb38790fd530c16ULL;
-        out->x.limbs[1] = 0x7817fc679976fff5ULL;
-        out->x.limbs[2] = 0x154f95c7143ba1c1ULL;
-        out->x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
-        out->x.limbs[4] = 0xedce6ecc21dbf440ULL;
-        out->x.limbs[5] = 0x120177419e0bfb75ULL;
+        // Load generator from bls12_381_constants.h
+        out->x.limbs[0] = G1_GEN_X_L0;
+        out->x.limbs[1] = G1_GEN_X_L1;
+        out->x.limbs[2] = G1_GEN_X_L2;
+        out->x.limbs[3] = G1_GEN_X_L3;
+        out->x.limbs[4] = G1_GEN_X_L4;
+        out->x.limbs[5] = G1_GEN_X_L5;
         
-        out->y.limbs[0] = 0xbaac93d50ce72271ULL;
-        out->y.limbs[1] = 0x8c22631a7918fd8eULL;
-        out->y.limbs[2] = 0xdd595f13570725ceULL;
-        out->y.limbs[3] = 0x51ac582950405194ULL;
-        out->y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
-        out->y.limbs[5] = 0x0bbc3efc5008a26aULL;
+        out->y.limbs[0] = G1_GEN_Y_L0;
+        out->y.limbs[1] = G1_GEN_Y_L1;
+        out->y.limbs[2] = G1_GEN_Y_L2;
+        out->y.limbs[3] = G1_GEN_Y_L3;
+        out->y.limbs[4] = G1_GEN_Y_L4;
+        out->y.limbs[5] = G1_GEN_Y_L5;
     }
 }
 
@@ -455,14 +406,14 @@ __global__ void kat_projective_equal_kernel(
 __global__ void kat_verify_on_curve_kernel(const G1Affine* point, int* on_curve) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
         // Curve: y² = x³ + 4 (in Montgomery form)
-        // b = 4 in Montgomery form
+        // b = 4 in Montgomery form (from bls12_381_constants.h)
         Fq b;
-        b.limbs[0] = 0xaa270000000cfff3ULL;
-        b.limbs[1] = 0x53cc0032fc34000aULL;
-        b.limbs[2] = 0x478fe97a6b0a807fULL;
-        b.limbs[3] = 0xb1d37ebee6ba24d7ULL;
-        b.limbs[4] = 0x8ec9733bbf78ab2fULL;
-        b.limbs[5] = 0x09d645513d83de7eULL;
+        b.limbs[0] = G1_B_L0;
+        b.limbs[1] = G1_B_L1;
+        b.limbs[2] = G1_B_L2;
+        b.limbs[3] = G1_B_L3;
+        b.limbs[4] = G1_B_L4;
+        b.limbs[5] = G1_B_L5;
         
         // Compute y²
         Fq y_squared;
