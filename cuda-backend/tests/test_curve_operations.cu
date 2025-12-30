@@ -107,61 +107,61 @@ __device__ __forceinline__ bool g2_projective_equal(
 }
 
 // =============================================================================
-// G1 Generator Constants (Montgomery form)
+// G1 Generator Constants (Montgomery form, from bls12_381_constants.h)
 // =============================================================================
 
 static G1Affine make_g1_generator() {
     G1Affine g;
-    g.x.limbs[0] = 0xfd530c16a28a2ed5ULL;
-    g.x.limbs[1] = 0xc0f3db9eb2a81c60ULL;
-    g.x.limbs[2] = 0xa18ad315bdd26cb9ULL;
-    g.x.limbs[3] = 0x6c69116d93a67ca5ULL;
-    g.x.limbs[4] = 0x04c9ad3661f6eae1ULL;
-    g.x.limbs[5] = 0x1120bb669f6f8d4eULL;
+    g.x.limbs[0] = 0x5cb38790fd530c16ULL;
+    g.x.limbs[1] = 0x7817fc679976fff5ULL;
+    g.x.limbs[2] = 0x154f95c7143ba1c1ULL;
+    g.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
+    g.x.limbs[4] = 0xedce6ecc21dbf440ULL;
+    g.x.limbs[5] = 0x120177419e0bfb75ULL;
     
-    g.y.limbs[0] = 0x11560bf17baa99bcULL;
-    g.y.limbs[1] = 0xe17df37a3381b236ULL;
-    g.y.limbs[2] = 0x0f0c5ec24fea7680ULL;
-    g.y.limbs[3] = 0x2e6d639bed6c3ac2ULL;
-    g.y.limbs[4] = 0x044a7cd5c36d13f1ULL;
-    g.y.limbs[5] = 0x120230e9d5639d9dULL;
+    g.y.limbs[0] = 0xbaac93d50ce72271ULL;
+    g.y.limbs[1] = 0x8c22631a7918fd8eULL;
+    g.y.limbs[2] = 0xdd595f13570725ceULL;
+    g.y.limbs[3] = 0x51ac582950405194ULL;
+    g.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
+    g.y.limbs[5] = 0x0bbc3efc5008a26aULL;
     
     return g;
 }
 
-// G2 Generator (Fq2 coordinates in Montgomery form)
+// G2 Generator (Fq2 coordinates in Montgomery form, from bls12_381_constants.h)
 static G2Affine make_g2_generator() {
     G2Affine g;
     
     // x coordinate (c0 + c1*u)
-    g.x.c0.limbs[0] = 0x1c0f3a1a143db902ULL;
-    g.x.c0.limbs[1] = 0x20e48b30e8a72aedULL;
-    g.x.c0.limbs[2] = 0xf73c40a98f2ac8fcULL;
-    g.x.c0.limbs[3] = 0x2c28a7f8b0adff52ULL;
-    g.x.c0.limbs[4] = 0x2b4ce80e64e74cddULL;
-    g.x.c0.limbs[5] = 0x024aa2b2f08f0a91ULL;
+    g.x.c0.limbs[0] = 0xf5f28fa202940a10ULL;
+    g.x.c0.limbs[1] = 0xb3f5fb2687b4961aULL;
+    g.x.c0.limbs[2] = 0xa1a893b53e2ae580ULL;
+    g.x.c0.limbs[3] = 0x9894999d1a3caee9ULL;
+    g.x.c0.limbs[4] = 0x6f67b7631863366bULL;
+    g.x.c0.limbs[5] = 0x058191924350bcd7ULL;
     
-    g.x.c1.limbs[0] = 0xb08c10c6d8a14693ULL;
-    g.x.c1.limbs[1] = 0x0fd8ff46e53c08fcULL;
-    g.x.c1.limbs[2] = 0xcdad1a1c8e0d5a6eULL;
-    g.x.c1.limbs[3] = 0x2d8c64e2ad0effbfULL;
-    g.x.c1.limbs[4] = 0xa4db8a2f0c5019ebULL;
-    g.x.c1.limbs[5] = 0x13e02b60522c27e6ULL;
+    g.x.c1.limbs[0] = 0xa5a9c0759e23f606ULL;
+    g.x.c1.limbs[1] = 0xaaa0c59dbccd60c3ULL;
+    g.x.c1.limbs[2] = 0x3bb17e18e2867806ULL;
+    g.x.c1.limbs[3] = 0x1b1ab6cc8541b367ULL;
+    g.x.c1.limbs[4] = 0xc2b6ed0ef2158547ULL;
+    g.x.c1.limbs[5] = 0x11922a097360edf3ULL;
     
     // y coordinate
-    g.y.c0.limbs[0] = 0xa8d4d9313ef11e98ULL;
-    g.y.c0.limbs[1] = 0xe21b21b83cca0dacULL;
-    g.y.c0.limbs[2] = 0x3d6972c8da89a11cULL;
-    g.y.c0.limbs[3] = 0x0c21f4a9ef52a2e6ULL;
-    g.y.c0.limbs[4] = 0x5a4eba38bea81f2dULL;
-    g.y.c0.limbs[5] = 0x0606c4a02ea734ccULL;
+    g.y.c0.limbs[0] = 0x4c730af860494c4aULL;
+    g.y.c0.limbs[1] = 0x597cfa1f5e369c5aULL;
+    g.y.c0.limbs[2] = 0xe7e6856caa0a635aULL;
+    g.y.c0.limbs[3] = 0xbbefb5e96e0d495fULL;
+    g.y.c0.limbs[4] = 0x07d3a975f0ef25a2ULL;
+    g.y.c0.limbs[5] = 0x0083fd8e7e80dae5ULL;
     
-    g.y.c1.limbs[0] = 0x8e69dc7d00ff41dfULL;
-    g.y.c1.limbs[1] = 0xce8c239d34e78e48ULL;
-    g.y.c1.limbs[2] = 0x8cade2c8dc656ec6ULL;
-    g.y.c1.limbs[3] = 0x4e6e1ba6ed8d95d1ULL;
-    g.y.c1.limbs[4] = 0xc8e08a9bab21c1a1ULL;
-    g.y.c1.limbs[5] = 0x0ce5d527727d6e11ULL;
+    g.y.c1.limbs[0] = 0xadc0fc92df64b05dULL;
+    g.y.c1.limbs[1] = 0x18aa270a2b1461dcULL;
+    g.y.c1.limbs[2] = 0x86adac6a3be4eba0ULL;
+    g.y.c1.limbs[3] = 0x79495c4ec93da33aULL;
+    g.y.c1.limbs[4] = 0xe7175850a43ccaedULL;
+    g.y.c1.limbs[5] = 0x0b2bc2a163de1bf2ULL;
     
     return g;
 }
@@ -826,10 +826,92 @@ TestResult test_g2_double_vs_add() {
 }
 
 // =============================================================================
+// Curve Equation Verification Tests
+// =============================================================================
+
+/**
+ * @brief Verify G1 generator is on curve y² = x³ + 4
+ * 
+ * This is a CRITICAL test - if the generator is not on the curve,
+ * all cryptographic operations are fundamentally broken.
+ */
+TestResult test_g1_generator_on_curve() {
+    int* d_result;
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_result, sizeof(int)));
+    
+    verify_g1_generator_on_curve_kernel<<<1, 1>>>(d_result);
+    SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
+    
+    int result;
+    SECURITY_CHECK_CUDA(cudaMemcpy(&result, d_result, sizeof(int), cudaMemcpyDeviceToHost));
+    cudaFree(d_result);
+    
+    if (result != 1) {
+        std::cout << "\n    CRITICAL: G1 generator is NOT on curve y² = x³ + 4!";
+        return TestResult::FAILED;
+    }
+    return TestResult::PASSED;
+}
+
+/**
+ * @brief Verify derived points remain on curve after group operations
+ * 
+ * After doubling/addition, all resulting points must still lie on the curve.
+ * This catches subtle bugs in the group law implementation.
+ */
+TestResult test_g1_derived_points_on_curve() {
+    const int n = 256;
+    
+    G1Affine gen = make_g1_generator();
+    
+    G1Affine* d_gen;
+    G1Projective* d_points;
+    int* d_results;
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_gen, sizeof(G1Affine)));
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_points, n * sizeof(G1Projective)));
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_results, n * sizeof(int)));
+    
+    SECURITY_CHECK_CUDA(cudaMemcpy(d_gen, &gen, sizeof(G1Affine), cudaMemcpyHostToDevice));
+    
+    // Generate points via repeated doubling: G, 2G, 4G, 8G, ...
+    g1_generate_test_points_kernel<<<1, 1>>>(d_gen, d_points, n);
+    SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
+    cudaFree(d_gen);
+    
+    // Verify all points are on curve
+    verify_g1_projective_points_on_curve_kernel<<<(n + 255) / 256, 256>>>(
+        d_points, d_results, n);
+    SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
+    
+    std::vector<int> results(n);
+    SECURITY_CHECK_CUDA(cudaMemcpy(results.data(), d_results, n * sizeof(int), cudaMemcpyDeviceToHost));
+    
+    cudaFree(d_points);
+    cudaFree(d_results);
+    
+    int failures = 0;
+    for (int i = 0; i < n; i++) {
+        if (results[i] != 1) failures++;
+    }
+    
+    if (failures > 0) {
+        std::cout << "\n    " << failures << "/" << n << " derived points NOT on curve!";
+        return TestResult::FAILED;
+    }
+    return TestResult::PASSED;
+}
+
+// =============================================================================
 // Registration
 // =============================================================================
 
 void register_curve_operation_tests(SecurityTestSuite& suite) {
+    // Curve Equation Verification (CRITICAL - must come first)
+    suite.add_test("G1 generator on curve y² = x³ + 4", "Curve Verification",
+                   test_g1_generator_on_curve, true);  // Critical test
+    suite.add_test("G1 derived points remain on curve", "Curve Verification",
+                   test_g1_derived_points_on_curve, true);  // Critical test
+    
     // G1 Group Laws
     suite.add_test("G1: P + O = P (identity)", "G1 Group Laws",
                    test_g1_identity_addition);

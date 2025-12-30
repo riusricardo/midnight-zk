@@ -47,24 +47,24 @@ extern "C" {
 }
 
 // =============================================================================
-// G1 Generator
+// G1 Generator (Montgomery form, from bls12_381_constants.h)
 // =============================================================================
 
 static G1Affine make_g1_generator() {
     G1Affine g;
-    g.x.limbs[0] = 0xfd530c16a28a2ed5ULL;
-    g.x.limbs[1] = 0xc0f3db9eb2a81c60ULL;
-    g.x.limbs[2] = 0xa18ad315bdd26cb9ULL;
-    g.x.limbs[3] = 0x6c69116d93a67ca5ULL;
-    g.x.limbs[4] = 0x04c9ad3661f6eae1ULL;
-    g.x.limbs[5] = 0x1120bb669f6f8d4eULL;
+    g.x.limbs[0] = 0x5cb38790fd530c16ULL;
+    g.x.limbs[1] = 0x7817fc679976fff5ULL;
+    g.x.limbs[2] = 0x154f95c7143ba1c1ULL;
+    g.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
+    g.x.limbs[4] = 0xedce6ecc21dbf440ULL;
+    g.x.limbs[5] = 0x120177419e0bfb75ULL;
     
-    g.y.limbs[0] = 0x11560bf17baa99bcULL;
-    g.y.limbs[1] = 0xe17df37a3381b236ULL;
-    g.y.limbs[2] = 0x0f0c5ec24fea7680ULL;
-    g.y.limbs[3] = 0x2e6d639bed6c3ac2ULL;
-    g.y.limbs[4] = 0x044a7cd5c36d13f1ULL;
-    g.y.limbs[5] = 0x120230e9d5639d9dULL;
+    g.y.limbs[0] = 0xbaac93d50ce72271ULL;
+    g.y.limbs[1] = 0x8c22631a7918fd8eULL;
+    g.y.limbs[2] = 0xdd595f13570725ceULL;
+    g.y.limbs[3] = 0x51ac582950405194ULL;
+    g.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
+    g.y.limbs[5] = 0x0bbc3efc5008a26aULL;
     
     return g;
 }
@@ -734,7 +734,34 @@ TestResult test_msm_window_consistency() {
 // Registration
 // =============================================================================
 
+/**
+ * @brief Verify G1 generator used in MSM is on curve
+ * 
+ * CRITICAL: If the generator is wrong, all MSM results are invalid.
+ */
+TestResult test_msm_generator_on_curve() {
+    int* d_result;
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_result, sizeof(int)));
+    
+    verify_g1_generator_on_curve_kernel<<<1, 1>>>(d_result);
+    SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
+    
+    int result;
+    SECURITY_CHECK_CUDA(cudaMemcpy(&result, d_result, sizeof(int), cudaMemcpyDeviceToHost));
+    cudaFree(d_result);
+    
+    if (result != 1) {
+        std::cout << "\n    CRITICAL: MSM generator is NOT on curve!";
+        return TestResult::FAILED;
+    }
+    return TestResult::PASSED;
+}
+
 void register_msm_tests(SecurityTestSuite& suite) {
+    // Generator verification (CRITICAL - must come first)
+    suite.add_test("MSM: Generator on curve y² = x³ + 4", "MSM Prerequisites",
+                   test_msm_generator_on_curve, true);  // Critical test
+    
     // Basic correctness
     suite.add_test("MSM: 1*G = G", "MSM Correctness",
                    test_msm_single_scalar_one);

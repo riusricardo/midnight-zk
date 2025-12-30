@@ -400,4 +400,127 @@ inline Fr make_fr_zero_host() {
     return r;
 }
 
+// =============================================================================
+// Curve Verification Utilities
+// =============================================================================
+
+// G1 curve coefficient b = 4 in Montgomery form (from bls12_381_constants.h)
+__device__ __host__ inline Fq get_g1_b() {
+    Fq b;
+    b.limbs[0] = 0xaa270000000cfff3ULL;
+    b.limbs[1] = 0x53cc0032fc34000aULL;
+    b.limbs[2] = 0x478fe97a6b0a807fULL;
+    b.limbs[3] = 0xb1d37ebee6ba24d7ULL;
+    b.limbs[4] = 0x8ec9733bbf78ab2fULL;
+    b.limbs[5] = 0x09d645513d83de7eULL;
+    return b;
+}
+
+/**
+ * @brief Verify a G1 affine point lies on the curve y² = x³ + 4
+ * 
+ * This performs actual field arithmetic to verify the curve equation.
+ * Returns true if point is on curve, false otherwise.
+ */
+__device__ __forceinline__ bool g1_affine_on_curve(const G1Affine& p) {
+    Fq b = get_g1_b();
+    
+    // Compute y²
+    Fq y_squared;
+    field_sqr(y_squared, p.y);
+    
+    // Compute x³
+    Fq x_squared, x_cubed;
+    field_sqr(x_squared, p.x);
+    field_mul(x_cubed, x_squared, p.x);
+    
+    // Compute x³ + b
+    Fq rhs;
+    field_add(rhs, x_cubed, b);
+    
+    // Check y² == x³ + b
+    return (y_squared == rhs);
+}
+
+/**
+ * @brief Verify a G1 projective point lies on the curve
+ * 
+ * For projective (X, Y, Z), the affine point is (X/Z², Y/Z³)
+ * Curve equation becomes: Y² = X³ + b*Z⁶
+ */
+__device__ __forceinline__ bool g1_projective_on_curve(const G1Projective& p) {
+    // Identity is trivially on curve
+    if (p.is_identity()) return true;
+    
+    Fq b = get_g1_b();
+    
+    // Compute Y²
+    Fq Y_sq;
+    field_sqr(Y_sq, p.Y);
+    
+    // Compute X³
+    Fq X_sq, X_cu;
+    field_sqr(X_sq, p.X);
+    field_mul(X_cu, X_sq, p.X);
+    
+    // Compute Z²
+    Fq Z_sq;
+    field_sqr(Z_sq, p.Z);
+    
+    // Compute Z⁴ = (Z²)²
+    Fq Z_4;
+    field_sqr(Z_4, Z_sq);
+    
+    // Compute Z⁶ = Z⁴ * Z²
+    Fq Z_6;
+    field_mul(Z_6, Z_4, Z_sq);
+    
+    // Compute b * Z⁶
+    Fq bZ6;
+    field_mul(bZ6, b, Z_6);
+    
+    // Compute X³ + b*Z⁶
+    Fq rhs;
+    field_add(rhs, X_cu, bZ6);
+    
+    return (Y_sq == rhs);
+}
+
+/**
+ * @brief Kernel to verify G1 generator is on curve
+ */
+__global__ void verify_g1_generator_on_curve_kernel(int* result) {
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    
+    // Load generator from bls12_381_constants.h values
+    G1Affine gen;
+    gen.x.limbs[0] = 0x5cb38790fd530c16ULL;
+    gen.x.limbs[1] = 0x7817fc679976fff5ULL;
+    gen.x.limbs[2] = 0x154f95c7143ba1c1ULL;
+    gen.x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
+    gen.x.limbs[4] = 0xedce6ecc21dbf440ULL;
+    gen.x.limbs[5] = 0x120177419e0bfb75ULL;
+    
+    gen.y.limbs[0] = 0xbaac93d50ce72271ULL;
+    gen.y.limbs[1] = 0x8c22631a7918fd8eULL;
+    gen.y.limbs[2] = 0xdd595f13570725ceULL;
+    gen.y.limbs[3] = 0x51ac582950405194ULL;
+    gen.y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
+    gen.y.limbs[5] = 0x0bbc3efc5008a26aULL;
+    
+    *result = g1_affine_on_curve(gen) ? 1 : 0;
+}
+
+/**
+ * @brief Kernel to verify multiple projective points are on curve
+ */
+__global__ void verify_g1_projective_points_on_curve_kernel(
+    const G1Projective* points, int* results, int n
+) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= n) return;
+    
+    results[idx] = g1_projective_on_curve(points[idx]) ? 1 : 0;
+}
+
 } // namespace security_tests

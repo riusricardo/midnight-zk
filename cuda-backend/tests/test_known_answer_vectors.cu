@@ -142,24 +142,24 @@ static const uint64_t G1_GEN_Y_STANDARD[6] = {
 };
 
 /**
- * G1 Generator in Montgomery form (precomputed):
+ * G1 Generator in Montgomery form (from bls12_381_constants.h, verified against BLST):
  */
 static const uint64_t G1_GEN_X_MONTGOMERY[6] = {
-    0xfd530c16a28a2ed5ULL,
-    0xc0f3db9eb2a81c60ULL,
-    0xa18ad315bdd26cb9ULL,
-    0x6c69116d93a67ca5ULL,
-    0x04c9ad3661f6eae1ULL,
-    0x1120bb669f6f8d4eULL
+    0x5cb38790fd530c16ULL,
+    0x7817fc679976fff5ULL,
+    0x154f95c7143ba1c1ULL,
+    0xf0ae6acdf3d0e747ULL,
+    0xedce6ecc21dbf440ULL,
+    0x120177419e0bfb75ULL
 };
 
 static const uint64_t G1_GEN_Y_MONTGOMERY[6] = {
-    0x11560bf17baa99bcULL,
-    0xe17df37a3381b236ULL,
-    0x0f0c5ec24fea7680ULL,
-    0x2e6d639bed6c3ac2ULL,
-    0x044a7cd5c36d13f1ULL,
-    0x120230e9d5639d9dULL
+    0xbaac93d50ce72271ULL,
+    0x8c22631a7918fd8eULL,
+    0xdd595f13570725ceULL,
+    0x51ac582950405194ULL,
+    0x0e1c8c3fad0059c0ULL,
+    0x0bbc3efc5008a26aULL
 };
 
 /**
@@ -175,45 +175,45 @@ static const uint64_t G1_B_MONTGOMERY[6] = {
 };
 
 /**
- * G2 Generator x coordinate (Fq2 = c0 + c1*u) in Montgomery form:
+ * G2 Generator x coordinate (Fq2 = c0 + c1*u) in Montgomery form (from bls12_381_constants.h):
  */
 static const uint64_t G2_GEN_X_C0_MONTGOMERY[6] = {
-    0x1c0f3a1a143db902ULL,
-    0x20e48b30e8a72aedULL,
-    0xf73c40a98f2ac8fcULL,
-    0x2c28a7f8b0adff52ULL,
-    0x2b4ce80e64e74cddULL,
-    0x024aa2b2f08f0a91ULL
+    0xf5f28fa202940a10ULL,
+    0xb3f5fb2687b4961aULL,
+    0xa1a893b53e2ae580ULL,
+    0x9894999d1a3caee9ULL,
+    0x6f67b7631863366bULL,
+    0x058191924350bcd7ULL
 };
 
 static const uint64_t G2_GEN_X_C1_MONTGOMERY[6] = {
-    0xb08c10c6d8a14693ULL,
-    0x0fd8ff46e53c08fcULL,
-    0xcdad1a1c8e0d5a6eULL,
-    0x2d8c64e2ad0effbfULL,
-    0xa4db8a2f0c5019ebULL,
-    0x13e02b60522c27e6ULL
+    0xa5a9c0759e23f606ULL,
+    0xaaa0c59dbccd60c3ULL,
+    0x3bb17e18e2867806ULL,
+    0x1b1ab6cc8541b367ULL,
+    0xc2b6ed0ef2158547ULL,
+    0x11922a097360edf3ULL
 };
 
 /**
- * G2 Generator y coordinate in Montgomery form:
+ * G2 Generator y coordinate in Montgomery form (from bls12_381_constants.h):
  */
 static const uint64_t G2_GEN_Y_C0_MONTGOMERY[6] = {
-    0xa8d4d9313ef11e98ULL,
-    0xe21b21b83cca0dacULL,
-    0x3d6972c8da89a11cULL,
-    0x0c21f4a9ef52a2e6ULL,
-    0x5a4eba38bea81f2dULL,
-    0x0606c4a02ea734ccULL
+    0x4c730af860494c4aULL,
+    0x597cfa1f5e369c5aULL,
+    0xe7e6856caa0a635aULL,
+    0xbbefb5e96e0d495fULL,
+    0x07d3a975f0ef25a2ULL,
+    0x0083fd8e7e80dae5ULL
 };
 
 static const uint64_t G2_GEN_Y_C1_MONTGOMERY[6] = {
-    0x8e69dc7d00ff41dfULL,
-    0xce8c239d34e78e48ULL,
-    0x8cade2c8dc656ec6ULL,
-    0x4e6e1ba6ed8d95d1ULL,
-    0xc8e08a9bab21c1a1ULL,
-    0x0ce5d527727d6e11ULL
+    0xadc0fc92df64b05dULL,
+    0x18aa270a2b1461dcULL,
+    0x86adac6a3be4eba0ULL,
+    0x79495c4ec93da33aULL,
+    0xe7175850a43ccaedULL,
+    0x0b2bc2a163de1bf2ULL
 };
 
 /**
@@ -393,20 +393,20 @@ __global__ void kat_from_int_kernel(uint64_t val, Fr* out) {
 // G1 point operations
 __global__ void kat_g1_generator_kernel(G1Affine* out) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
-        // Load generator from constants
-        out->x.limbs[0] = 0xfd530c16a28a2ed5ULL;
-        out->x.limbs[1] = 0xc0f3db9eb2a81c60ULL;
-        out->x.limbs[2] = 0xa18ad315bdd26cb9ULL;
-        out->x.limbs[3] = 0x6c69116d93a67ca5ULL;
-        out->x.limbs[4] = 0x04c9ad3661f6eae1ULL;
-        out->x.limbs[5] = 0x1120bb669f6f8d4eULL;
+        // Load generator from constants (verified against BLST/bls12_381_constants.h)
+        out->x.limbs[0] = 0x5cb38790fd530c16ULL;
+        out->x.limbs[1] = 0x7817fc679976fff5ULL;
+        out->x.limbs[2] = 0x154f95c7143ba1c1ULL;
+        out->x.limbs[3] = 0xf0ae6acdf3d0e747ULL;
+        out->x.limbs[4] = 0xedce6ecc21dbf440ULL;
+        out->x.limbs[5] = 0x120177419e0bfb75ULL;
         
-        out->y.limbs[0] = 0x11560bf17baa99bcULL;
-        out->y.limbs[1] = 0xe17df37a3381b236ULL;
-        out->y.limbs[2] = 0x0f0c5ec24fea7680ULL;
-        out->y.limbs[3] = 0x2e6d639bed6c3ac2ULL;
-        out->y.limbs[4] = 0x044a7cd5c36d13f1ULL;
-        out->y.limbs[5] = 0x120230e9d5639d9dULL;
+        out->y.limbs[0] = 0xbaac93d50ce72271ULL;
+        out->y.limbs[1] = 0x8c22631a7918fd8eULL;
+        out->y.limbs[2] = 0xdd595f13570725ceULL;
+        out->y.limbs[3] = 0x51ac582950405194ULL;
+        out->y.limbs[4] = 0x0e1c8c3fad0059c0ULL;
+        out->y.limbs[5] = 0x0bbc3efc5008a26aULL;
     }
 }
 
@@ -443,6 +443,42 @@ __global__ void kat_projective_equal_kernel(
         field_mul(yz2, b->Y, a->Z);
         
         *result = (xz1 == xz2 && yz1 == yz2) ? 1 : 0;
+    }
+}
+
+/**
+ * @brief Verify a point (x, y) lies on BLS12-381 G1 curve: y² = x³ + 4
+ * 
+ * This kernel actually computes the curve equation in Fq arithmetic.
+ * Returns 1 if on curve, 0 if not.
+ */
+__global__ void kat_verify_on_curve_kernel(const G1Affine* point, int* on_curve) {
+    if (threadIdx.x == 0 && blockIdx.x == 0) {
+        // Curve: y² = x³ + 4 (in Montgomery form)
+        // b = 4 in Montgomery form
+        Fq b;
+        b.limbs[0] = 0xaa270000000cfff3ULL;
+        b.limbs[1] = 0x53cc0032fc34000aULL;
+        b.limbs[2] = 0x478fe97a6b0a807fULL;
+        b.limbs[3] = 0xb1d37ebee6ba24d7ULL;
+        b.limbs[4] = 0x8ec9733bbf78ab2fULL;
+        b.limbs[5] = 0x09d645513d83de7eULL;
+        
+        // Compute y²
+        Fq y_squared;
+        field_mul(y_squared, point->y, point->y);
+        
+        // Compute x³
+        Fq x_squared, x_cubed;
+        field_mul(x_squared, point->x, point->x);
+        field_mul(x_cubed, x_squared, point->x);
+        
+        // Compute x³ + b
+        Fq rhs;
+        field_add(rhs, x_cubed, b);
+        
+        // Check y² == x³ + b
+        *on_curve = (y_squared == rhs) ? 1 : 0;
     }
 }
 
@@ -514,26 +550,46 @@ TestResult test_fr_one_device_matches_host() {
 }
 
 TestResult test_g1_generator_on_curve() {
-    // Verify: y^2 = x^3 + 4 for generator point
-    // All computations done on GPU
+    // Verify: y² = x³ + 4 for generator point (actual curve equation check!)
+    // Step 1: Load generator
+    // Step 2: Verify coordinates match specification  
+    // Step 3: Actually compute y² and x³+4 on GPU and verify equality
     
     G1Affine* d_gen;
-    Fr* d_result;  // Using Fr for temporary storage (we'll need Fq ops)
+    int* d_on_curve;
     
     SECURITY_CHECK_CUDA(cudaMalloc(&d_gen, sizeof(G1Affine)));
+    SECURITY_CHECK_CUDA(cudaMalloc(&d_on_curve, sizeof(int)));
     
+    // Load the generator point
     kat_g1_generator_kernel<<<1, 1>>>(d_gen);
     SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
     
-    // Copy back and verify manually with host computation
+    // Copy back to verify coordinates match spec
     G1Affine gen;
     SECURITY_CHECK_CUDA(cudaMemcpy(&gen, d_gen, sizeof(G1Affine), cudaMemcpyDeviceToHost));
-    cudaFree(d_gen);
     
-    // Verify coordinates match expected Montgomery form
+    // Verify coordinates match expected Montgomery form (from bls12_381_constants.h)
     if (!limbs_equal(gen.x.limbs, G1_GEN_X_MONTGOMERY, 6) ||
         !limbs_equal(gen.y.limbs, G1_GEN_Y_MONTGOMERY, 6)) {
         std::cout << "\n    Generator coordinates don't match specification";
+        cudaFree(d_gen);
+        cudaFree(d_on_curve);
+        return TestResult::FAILED;
+    }
+    
+    // CRITICAL: Actually verify the point lies on the curve y² = x³ + 4
+    kat_verify_on_curve_kernel<<<1, 1>>>(d_gen, d_on_curve);
+    SECURITY_CHECK_CUDA(cudaDeviceSynchronize());
+    
+    int on_curve;
+    SECURITY_CHECK_CUDA(cudaMemcpy(&on_curve, d_on_curve, sizeof(int), cudaMemcpyDeviceToHost));
+    
+    cudaFree(d_gen);
+    cudaFree(d_on_curve);
+    
+    if (on_curve != 1) {
+        std::cout << "\n    CRITICAL: Generator point is NOT on the curve y² = x³ + 4!";
         return TestResult::FAILED;
     }
     
