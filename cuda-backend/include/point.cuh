@@ -177,14 +177,31 @@ __device__ __forceinline__ void fq2_inv(Fq2& result, const Fq2& a) {
     field_mul(result.c1, t0, norm_inv);    // -a1 / norm
 }
 
-// Overload for compatibility with Projective::to_affine
+// Overloads for Fq2 to work with generic field templates
+// This allows G2 operations to use the same template code as G1
+
+__device__ __forceinline__ void field_add(Fq2& result, const Fq2& a, const Fq2& b) {
+    fq2_add(result, a, b);
+}
+
+__device__ __forceinline__ void field_sub(Fq2& result, const Fq2& a, const Fq2& b) {
+    fq2_sub(result, a, b);
+}
+
+__device__ __forceinline__ void field_mul(Fq2& result, const Fq2& a, const Fq2& b) {
+    fq2_mul(result, a, b);
+}
+
+__device__ __forceinline__ void field_sqr(Fq2& result, const Fq2& a) {
+    fq2_sqr(result, a);
+}
+
 __device__ __forceinline__ void field_inv(Fq2& result, const Fq2& a) {
     fq2_inv(result, a);
 }
 
-// Overload field_mul for Fq2 to work with Projective templates
-__device__ __forceinline__ void field_mul(Fq2& result, const Fq2& a, const Fq2& b) {
-    fq2_mul(result, a, b);
+__device__ __forceinline__ void field_neg(Fq2& result, const Fq2& a) {
+    fq2_neg(result, a);
 }
 
 // Fq2 operators (for convenience)
@@ -258,7 +275,8 @@ using G1Affine = Affine<Fq>;
 using G2Affine = Affine<Fq2>;
 
 // =============================================================================
-// Projective point representation (X, Y, Z) where x = X/Z, y = Y/Z
+// Projective point representation using Jacobian coordinates
+// (X, Y, Z) where x = X/Z², y = Y/Z³
 // =============================================================================
 
 template<typename BaseField, typename ScalarField, typename CurveTag>
@@ -730,27 +748,14 @@ __device__ __forceinline__ void g1_neg(G1Projective& result, const G1Projective&
 }
 
 /**
- * @brief Convert projective to affine: (X, Y, Z) -> (X/Z, Y/Z)
+ * @brief Convert projective to affine using template method
+ * 
+ * NOTE: This function is kept for API compatibility but delegates to
+ * the template Projective::to_affine() method which implements
+ * Jacobian to affine conversion: x = X/Z², y = Y/Z³
  */
 __device__ __forceinline__ void g1_to_affine(G1Affine& result, const G1Projective& p) {
-    if (p.is_identity()) {
-        result = G1Affine::identity();
-        return;
-    }
-    
-    // Defensive check - should never occur if point arithmetic is correct
-    if (p.Z.is_zero()) {
-        result = G1Affine::identity();
-        return;
-    }
-    
-    Fq z_inv, z_inv_sq;
-    field_inv(z_inv, p.Z);
-    field_sqr(z_inv_sq, z_inv);
-    
-    field_mul(result.x, p.X, z_inv_sq);
-    field_mul(result.y, p.Y, z_inv_sq);
-    field_mul(result.y, result.y, z_inv);
+    result = p.to_affine();
 }
 
 // =============================================================================
@@ -758,124 +763,135 @@ __device__ __forceinline__ void g1_to_affine(G1Affine& result, const G1Projectiv
 // =============================================================================
 
 /**
- * @brief Double a G2 projective point: result = 2 * P
+ * @brief Double a G2 projective point: result = 2 * P (Constant-Time)
  * 
  * Uses the doubling formula for y^2 = x^3 + b where b = 4(1+i) for G2.
  * Cost: 1S + 5M + 8add (in Fq2)
+ * 
+ * NOTE: This function is safe for in-place operation (result == p)
+ * SECURITY: Uses constant-time selection for identity handling to prevent
+ *           timing side-channels.
  */
 __device__ __forceinline__ void g2_double(G2Projective& result, const G2Projective& p) {
-    if (p.is_identity()) {
-        result = p;
-        return;
-    }
+    // Pre-compute identity condition (will use cmov at end)
+    int is_identity = p.is_identity() ? 1 : 0;
+    
+    // Save original p for identity case (handles aliasing when result == p)
+    G2Projective saved_p = p;
 
     Fq2 t0, t1, t2, t3;
     
     // t0 = Y^2
-    fq2_sqr(t0, p.Y);
+    field_sqr(t0, p.Y);
     
     // t1 = 4 * X * Y^2
-    fq2_mul(t1, p.X, t0);
-    fq2_add(t1, t1, t1);
-    fq2_add(t1, t1, t1);
+    field_mul(t1, p.X, t0);
+    field_add(t1, t1, t1);
+    field_add(t1, t1, t1);
     
     // t2 = 8 * Y^4
-    fq2_sqr(t2, t0);
-    fq2_add(t2, t2, t2);
-    fq2_add(t2, t2, t2);
-    fq2_add(t2, t2, t2);
+    field_sqr(t2, t0);
+    field_add(t2, t2, t2);
+    field_add(t2, t2, t2);
+    field_add(t2, t2, t2);
     
     // t3 = 3 * X^2 (for a = 0)
-    fq2_sqr(t3, p.X);
+    field_sqr(t3, p.X);
     Fq2 t3_2;
-    fq2_add(t3_2, t3, t3);
-    fq2_add(t3, t3_2, t3);
+    field_add(t3_2, t3, t3);
+    field_add(t3, t3_2, t3);
     
     // Compute all outputs to temporaries first (for in-place safety)
     Fq2 new_X, new_Y, new_Z;
     
     // X3 = t3^2 - 2*t1
-    fq2_sqr(new_X, t3);
-    fq2_sub(new_X, new_X, t1);
-    fq2_sub(new_X, new_X, t1);
+    field_sqr(new_X, t3);
+    field_sub(new_X, new_X, t1);
+    field_sub(new_X, new_X, t1);
     
     // Y3 = t3 * (t1 - X3) - t2
-    fq2_sub(t0, t1, new_X);
-    fq2_mul(new_Y, t3, t0);
-    fq2_sub(new_Y, new_Y, t2);
+    field_sub(t0, t1, new_X);
+    field_mul(new_Y, t3, t0);
+    field_sub(new_Y, new_Y, t2);
     
     // Z3 = 2 * Y * Z (must use original p.Y and p.Z!)
-    fq2_mul(new_Z, p.Y, p.Z);
-    fq2_add(new_Z, new_Z, new_Z);
+    field_mul(new_Z, p.Y, p.Z);
+    field_add(new_Z, new_Z, new_Z);
     
-    // Now write to result
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Computed result
+    G2Projective computed;
+    computed.X = new_X;
+    computed.Y = new_Y;
+    computed.Z = new_Z;
+    
+    // Constant-time selection: if identity, return saved_p (which is identity)
+    // Note: We use saved_p instead of G2Projective::identity() to handle
+    // the case where result == p and we've already computed into p
+    g2_cmov(result, saved_p, computed, is_identity);
 }
 
 /**
- * @brief Add two G2 projective points: result = P + Q
+ * @brief Add two G2 projective points: result = P + Q (Constant-Time)
+ * 
+ * Uses complete addition formula with constant-time edge case handling.
+ * Computes all possible results and uses cmov to select the correct one.
+ * 
+ * NOTE: This function is safe for in-place operation (result == p or result == q)
+ * 
+ * SECURITY: No branches that depend on point values. All edge cases handled
+ *           via constant-time selection (cmov) to prevent timing side-channels.
  */
 __device__ __forceinline__ void g2_add(G2Projective& result, const G2Projective& p, const G2Projective& q) {
-    if (p.is_identity()) {
-        result = q;
-        return;
-    }
-    if (q.is_identity()) {
-        result = p;
-        return;
-    }
+    // Pre-compute identity conditions
+    int p_is_identity = p.is_identity() ? 1 : 0;
+    int q_is_identity = q.is_identity() ? 1 : 0;
+    
+    // CRITICAL: Save original inputs FIRST to handle aliasing (result == p or result == q)
+    // These copies are used in the final cmov selection
+    G2Projective saved_p = p;
+    G2Projective saved_q = q;
 
     Fq2 z1z1, z2z2, u1, u2, s1, s2, h, i, j, r, v;
     
     // Z1Z1 = Z1^2
-    fq2_sqr(z1z1, p.Z);
+    field_sqr(z1z1, p.Z);
     // Z2Z2 = Z2^2
-    fq2_sqr(z2z2, q.Z);
+    field_sqr(z2z2, q.Z);
     
     // U1 = X1 * Z2Z2
-    fq2_mul(u1, p.X, z2z2);
+    field_mul(u1, p.X, z2z2);
     // U2 = X2 * Z1Z1
-    fq2_mul(u2, q.X, z1z1);
+    field_mul(u2, q.X, z1z1);
     
     // S1 = Y1 * Z2 * Z2Z2
-    fq2_mul(s1, p.Y, q.Z);
-    fq2_mul(s1, s1, z2z2);
+    field_mul(s1, p.Y, q.Z);
+    field_mul(s1, s1, z2z2);
     // S2 = Y2 * Z1 * Z1Z1
-    fq2_mul(s2, q.Y, p.Z);
-    fq2_mul(s2, s2, z1z1);
+    field_mul(s2, q.Y, p.Z);
+    field_mul(s2, s2, z1z1);
     
     // H = U2 - U1
-    fq2_sub(h, u2, u1);
+    field_sub(h, u2, u1);
     
-    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
-    // Check S2 - S1 to distinguish doubling from negation
-    if (h.is_zero()) {
-        Fq2 diff;
-        fq2_sub(diff, s2, s1);
-        if (diff.is_zero()) {
-            g2_double(result, p);
-            return;
-        } else {
-            result = G2Projective::identity();
-            return;
-        }
-    }
+    // Compute edge case conditions (constant-time)
+    int h_is_zero = h.is_zero() ? 1 : 0;
+    Fq2 s_diff;
+    field_sub(s_diff, s2, s1);
+    int s_diff_is_zero = s_diff.is_zero() ? 1 : 0;
     
     // I = (2*H)^2
-    fq2_add(i, h, h);
-    fq2_sqr(i, i);
+    field_add(i, h, h);
+    field_sqr(i, i);
     
     // J = H * I
-    fq2_mul(j, h, i);
+    field_mul(j, h, i);
     
     // r = 2 * (S2 - S1)
-    fq2_sub(r, s2, s1);
-    fq2_add(r, r, r);
+    field_sub(r, s2, s1);
+    field_add(r, r, r);
     
     // V = U1 * I
-    fq2_mul(v, u1, i);
+    field_mul(v, u1, i);
     
     // Save values that will be needed after we start writing to result
     // (for in-place safety)
@@ -887,91 +903,116 @@ __device__ __forceinline__ void g2_add(G2Projective& result, const G2Projective&
     Fq2 new_X, new_Y, new_Z;
     
     // X3 = r^2 - J - 2*V
-    fq2_sqr(new_X, r);
-    fq2_sub(new_X, new_X, j);
-    fq2_sub(new_X, new_X, v);
-    fq2_sub(new_X, new_X, v);
+    field_sqr(new_X, r);
+    field_sub(new_X, new_X, j);
+    field_sub(new_X, new_X, v);
+    field_sub(new_X, new_X, v);
     
     // Y3 = r * (V - X3) - 2*S1*J
-    fq2_sub(v, v, new_X);
-    fq2_mul(new_Y, r, v);
-    fq2_mul(saved_S1, saved_S1, j);
-    fq2_add(saved_S1, saved_S1, saved_S1);
-    fq2_sub(new_Y, new_Y, saved_S1);
+    field_sub(v, v, new_X);
+    field_mul(new_Y, r, v);
+    field_mul(saved_S1, saved_S1, j);
+    field_add(saved_S1, saved_S1, saved_S1);
+    field_sub(new_Y, new_Y, saved_S1);
     
     // Z3 = ((Z1 + Z2)^2 - Z1Z1 - Z2Z2) * H
-    fq2_add(new_Z, saved_Z1, saved_Z2);
-    fq2_sqr(new_Z, new_Z);
-    fq2_sub(new_Z, new_Z, z1z1);
-    fq2_sub(new_Z, new_Z, z2z2);
-    fq2_mul(new_Z, new_Z, h);
+    field_add(new_Z, saved_Z1, saved_Z2);
+    field_sqr(new_Z, new_Z);
+    field_sub(new_Z, new_Z, z1z1);
+    field_sub(new_Z, new_Z, z2z2);
+    field_mul(new_Z, new_Z, h);
     
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Standard addition result
+    G2Projective add_result;
+    add_result.X = new_X;
+    add_result.Y = new_Y;
+    add_result.Z = new_Z;
+    
+    // Compute doubled result (for when P == Q)
+    // Use saved_p since p might be aliased with result
+    G2Projective doubled;
+    g2_double(doubled, saved_p);
+    
+    // Identity point (for when P == -Q)
+    G2Projective identity_point = G2Projective::identity();
+    
+    // Constant-time selection of result:
+    // 1. Start with standard addition result
+    // 2. If h == 0 and s_diff == 0: P == Q, use doubled
+    // 3. If h == 0 and s_diff != 0: P == -Q, use identity
+    // 4. If p is identity: return q (use saved_q)
+    // 5. If q is identity: return p (use saved_p)
+    
+    result = add_result;
+    
+    int use_doubled = h_is_zero & s_diff_is_zero;
+    int use_identity = h_is_zero & (!s_diff_is_zero ? 1 : 0);
+    
+    g2_cmov(result, doubled, result, use_doubled);
+    g2_cmov(result, identity_point, result, use_identity);
+    
+    // Handle input identity cases (MUST use saved copies due to aliasing)
+    g2_cmov(result, saved_q, result, p_is_identity);
+    g2_cmov(result, saved_p, result, q_is_identity);
 }
 
 /**
- * @brief Mixed addition for G2: result = P + Q where Q is affine
+ * @brief Mixed addition for G2: result = P + Q where Q is affine (Constant-Time)
+ * 
+ * More efficient than general addition when one point is affine.
+ * NOTE: This function is safe for in-place operation (result == p)
+ * 
+ * SECURITY: Uses constant-time selection for all edge cases to prevent
+ *           timing side-channels.
  */
 __device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Projective& p, const G2Affine& q) {
-    if (p.is_identity()) {
-        result = G2Projective::from_affine(q);
-        return;
-    }
-    if (q.is_identity()) {
-        result = p;
-        return;
-    }
+    // Pre-compute identity conditions
+    int p_is_identity = p.is_identity() ? 1 : 0;
+    int q_is_identity = q.is_identity() ? 1 : 0;
+    
+    // CRITICAL: Save original p FIRST to handle aliasing (result == p)
+    // This copy is used in the final cmov selection
+    G2Projective saved_p = p;
 
     Fq2 z1z1, u2, s2, h, hh, i, j, r, v;
     
     // Z1Z1 = Z1^2
-    fq2_sqr(z1z1, p.Z);
+    field_sqr(z1z1, p.Z);
     
-    // U2 = X2 * Z1Z1
-    fq2_mul(u2, q.x, z1z1);
+    // U2 = X2 * Z1Z1 (U1 = X1)
+    field_mul(u2, q.x, z1z1);
     
-    // S2 = Y2 * Z1 * Z1Z1
-    fq2_mul(s2, q.y, p.Z);
-    fq2_mul(s2, s2, z1z1);
+    // S2 = Y2 * Z1 * Z1Z1 (S1 = Y1)
+    field_mul(s2, q.y, p.Z);
+    field_mul(s2, s2, z1z1);
     
     // H = U2 - X1
-    fq2_sub(h, u2, p.X);
+    field_sub(h, u2, p.X);
     
-    // EDGE CASE: If H == 0, then P.x == Q.x in affine coordinates
-    // Check S2 - Y1 to distinguish doubling from negation
-    if (h.is_zero()) {
-        Fq2 diff;
-        fq2_sub(diff, s2, p.Y);
-        if (diff.is_zero()) {
-            g2_double(result, p);
-            return;
-        } else {
-            result = G2Projective::identity();
-            return;
-        }
-    }
+    // Compute edge case conditions (constant-time)
+    int h_is_zero = h.is_zero() ? 1 : 0;
+    Fq2 s_diff;
+    field_sub(s_diff, s2, p.Y);
+    int s_diff_is_zero = s_diff.is_zero() ? 1 : 0;
     
     // HH = H^2
-    fq2_sqr(hh, h);
+    field_sqr(hh, h);
     
     // I = 4 * HH
-    fq2_add(i, hh, hh);
-    fq2_add(i, i, i);
+    field_add(i, hh, hh);
+    field_add(i, i, i);
     
     // J = H * I
-    fq2_mul(j, h, i);
+    field_mul(j, h, i);
     
     // r = 2 * (S2 - Y1)
-    fq2_sub(r, s2, p.Y);
-    fq2_add(r, r, r);
+    field_sub(r, s2, p.Y);
+    field_add(r, r, r);
     
     // V = X1 * I
-    fq2_mul(v, p.X, i);
+    field_mul(v, p.X, i);
     
-    // Save p.Y and p.Z before we potentially overwrite them (for in-place safety)
+    // Save p.Y and p.Z before we potentially overwrite (for in-place safety)
     Fq2 saved_Y = p.Y;
     Fq2 saved_Z = p.Z;
     
@@ -979,29 +1020,60 @@ __device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Proje
     Fq2 new_X, new_Y, new_Z;
     
     // X3 = r^2 - J - 2*V
-    fq2_sqr(new_X, r);
-    fq2_sub(new_X, new_X, j);
-    fq2_sub(new_X, new_X, v);
-    fq2_sub(new_X, new_X, v);
+    field_sqr(new_X, r);
+    field_sub(new_X, new_X, j);
+    field_sub(new_X, new_X, v);
+    field_sub(new_X, new_X, v);
     
     // Y3 = r * (V - X3) - 2*Y1*J
     Fq2 t;
-    fq2_sub(t, v, new_X);
-    fq2_mul(new_Y, r, t);
-    fq2_mul(t, saved_Y, j);
-    fq2_add(t, t, t);
-    fq2_sub(new_Y, new_Y, t);
+    field_sub(t, v, new_X);
+    field_mul(new_Y, r, t);
+    field_mul(t, saved_Y, j);
+    field_add(t, t, t);
+    field_sub(new_Y, new_Y, t);
     
     // Z3 = (Z1 + H)^2 - Z1Z1 - HH
-    fq2_add(new_Z, saved_Z, h);
-    fq2_sqr(new_Z, new_Z);
-    fq2_sub(new_Z, new_Z, z1z1);
-    fq2_sub(new_Z, new_Z, hh);
+    field_add(new_Z, saved_Z, h);
+    field_sqr(new_Z, new_Z);
+    field_sub(new_Z, new_Z, z1z1);
+    field_sub(new_Z, new_Z, hh);
     
-    // Write results
-    result.X = new_X;
-    result.Y = new_Y;
-    result.Z = new_Z;
+    // Standard addition result
+    G2Projective add_result;
+    add_result.X = new_X;
+    add_result.Y = new_Y;
+    add_result.Z = new_Z;
+    
+    // Compute doubled result (for when P == Q)
+    // Use saved_p since p might be aliased with result
+    G2Projective doubled;
+    g2_double(doubled, saved_p);
+    
+    // Identity point (for when P == -Q)
+    G2Projective identity_point = G2Projective::identity();
+    
+    // Convert q to projective (for when p is identity)
+    G2Projective q_proj = G2Projective::from_affine(q);
+    
+    // Constant-time selection of result:
+    // 1. Start with standard addition result
+    // 2. If h == 0 and s_diff == 0: P == Q, use doubled
+    // 3. If h == 0 and s_diff != 0: P == -Q, use identity
+    // 4. If p is identity: return q_proj
+    // 5. If q is identity: return p (use saved_p)
+    
+    result = add_result;
+    
+    int use_doubled = h_is_zero & s_diff_is_zero;
+    int use_identity = h_is_zero & (!s_diff_is_zero ? 1 : 0);
+    
+    g2_cmov(result, doubled, result, use_doubled);
+    g2_cmov(result, identity_point, result, use_identity);
+    
+    // Handle input identity cases (MUST use saved_p due to aliasing)
+    g2_cmov(result, q_proj, result, p_is_identity);
+    g2_cmov(result, saved_p, result, q_is_identity);
 }
 
 /**
@@ -1009,32 +1081,18 @@ __device__ __forceinline__ void g2_add_mixed(G2Projective& result, const G2Proje
  */
 __device__ __forceinline__ void g2_neg(G2Projective& result, const G2Projective& p) {
     result.X = p.X;
-    fq2_neg(result.Y, p.Y);
+    field_neg(result.Y, p.Y);
     result.Z = p.Z;
 }
 
 /**
- * @brief Convert G2 projective to affine
+ * @brief Convert G2 projective to affine using template method
+ * 
+ * NOTE: This function implements Jacobian to affine conversion: x = X/Z², y = Y/Z³
+ * Previously this used direct fq2_* calls, but now works via field_* overloads.
  */
 __device__ __forceinline__ void g2_to_affine(G2Affine& result, const G2Projective& p) {
-    if (p.is_identity()) {
-        result = G2Affine::identity();
-        return;
-    }
-    
-    // Defensive check - should never occur if point arithmetic is correct
-    if (p.Z.is_zero()) {
-        result = G2Affine::identity();
-        return;
-    }
-    
-    Fq2 z_inv, z_inv_sq;
-    fq2_inv(z_inv, p.Z);
-    fq2_sqr(z_inv_sq, z_inv);
-    
-    fq2_mul(result.x, p.X, z_inv_sq);
-    fq2_mul(result.y, p.Y, z_inv_sq);
-    fq2_mul(result.y, result.y, z_inv);
+    result = p.to_affine();
 }
 
 } // namespace bls12_381
