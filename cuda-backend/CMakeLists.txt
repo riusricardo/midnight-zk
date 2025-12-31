@@ -316,9 +316,17 @@ if(BUILD_TESTS)
         add_cuda_test(test_security_edge_cases tests/test_security_edge_cases.cu)
     endif()
     
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_vec_ops.cu)
+        add_cuda_test(test_vec_ops tests/test_vec_ops.cu)
+    endif()
+    
+    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_point_ops.cu)
+        add_cuda_test(test_point_ops tests/test_point_ops.cu)
+    endif()
+    
     # Convenience target to run all security audit tests
     add_custom_target(security-audit
-        COMMAND ${CMAKE_CTEST_COMMAND} -R "test_known_answer_vectors|test_field_properties|test_curve_operations|test_msm_security|test_ntt_security|test_security_edge_cases" --output-on-failure
+        COMMAND ${CMAKE_CTEST_COMMAND} -R "test_known_answer_vectors|test_field_properties|test_curve_operations|test_msm_security|test_ntt_security|test_security_edge_cases|test_vec_ops|test_point_ops" --output-on-failure
         DEPENDS 
             test_known_answer_vectors
             test_field_properties
@@ -326,6 +334,8 @@ if(BUILD_TESTS)
             test_msm_security
             test_ntt_security
             test_security_edge_cases
+            test_vec_ops
+            test_point_ops
         COMMENT "Running security audit test suite"
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     )

@@ -1,7 +1,5 @@
 /**
- * Open-source CUDA Device API for ICICLE
- * 
- * This is a license-free replacement for the closed-source libicicle_backend_cuda_device.so.
+ * CUDA Device API for ICICLE
  * 
  * This file implements the DeviceAPI interface using standard CUDA runtime API calls.
  */
