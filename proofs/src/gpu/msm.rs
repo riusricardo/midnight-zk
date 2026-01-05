@@ -85,18 +85,27 @@ impl GpuMsmBackend {
             return Ok(G1Projective::identity());
         }
         
-        // Convert to ICICLE types - this allocates new memory
-        let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
+        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
+        // Uses transmute - O(1) pointer cast instead of O(n) conversion
+        // The raw bytes are in Montgomery form, so we set are_scalars_montgomery_form=true
+        // The CUDA backend will convert from Montgomery to standard form on GPU
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+        
+        // TODO(Phase 1): Use zero-copy for points when layout is verified
+        // For now, use parallel conversion for points
         let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(points);
         
         // Allocate device result buffer
         let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
             .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
         
-        // Configure and execute MSM
-        let cfg = MSMConfig::default();
+        // Configure MSM - tell the backend that scalars are in Montgomery form
+        // This triggers GPU-side conversion from Montgomery to standard form
+        let mut cfg = MSMConfig::default();
+        cfg.are_scalars_montgomery_form = true;
+        
         msm(
-            HostSlice::from_slice(&icicle_scalars),
+            HostSlice::from_slice(icicle_scalars),
             HostSlice::from_slice(&icicle_points),
             &cfg,
             &mut device_result[..]
@@ -134,8 +143,10 @@ impl GpuMsmBackend {
             return Ok(G2Projective::identity());
         }
         
-        // Convert to ICICLE types
-        let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
+        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+        
+        // TODO(Phase 1): Use zero-copy for G2 points when layout is verified
         let icicle_points = TypeConverter::g2_affine_slice_to_icicle_vec(points);
         
         // Allocate device result buffer
@@ -143,9 +154,12 @@ impl GpuMsmBackend {
             .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
         
         // Configure and execute G2 MSM
-        let cfg = MSMConfig::default();
+        // Note: We set are_scalars_montgomery_form = true because zero-copy transmute
+        // passes raw Montgomery bytes. The CUDA backend handles conversion on GPU.
+        let mut cfg = MSMConfig::default();
+        cfg.are_scalars_montgomery_form = true;
         msm(
-            HostSlice::from_slice(&icicle_scalars),
+            HostSlice::from_slice(icicle_scalars),
             HostSlice::from_slice(&icicle_points),
             &cfg,
             &mut device_result[..]
@@ -381,21 +395,25 @@ impl MsmExecutor {
         #[cfg(feature = "trace-msm")]
         eprintln!("   [GPU] Using pre-uploaded bases (zero-copy MSM) - {} points", scalars.len());
         
-        // Convert scalars to ICICLE format (only conversion, no bases conversion!)
-        let icicle_scalars = TypeConverter::scalar_slice_to_icicle_vec(scalars);
+        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
+        // Uses transmute - O(1) pointer cast instead of O(n) allocation + conversion
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
         
         // Allocate device result buffer
         let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
             .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Device malloc failed: {:?}", e))))?;
         
         // Execute MSM directly on device bases (no upload!)
-        let cfg = MSMConfig::default();
+        // Note: We set are_scalars_montgomery_form = true because zero-copy transmute
+        // passes raw Montgomery bytes. The CUDA backend handles conversion on GPU.
+        let mut cfg = MSMConfig::default();
+        cfg.are_scalars_montgomery_form = true;
         
         #[cfg(feature = "trace-msm")]
         eprintln!("   [GPU] Calling ICICLE msm() with {} scalars, slice range 0..{}", icicle_scalars.len(), scalars.len());
         
         msm(
-            HostSlice::from_slice(&icicle_scalars),
+            HostSlice::from_slice(icicle_scalars),
             &device_bases[..scalars.len()],  // Use slice of pre-uploaded bases
             &cfg,
             &mut device_result[..]

@@ -52,6 +52,9 @@ icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.
 icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", features = ["msm", "g2"], optional = true }
 once_cell = { version = "1.20", optional = true }
 
+# Compile-time assertions for memory layout verification
+static_assertions = "1.1"
+
 # Developer tooling dependencies
 plotters = { version = "0.3.7", default-features = false, optional = true }
 tabbycat = { version = "0.1", features = ["attributes"], optional = true }
