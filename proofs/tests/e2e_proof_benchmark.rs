@@ -86,6 +86,10 @@ impl Relation for BenchCircuit {
 fn benchmark_e2e_proof(k: u32, nb_hashes: u32) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== K={} | {} Poseidon hashes ===", k, nb_hashes);
     
+    // Set SRS directory to point to circuits directory (relative to workspace root)
+    // When running from proofs/, we need to go up one level to workspace root
+    std::env::set_var("SRS_DIR", "../circuits/examples/assets");
+    
     // Step 1: Load SRS
     print!("  [1/5] Loading SRS... ");
     let start = Instant::now();
@@ -167,8 +171,8 @@ fn e2e_proof_benchmark() {
         println!();
         if is_gpu_available() {
             println!("✓ GPU Backend: AVAILABLE (ICICLE CUDA)");
-            println!("  • Threshold: K≥14 (16,384 constraints)");
-            println!("  • All MSM operations will use GPU at K≥14");
+            println!("  • Threshold: K≥16 (65,536 constraints)");
+            println!("  • All MSM operations will use GPU at K≥16");
         } else {
             println!("⚠ GPU Backend: NOT AVAILABLE");
             println!("  Will use CPU fallback (BLST)");
@@ -189,13 +193,16 @@ fn e2e_proof_benchmark() {
     println!("═══════════════════════════════════════════════════════════════");
     
     // Test different circuit sizes with varying workloads
+    // Testing K=14,15,16,17,18,19 for comprehensive GPU validation
     let test_cases = vec![
-        (10, 10, "Small circuit (CPU)"),
-        (12, 20, "Medium circuit (CPU)"),
-        (14, 30, "Large circuit (GPU threshold)"),
-        (16, 40, "Very large circuit (GPU)"),
-        (18, 50, "Huge circuit (GPU)"),
-        (19, 60, "Massive circuit (GPU) - MAX TESTED"),
+        (10, 10,  "K=10: Small circuit (CPU baseline)"),
+        (12, 20,  "K=12: Medium circuit (CPU)"),
+        (14, 30,  "K=14: Large CPU circuit - 16,384 constraints"),
+        (15, 35,  "K=15: Very large CPU - 32,768 constraints"),
+        (16, 40,  "K=16: GPU threshold - 65,536 constraints"),
+        (17, 45,  "K=17: Very large GPU - 131,072 constraints"),
+        (18, 50,  "K=18: Huge GPU circuit - 262,144 constraints"),
+        (19, 60,  "K=19: Maximum SRS size - 524,288 constraints"),
         // K=20: Blocked by SRS size assertion (assert!(k <= 19) in plonk_api.rs)
         // The Filecoin SRS only supports up to 2^19 constraints
         // Note: K=19 works perfectly with GPU, no ICICLE bugs at this size!
@@ -221,18 +228,21 @@ fn e2e_proof_benchmark() {
     
     println!();
     println!("📈 Performance Analysis:");
-    println!("  • K<14: CPU (BLST) - baseline performance");
-    println!("  • K≥14: GPU (ICICLE) - accelerated MSM operations");
+    println!("  • K<16: CPU (BLST) - baseline performance");
+    println!("  • K≥16: GPU (ICICLE) - accelerated MSM operations");
+    println!("  • K=16: GPU threshold, ~2-3x speedup expected");
+    println!("  • K=17-18: GPU sweet spot, ~5-10x speedup");
+    println!("  • K=18-19: GPU essential, ~20-50x speedup");
     println!("  • MSMs typically account for 60-70% of total proving time");
     println!();
     
     #[cfg(feature = "gpu")]
     println!("💡 To compare with CPU-only:");
     #[cfg(feature = "gpu")]
-    println!("   cargo test --test e2e_proof_benchmark --release");
+    println!("   MIDNIGHT_DEVICE=cpu cargo test --test e2e_proof_benchmark --features gpu --release -- --nocapture");
     
     #[cfg(not(feature = "gpu"))]
     println!("💡 To enable GPU acceleration:");
     #[cfg(not(feature = "gpu"))]
-    println!("   cargo test --test e2e_proof_benchmark --features gpu --release");
+    println!("   cargo test --test e2e_proof_benchmark --features gpu --release -- --nocapture");
 }

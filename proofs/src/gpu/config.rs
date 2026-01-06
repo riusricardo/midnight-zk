@@ -162,7 +162,7 @@ mod tests {
         let size = min_gpu_size();
         assert!(size > 0);
         assert!(size.is_power_of_two());
-        assert_eq!(size, 16384); // Default K=14
+        assert_eq!(size, 65536); // Default K=16
     }
 
     #[test]

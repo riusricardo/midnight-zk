@@ -20,6 +20,10 @@ Cargo.lock
 # Build directory
 build/
 
+# Profiling directory
+profile_data/
+profiles/
+
 # CMake generated files
 CMakeCache.txt
 CMakeFiles/

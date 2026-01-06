@@ -491,3 +491,71 @@ where
         bool::from(E::multi_miller_loop(&terms[..]).final_exponentiation().is_identity())
     }
 }
+
+// =============================================================================
+// Async MSM API for Pipelined Commitments
+// =============================================================================
+
+#[cfg(feature = "gpu")]
+/// Launch async MSM using pre-uploaded GPU bases
+/// 
+/// Returns a handle that can be waited on later, enabling CPU/GPU overlap
+/// and pipelining of multiple MSM operations.
+/// 
+/// # Arguments
+/// * `coeffs` - Scalars for MSM computation
+/// * `device_bases` - Pre-uploaded GPU bases (from ParamsKZG::get_or_upload_gpu_bases)
+/// 
+/// # Returns
+/// Handle that completes to C::Curve when waited
+/// 
+/// # Example
+/// ```rust,ignore
+/// // Launch multiple MSMs without waiting
+/// let handles: Vec<_> = polynomials.iter()
+///     .map(|poly| msm_with_cached_bases_async(&poly.values, &device_bases))
+///     .collect::<Result<_, _>>()?;
+/// 
+/// // GPU computes all MSMs while CPU does other work
+/// let metadata = prepare_proof_metadata();
+/// 
+/// // Wait for all commitments
+/// let commitments: Vec<_> = handles.into_iter()
+///     .map(|h| h.wait())
+///     .collect::<Result<_, _>>()?;
+/// ```
+pub fn msm_with_cached_bases_async<C: CurveAffine>(
+    coeffs: &[C::Scalar],
+    device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+) -> Result<crate::gpu::msm::MsmHandle, crate::poly::Error> {
+    #[cfg(feature = "trace-msm")]
+    eprintln!("[MSM-ASYNC] Launching async MSM with {} points", coeffs.len());
+    
+    // Verify we're using midnight_curves (BLS12-381)
+    assert!(
+        is_blst_available::<C>(),
+        "MSM must use midnight_curves::G1Affine. Found: {}",
+        std::any::type_name::<C>()
+    );
+    
+    // Safe: we just verified the type
+    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+    
+    let ctx = get_msm_context();
+    ctx.msm_with_device_bases_async(coeffs, device_bases)
+        .map_err(|e| crate::poly::Error::OpeningError)
+}
+
+#[cfg(feature = "gpu")]
+/// Batch launch multiple async MSMs
+/// 
+/// More efficient than calling msm_with_cached_bases_async() in a loop because
+/// it minimizes launch overhead and enables better GPU pipelining.
+pub fn msm_batch_async<C: CurveAffine>(
+    coeffs_batch: &[&[C::Scalar]],
+    device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+) -> Result<Vec<crate::gpu::msm::MsmHandle>, crate::poly::Error> {
+    coeffs_batch.iter()
+        .map(|coeffs| msm_with_cached_bases_async::<C>(coeffs, device_bases))
+        .collect()
+}

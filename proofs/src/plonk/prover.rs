@@ -32,6 +32,64 @@ use crate::{
     utils::{arithmetic::eval_polynomial, rational::Rational},
 };
 
+/// Helper to batch commit advice columns when using KZG with BLS12-381 (midnight_curves).
+/// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
+/// 
+/// This enables GPU pipelining for multiple MSM operations
+/// when committing multiple polynomials by overlapping GPU computation with memory transfers.
+#[cfg(feature = "gpu")]
+fn batch_commit_if_kzg_bls12<F, CS>(
+    params: &CS::Parameters,
+    polys: &[Polynomial<F, LagrangeCoeff>],
+) -> Option<Vec<CS::Commitment>>
+where
+    F: PrimeField + 'static,
+    CS: PolynomialCommitmentScheme<F>,
+{
+    use std::any::TypeId;
+    use crate::poly::kzg::params::ParamsKZG;
+    use midnight_curves::{Bls12, Fq};
+    
+    // Only batch if we have multiple polynomials (pipelining benefit requires >1)
+    if polys.len() <= 1 {
+        return None;
+    }
+    
+    // Check if we're using KZG with BLS12-381 (midnight_curves) - the GPU-supported configuration
+    if TypeId::of::<CS::Parameters>() == TypeId::of::<ParamsKZG<Bls12>>()
+        && TypeId::of::<F>() == TypeId::of::<Fq>()
+    {
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("[PROVER] Batch committing {} advice columns with GPU pipelining", polys.len());
+        
+        // SAFETY: We just verified both types match at runtime via TypeId checks.
+        // This is safe because:
+        // 1. TypeId check guarantees CS::Parameters is ParamsKZG<Bls12>
+        // 2. TypeId check guarantees F is midnight_curves::Fq
+        // 3. Polynomial<F, L> and Polynomial<Fq, L> have identical memory layout
+        //    (both are Vec<F> where F has same size and alignment)
+        unsafe {
+            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
+            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
+                polys.iter()
+                    .map(|p| &*(p as *const Polynomial<F, LagrangeCoeff> 
+                               as *const Polynomial<Fq, LagrangeCoeff>))
+                    .collect();
+            
+            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
+            
+            // Transmute back to CS::Commitment
+            // SAFETY: For KZG Bls12, CS::Commitment is midnight_curves::G1Affine,
+            // which is the same type returned by commit_lagrange_batch
+            Some(batch_commits.into_iter()
+                .map(|c| std::mem::transmute_copy(&c))
+                .collect())
+        }
+    } else {
+        None
+    }
+}
+
 #[cfg(feature = "committed-instances")]
 /// Commit to a vector of raw instances. This function can be used to prepare
 /// the committed instances that the verifier will be provided with when this
@@ -503,8 +561,9 @@ fn parse_advices<F, CS, ConcreteCircuit, T>(
     mut rng: impl RngCore + CryptoRng,
 ) -> Result<(Vec<AdviceSingle<F, LagrangeCoeff>>, Vec<F>), Error>
 where
-    F: WithSmallOrderMulGroup<3> + Sampleable<T::Hash>,
+    F: WithSmallOrderMulGroup<3> + Sampleable<T::Hash> + 'static,
     CS: PolynomialCommitmentScheme<F>,
+    CS::Parameters: 'static,
     ConcreteCircuit: Circuit<F>,
     T: Transcript,
     CS::Commitment: Hashable<T::Hash>,
@@ -602,8 +661,23 @@ where
                 }
             }
 
-            let advice_commitments: Vec<_> =
-                advice_values.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+            // Batch commit to advice columns with GPU pipelining when beneficial
+            let advice_commitments: Vec<_> = {
+                #[cfg(feature = "gpu")]
+                {
+                    // Optimization: Use batch commits for multiple columns when using KZG
+                    // The type check happens at runtime, with zero cost if not KZG
+                    batch_commit_if_kzg_bls12::<F, CS>(params, &advice_values)
+                        .unwrap_or_else(|| {
+                            // Fallback: sequential commits
+                            advice_values.iter().map(|poly| CS::commit_lagrange(params, poly)).collect()
+                        })
+                }
+                #[cfg(not(feature = "gpu"))]
+                {
+                    advice_values.iter().map(|poly| CS::commit_lagrange(params, poly)).collect()
+                }
+            };
 
             for commitment in &advice_commitments {
                 transcript.write(commitment)?;

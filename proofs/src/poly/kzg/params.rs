@@ -281,6 +281,86 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         })
     }
 
+    /// Commit to multiple Lagrange polynomials with GPU pipelining
+    /// 
+    /// This is the production-ready batch commit that provides optimal performance
+    /// for multiple commitments by enabling GPU kernel pipelining.
+    /// 
+    /// Falls back to sequential sync commits if async is not beneficial.
+    #[cfg(feature = "gpu")]
+    pub fn commit_lagrange_batch(
+        &self,
+        polys: &[&crate::poly::Polynomial<E::Fr, crate::poly::LagrangeCoeff>],
+    ) -> Vec<E::G1>
+    where
+        E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
+    {
+        use crate::gpu::config::should_use_gpu;
+        use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
+        
+        if polys.is_empty() {
+            return vec![];
+        }
+        
+        // Check if async is beneficial (>1 poly, large enough for GPU)
+        let size = polys[0].len();
+        let use_async = polys.len() > 1 && should_use_gpu(size);
+        
+        if use_async {
+            #[cfg(feature = "trace-kzg")]
+            eprintln!("[KZG::batch] Using async pipeline for {} Lagrange commits", polys.len());
+            
+            // Convert all polynomials to scalar vectors
+            let scalars: Vec<Vec<E::Fr>> = polys.iter()
+                .map(|poly| {
+                    let mut s = Vec::with_capacity(poly.len());
+                    s.extend(poly.iter());
+                    s
+                })
+                .collect();
+            
+            let device_bases = self.get_or_upload_gpu_lagrange_bases();
+            let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
+            
+            // Launch all MSMs asynchronously
+            match msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases) {
+                Ok(handles) => {
+                    // Wait for all results and transmute to E::G1
+                    return handles.into_iter()
+                        .map(|h| {
+                            let result = h.wait().expect("Async commit failed");
+                            // Safe: E::G1 is midnight_curves::G1Projective for all supported curves
+                            unsafe { std::mem::transmute_copy(&result) }
+                        })
+                        .collect();
+                }
+                Err(_) => {
+                    // Fallback to sync
+                    #[cfg(feature = "trace-kzg")]
+                    eprintln!("[KZG::batch] Async failed, falling back to sync");
+                }
+            }
+        }
+        
+        // Sync path (fallback or not beneficial)
+        polys.iter()
+            .map(|poly| {
+                let mut scalars = Vec::with_capacity(poly.len());
+                scalars.extend(poly.iter());
+                let size = scalars.len();
+                assert!(self.g_lagrange.len() >= size);
+                
+                if should_use_gpu(size) {
+                    let device_bases = self.get_or_upload_gpu_lagrange_bases();
+                    msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+                } else {
+                    use crate::poly::kzg::msm::msm_specific;
+                    msm_specific::<E::G1Affine>(&scalars, &self.g_lagrange[0..size])
+                }
+            })
+            .collect()
+    }
+
     /// Returns the committed lagrange polynomials of these KZG params.
     pub fn g_lagrange(&self) -> &[E::G1] {
         &self.g_lagrange

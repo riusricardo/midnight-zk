@@ -13,9 +13,9 @@ use crate::{
 
 /// Public interface for a additively homomorphic Polynomial Commitment Scheme
 /// (PCS)
-pub trait PolynomialCommitmentScheme<F: PrimeField>: Clone + Debug {
+pub trait PolynomialCommitmentScheme<F: PrimeField + 'static>: Clone + Debug {
     /// Parameters needed to generate a proof in the PCS
-    type Parameters: Params;
+    type Parameters: Params + 'static;
 
     /// Parameters needed to verify a proof in the PCS
     type VerifierParameters;
@@ -92,7 +92,7 @@ pub trait Guard<F: PrimeField, CS: PolynomialCommitmentScheme<F>>: Sized {
 }
 
 /// Interface for PCS params
-pub trait Params {
+pub trait Params: 'static {
     /// Returns the max size of polynomials that these parameters can commit to
     fn max_k(&self) -> u32;
 

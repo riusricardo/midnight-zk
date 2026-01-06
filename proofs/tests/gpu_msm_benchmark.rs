@@ -174,7 +174,7 @@ fn gpu_msm_benchmark() {
     println!();
 }
 
-/// Quick benchmark for CI - tests K=14,16,18,20 with accurate warmup/cached timing
+/// Quick benchmark for CI - tests K=14,15,16,17,18,19 with accurate warmup/cached timing
 #[test]
 #[ignore]
 fn gpu_msm_benchmark_quick() {
@@ -186,7 +186,7 @@ fn gpu_msm_benchmark_quick() {
     println!("  K  │ Warm (ms) │ Cache (ms) │ CPU (ms) │ Speedup");
     println!("─────┼───────────┼────────────┼──────────┼─────────");
     
-    for k in [14, 16, 18, 20] {
+    for k in [14, 15, 16, 17, 18, 19] {
         let size = 1usize << k;
         let (warmup, cached, cpu, speedup) = benchmark_msm(size, &ctx);
         let marker = if speedup > 1.0 { "✓" } else { " " };
