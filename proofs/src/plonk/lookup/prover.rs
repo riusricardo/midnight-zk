@@ -18,6 +18,9 @@ use crate::{
     utils::arithmetic::{eval_polynomial, parallelize},
 };
 
+#[cfg(feature = "gpu")]
+use crate::poly::batch_commit::batch_commit_refs;
+
 #[cfg_attr(feature = "bench-internal", derive(Clone))]
 #[derive(Debug)]
 pub(crate) struct Permuted<F: PrimeField> {
@@ -114,20 +117,25 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
             &compressed_table_expression,
         )?;
 
-        // Closure to construct commitment to vector of values
-        let commit_values = |values: &Polynomial<F, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
-            let commitment = CS::commit_lagrange(params, values);
-            (poly, commitment)
+        // Batch commit both permuted expressions with GPU pipelining
+        #[cfg(feature = "gpu")]
+        let (permuted_input_commitment, permuted_table_commitment) = {
+            let polys_to_commit = [&permuted_input_expression, &permuted_table_expression];
+            let commitments = batch_commit_refs::<F, CS>(params, &polys_to_commit);
+            (commitments[0].clone(), commitments[1].clone())
         };
-
-        // Commit to permuted input expression
-        let (permuted_input_poly, permuted_input_commitment) =
-            commit_values(&permuted_input_expression);
-
-        // Commit to permuted table expression
-        let (permuted_table_poly, permuted_table_commitment) =
-            commit_values(&permuted_table_expression);
+        
+        #[cfg(not(feature = "gpu"))]
+        let (permuted_input_commitment, permuted_table_commitment) = {
+            (
+                CS::commit_lagrange(params, &permuted_input_expression),
+                CS::commit_lagrange(params, &permuted_table_expression),
+            )
+        };
+        
+        // Convert to coefficient form
+        let permuted_input_poly = pk.vk.domain.lagrange_to_coeff(permuted_input_expression.clone());
+        let permuted_table_poly = pk.vk.domain.lagrange_to_coeff(permuted_table_expression.clone());
 
         // Hash permuted input commitment
         transcript.write(&permuted_input_commitment)?;

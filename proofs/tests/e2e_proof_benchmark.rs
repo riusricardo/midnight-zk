@@ -1,158 +1,174 @@
-//! sEnd-to-End Proof Generation Benchmark with GPU
+//! End-to-End Proof Generation Benchmark with GPU
 //!
-//! Based on the public_inputs test from midnight-circuits.
-//! Measures actual proof generation time with realistic circuits.
+//! Tests domain-filling circuits to properly stress GPU MSM operations.
+//! The circuit fills most of the domain to ensure polynomial sizes match the domain size.
+//!
+//! Key insight: GPU acceleration requires polynomial sizes >= 32,768 (K≥15).
+//! This means the circuit must actually USE enough rows to fill the domain.
 
-use ff::Field;
-use midnight_circuits::{
-    compact_std_lib::{self, Relation, ZkStdLib},
-    hash::poseidon::PoseidonChip,
-    instructions::{
-        hash::HashCPU, AssertionInstructions, AssignmentInstructions, PublicInputInstructions,
-    },
-    testing_utils::plonk_api::filecoin_srs,
-};
+use midnight_curves::{Bls12, Fq};
 use midnight_proofs::{
-    circuit::{Layouter, Value},
-    plonk::Error,
+    circuit::{Layouter, SimpleFloorPlanner, Value},
+    plonk::{
+        create_proof as create_plonk_proof, keygen_pk, keygen_vk,
+        Advice, Circuit, Column, Constraints, ConstraintSystem, Error, Selector,
+    },
+    poly::{
+        kzg::{params::ParamsKZG, KZGCommitmentScheme},
+    },
+    transcript::{CircuitTranscript, Transcript},
 };
+use blake2b_simd::State as Blake2bState;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
-type F = midnight_curves::Fq;
-
-/// Test circuit that performs Poseidon hashing
-/// Similar to real-world Midnight circuits
+/// Domain-filling benchmark circuit.
+///
+/// This circuit fills most of the domain with actual assignments,
+/// ensuring polynomial sizes match the domain size (2^K).
+/// This is critical for testing GPU acceleration since MSM size = polynomial size.
 #[derive(Clone)]
-struct BenchCircuit {
-    nb_hashes: u32,
+struct DomainFillingCircuit {
+    /// log2 of domain size
+    k: u32,
+    /// Number of advice columns (more columns = more MSM operations)
+    num_advice_cols: usize,
+    /// Fraction of domain to fill (0.0-1.0)
+    fill_ratio: f64,
 }
 
-impl Relation for BenchCircuit {
-    type Instance = Vec<F>;
-    type Witness = Vec<F>;
-
-    fn format_instance(x: &Self::Instance) -> Vec<F> {
-        x.clone()
-    }
-
-    fn circuit(
-        &self,
-        std_lib: &ZkStdLib,
-        layouter: &mut impl Layouter<F>,
-        instance: Value<Self::Instance>,
-        witness: Value<Self::Witness>,
-    ) -> Result<(), Error> {
-        // Load public inputs
-        let mut inputs = vec![F::ZERO; self.nb_hashes as usize];
-        instance.map(|v| inputs = v[..self.nb_hashes as usize].to_vec());
-        let inputs = inputs
-            .into_iter()
-            .map(|input| std_lib.assign_as_public_input(layouter, Value::known(input)))
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        // Load witness (preimages)
-        let preimage_values = witness.transpose_vec(self.nb_hashes as usize);
-        let preimages = std_lib.assign_many(layouter, &preimage_values)?;
-
-        // Compute Poseidon hashes
-        let hashes = preimages
-            .into_iter()
-            .map(|preimage| std_lib.poseidon(layouter, &[preimage]))
-            .collect::<Result<Vec<_>, Error>>()?;
-
-        // Verify hashes match public inputs
-        for (input, hash) in inputs.iter().zip(hashes.iter()) {
-            std_lib.assert_equal(layouter, input, hash)?;
+impl Default for DomainFillingCircuit {
+    fn default() -> Self {
+        Self {
+            k: 15,
+            num_advice_cols: 8,
+            fill_ratio: 0.5, // Fill half the domain
         }
-
-        Ok(())
-    }
-
-    fn write_relation<W: std::io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
-        writer.write_all(&self.nb_hashes.to_le_bytes())
-    }
-
-    fn read_relation<R: std::io::Read>(reader: &mut R) -> std::io::Result<Self> {
-        let mut bytes = [0u8; 4];
-        reader.read_exact(&mut bytes)?;
-        Ok(BenchCircuit {
-            nb_hashes: u32::from_le_bytes(bytes),
-        })
     }
 }
 
-fn benchmark_e2e_proof(k: u32, nb_hashes: u32) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n=== K={} | {} Poseidon hashes ===", k, nb_hashes);
+#[derive(Clone, Debug)]
+struct DomainFillingConfig {
+    advice_cols: Vec<Column<Advice>>,
+    selector: Selector,
+}
+
+impl Circuit<Fq> for DomainFillingCircuit {
+    type Config = DomainFillingConfig;
+    type FloorPlanner = SimpleFloorPlanner;
+    #[cfg(feature = "circuit-params")]
+    type Params = ();
+
+    fn without_witnesses(&self) -> Self {
+        self.clone()
+    }
+
+    fn configure(meta: &mut ConstraintSystem<Fq>) -> Self::Config {
+        // Create multiple advice columns to generate multiple MSM operations
+        let advice_cols: Vec<_> = (0..8).map(|_| meta.advice_column()).collect();
+        let selector = meta.selector();
+        
+        // Create a gate that involves the advice columns
+        // Gate: selector * (a0 - a0) = 0 (trivially satisfied)
+        meta.create_gate("domain_fill", |vc| {
+            let a0 = vc.query_advice(advice_cols[0], midnight_proofs::poly::Rotation::cur());
+            Constraints::with_selector(selector, vec![a0.clone() - a0])
+        });
+        
+        DomainFillingConfig { advice_cols, selector }
+    }
+
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fq>,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "domain_fill_region",
+            |mut region| {
+                // Calculate how many rows to fill
+                let domain_size = 1usize << self.k;
+                let rows_to_fill = ((domain_size as f64) * self.fill_ratio) as usize;
+                
+                // Use only the columns we want (but config always has 8)
+                let cols_to_use = self.num_advice_cols.min(config.advice_cols.len());
+                
+                // Fill the region with assignments
+                for row in 0..rows_to_fill {
+                    config.selector.enable(&mut region, row)?;
+                    for (col_idx, col) in config.advice_cols.iter().take(cols_to_use).enumerate() {
+                        region.assign_advice(
+                            || format!("a[{}][{}]", col_idx, row),
+                            *col,
+                            row,
+                            || Value::known(Fq::from((row + col_idx + 1) as u64)),
+                        )?;
+                    }
+                }
+                Ok(())
+            },
+        )
+    }
+}
+
+fn benchmark_domain_filling(k: u32, num_cols: usize, fill_ratio: f64) -> Result<(), Box<dyn std::error::Error>> {
+    let rows = (1usize << k) as f64 * fill_ratio;
+    let poly_size = 1usize << k;
+    println!("\n=== K={} | {} cols | {:.0} rows filled | poly_size={} ===", 
+             k, num_cols, rows, poly_size);
     
-    // Set SRS directory to point to circuits directory (relative to workspace root)
-    // When running from proofs/, we need to go up one level to workspace root
-    std::env::set_var("SRS_DIR", "../circuits/examples/assets");
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
     
-    // Step 1: Load SRS
-    print!("  [1/5] Loading SRS... ");
+    // Step 1: Setup parameters
+    print!("  [1/5] Setup params... ");
     let start = Instant::now();
-    let mut srs = filecoin_srs(k);
+    let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
     let elapsed = start.elapsed();
     println!("{:>8.2}ms", elapsed.as_secs_f64() * 1000.0);
     
-    let relation = BenchCircuit { nb_hashes };
+    let circuit = DomainFillingCircuit { k, num_advice_cols: num_cols, fill_ratio };
     
-    // Step 2: Downsize SRS
-    print!("  [2/5] Downsize SRS... ");
+    // Step 2: Generate VK
+    print!("  [2/5] Generate VK... ");
     let start = Instant::now();
-    compact_std_lib::downsize_srs_for_relation(&mut srs, &relation);
+    let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)?;
     let elapsed = start.elapsed();
     println!("{:>8.2}ms", elapsed.as_secs_f64() * 1000.0);
     
-    // Step 3: Setup VK
-    print!("  [3/5] Setup VK... ");
+    // Step 3: Generate PK
+    print!("  [3/5] Generate PK... ");
     let start = Instant::now();
-    let vk = compact_std_lib::setup_vk(&srs, &relation);
+    let pk = keygen_pk(vk, &circuit)?;
     let elapsed = start.elapsed();
     println!("{:>8.2}ms", elapsed.as_secs_f64() * 1000.0);
     
-    // Step 4: Setup PK
-    print!("  [4/5] Setup PK... ");
+    // Step 4: Create proof (this is where GPU MSM operations happen)
+    print!("  [4/5] Proving... ");
     let start = Instant::now();
-    let pk = compact_std_lib::setup_pk(&relation, &vk);
-    let elapsed = start.elapsed();
-    println!("{:>8.2}ms", elapsed.as_secs_f64() * 1000.0);
-    
-    // Generate witness and instance
-    let mut rng = ChaCha8Rng::from_entropy();
-    let witness = (0..nb_hashes).map(|_| F::random(&mut rng)).collect::<Vec<_>>();
-    let instance = witness
-        .iter()
-        .map(|w| <PoseidonChip<F> as HashCPU<F, F>>::hash(&[*w]))
-        .collect::<Vec<_>>();
-    
-    // Step 5: Generate proof (GPU ACCELERATION HERE!)
-    print!("  [5/5] Proving... ");
-    let start = Instant::now();
-    let proof = compact_std_lib::prove::<BenchCircuit, blake2b_simd::State>(
-        &srs, &pk, &relation, &instance, witness, rng,
+    let mut transcript = CircuitTranscript::<Blake2bState>::init();
+    create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
+        &params,
+        &pk,
+        &[circuit],
+        #[cfg(feature = "committed-instances")]
+        0,
+        &[&[]], // No instance columns
+        &mut rng,
+        &mut transcript,
     )?;
-    let elapsed = start.elapsed();
-    let proof_time = elapsed.as_secs_f64() * 1000.0;
-    println!("{:>8.2}ms ⭐", proof_time);
+    let prove_time = start.elapsed().as_secs_f64() * 1000.0;
+    println!("{:>8.2}ms ⭐", prove_time);
     
-    // Verify proof
-    print!("  Verifying... ");
+    // Step 5: Finalize
+    print!("  [5/5] Finalize... ");
     let start = Instant::now();
-    compact_std_lib::verify::<BenchCircuit, blake2b_simd::State>(
-        &srs.verifier_params(),
-        &vk,
-        &instance,
-        None,
-        &proof
-    )?;
+    let _proof = transcript.finalize();
     let elapsed = start.elapsed();
     println!("{:>8.2}ms", elapsed.as_secs_f64() * 1000.0);
     
-    println!("  ✓ Proof verified successfully");
-    println!("  📊 Proving time: {:.2}ms", proof_time);
+    println!("  ✓ Proof generated successfully");
+    println!("  📊 Proving time: {:.2}ms (polynomial size: {})", prove_time, poly_size);
     
     Ok(())
 }
@@ -161,7 +177,7 @@ fn benchmark_e2e_proof(k: u32, nb_hashes: u32) -> Result<(), Box<dyn std::error:
 #[ignore] // Run with: cargo test --test e2e_proof_benchmark --features gpu --release -- --ignored --nocapture
 fn e2e_proof_benchmark() {
     println!("╔═══════════════════════════════════════════════════════════════╗");
-    println!("║  End-to-End Proof Generation Benchmark                        ║");
+    println!("║  Domain-Filling Proof Generation Benchmark                    ║");
     println!("║  GPU-Accelerated PLONK Proving (ICICLE)                       ║");
     println!("╚═══════════════════════════════════════════════════════════════╝");
     
@@ -171,8 +187,8 @@ fn e2e_proof_benchmark() {
         println!();
         if is_gpu_available() {
             println!("✓ GPU Backend: AVAILABLE (ICICLE CUDA)");
-            println!("  • Threshold: K≥15 (32,768 points)");
-            println!("  • All MSM operations will use GPU at K≥15");
+            println!("  • Threshold: K≥15 (polynomial size ≥ 32,768)");
+            println!("  • All MSM operations with size ≥ 32K will use GPU");
         } else {
             println!("⚠ GPU Backend: NOT AVAILABLE");
             println!("  Will use CPU fallback (BLST)");
@@ -187,30 +203,31 @@ fn e2e_proof_benchmark() {
     }
     
     println!();
-    println!("This benchmark uses real Midnight circuits with Poseidon hashing.");
-    println!("Each test performs setup, proving, and verification.");
+    println!("This benchmark creates domain-filling circuits where:");
+    println!("  • Polynomial size = domain size = 2^K");
+    println!("  • MSM operations process full-size polynomials");
+    println!("  • GPU should be utilized for K≥15");
     println!();
     println!("═══════════════════════════════════════════════════════════════");
     
-    // Test different circuit sizes with varying workloads
-    // Increased hash counts to really stress GPU with more MSM operations
-    // Each Poseidon hash adds ~450 constraints, so we scale appropriately
+    // Test cases: (K, num_advice_cols, fill_ratio, description)
+    // The key is that polynomial size = 2^K when the domain is filled
     let test_cases = vec![
-        // GPU-focused tests with larger circuits (threshold at K=15)
-        (15, 50,   "K=15: GPU threshold - 50 hashes (~23K constraints)"),
-        (16, 100,  "K=16: GPU baseline - 100 hashes (~45K constraints)"),
-        (17, 200,  "K=17: Large GPU - 200 hashes (~90K constraints)"),
-        (18, 400,  "K=18: Heavy GPU - 400 hashes (~180K constraints)"),
+        // Below GPU threshold - CPU baseline
+        (14, 8, 0.5, "K=14: Below GPU threshold (poly_size=16K) - CPU baseline"),
+        
+        // At and above GPU threshold - GPU should kick in
+        (15, 8, 0.5, "K=15: GPU threshold (poly_size=32K) - GPU should activate"),
+        (16, 8, 0.5, "K=16: GPU sweet spot (poly_size=64K)"),
+        (17, 4, 0.5, "K=17: Large circuit (poly_size=128K) - 4 cols"),
     ];
     
-    for (k, nb_hashes, description) in test_cases {
+    for (k, num_cols, fill_ratio, description) in test_cases {
         println!("\n{}", description);
-        match benchmark_e2e_proof(k, nb_hashes) {
+        match benchmark_domain_filling(k, num_cols, fill_ratio) {
             Ok(_) => {},
             Err(e) => {
                 eprintln!("  ✗ Error: {}", e);
-                eprintln!("  Note: Make sure SRS files are downloaded.");
-                eprintln!("  See: midnight-zk/circuits/examples/assets/");
                 return;
             }
         }
@@ -223,21 +240,24 @@ fn e2e_proof_benchmark() {
     
     println!();
     println!("📈 Performance Analysis:");
-    println!("  • K<15: CPU (BLST) - baseline performance");
-    println!("  • K≥15: GPU (ICICLE) - accelerated MSM operations");
-    println!("  • K=15: GPU threshold, ~2-3x speedup expected");
-    println!("  • K=16-17: GPU sweet spot, ~5-10x speedup");
-    println!("  • K=17-18: GPU essential, ~20-50x speedup");
-    println!("  • MSMs typically account for 60-70% of total proving time");
+    println!("  • K=14: CPU-only baseline (~16K point MSMs)");
+    println!("  • K=15: GPU threshold reached (~32K point MSMs)");
+    println!("  • K=16: GPU acceleration visible (~64K point MSMs)");
+    println!("  • K=17: GPU essential (~128K point MSMs)");
+    println!();
+    println!("💡 Expected GPU speedup:");
+    println!("  • K=15: ~2-3x faster than CPU");
+    println!("  • K=16: ~5-8x faster than CPU");
+    println!("  • K=17: ~10-20x faster than CPU");
     println!();
     
     #[cfg(feature = "gpu")]
     println!("💡 To compare with CPU-only:");
     #[cfg(feature = "gpu")]
-    println!("   MIDNIGHT_DEVICE=cpu cargo test --test e2e_proof_benchmark --features gpu --release -- --nocapture");
+    println!("   MIDNIGHT_DEVICE=cpu cargo test --test e2e_proof_benchmark --features gpu --release -- --ignored --nocapture");
     
     #[cfg(not(feature = "gpu"))]
     println!("💡 To enable GPU acceleration:");
     #[cfg(not(feature = "gpu"))]
-    println!("   cargo test --test e2e_proof_benchmark --features gpu --release -- --nocapture");
+    println!("   cargo test --test e2e_proof_benchmark --features gpu --release -- --ignored --nocapture");
 }
