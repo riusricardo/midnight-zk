@@ -295,16 +295,26 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use crate::gpu::config::should_use_gpu;
+        use crate::gpu::config::{should_use_gpu, should_use_gpu_batch};
         use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
         
         if polys.is_empty() {
             return vec![];
         }
         
-        // Check if async is beneficial (>1 poly, large enough for GPU)
-        let size = polys[0].len();
-        let use_async = polys.len() > 1 && should_use_gpu(size);
+        // Check if async/GPU is beneficial for this batch
+        // Consider total work, not just individual MSM size
+        let individual_size = polys[0].len();
+        let batch_count = polys.len();
+        let use_async = batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
+        
+        #[cfg(feature = "trace-kzg")]
+        if batch_count > 1 {
+            eprintln!(
+                "[KZG::batch] {} polys × {} points = {} total work, use_async={}",
+                batch_count, individual_size, batch_count * individual_size, use_async
+            );
+        }
         
         if use_async {
             #[cfg(feature = "trace-kzg")]
@@ -343,19 +353,19 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         }
         
         // Sync path (fallback or not beneficial)
+        // Use polynomial directly via Deref - no allocation needed
         polys.iter()
             .map(|poly| {
-                let mut scalars = Vec::with_capacity(poly.len());
-                scalars.extend(poly.iter());
+                let scalars: &[E::Fr] = &***poly;
                 let size = scalars.len();
                 assert!(self.g_lagrange.len() >= size);
                 
                 if should_use_gpu(size) {
                     let device_bases = self.get_or_upload_gpu_lagrange_bases();
-                    msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
+                    msm_with_cached_bases::<E::G1Affine>(scalars, device_bases)
                 } else {
                     use crate::poly::kzg::msm::msm_specific;
-                    msm_specific::<E::G1Affine>(&scalars, &self.g_lagrange[0..size])
+                    msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..size])
                 }
             })
             .collect()

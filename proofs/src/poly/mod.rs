@@ -25,6 +25,9 @@ pub mod kzg;
 
 pub mod commitment;
 
+/// Batch polynomial commitment for GPU acceleration
+pub mod batch_commit;
+
 pub use domain::*;
 pub use query::{ProverQuery, VerifierQuery};
 

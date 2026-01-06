@@ -16,7 +16,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
-const K: u32 = 16; // 65K points - GPU threshold
+const K: u32 = 15; // 32K points - GPU threshold
 const NUM_POLYS: usize = 8; // Multiple commitments to show pipelining
 
 #[test]

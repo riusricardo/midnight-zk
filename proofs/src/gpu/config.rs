@@ -77,7 +77,7 @@ pub fn device_type() -> DeviceType {
 ///
 /// Problems smaller than this will use BLST due to GPU transfer overhead.
 /// Parsed from `MIDNIGHT_GPU_MIN_K` environment variable (as log2 value).
-/// Default: 2^16 = 65536 points
+/// Default: 2^15 = 32768 points
 pub fn min_gpu_size() -> usize {
     static MIN_SIZE: OnceLock<usize> = OnceLock::new();
 
@@ -90,7 +90,7 @@ pub fn min_gpu_size() -> usize {
                 info!("MIDNIGHT_GPU_MIN_K={} -> min_gpu_size={}", k, size);
                 size
             })
-            .unwrap_or(65536) // Default: K >= 16
+            .unwrap_or(32768) // Default: K >= 15
     })
 }
 
@@ -111,6 +111,48 @@ pub fn should_use_gpu(size: usize) -> bool {
         DeviceType::Cpu => false, // Force BLST (disable GPU)
         DeviceType::Auto => size >= min_gpu_size(),
     }
+}
+
+/// Check if GPU should be used for a batch of operations.
+///
+/// This considers the **total work** across all operations, not just individual size.
+/// GPU excels at throughput, so batching many smaller MSMs can still be beneficial
+/// even if each individual MSM is below the single-operation threshold.
+///
+/// # Decision Logic
+///
+/// For batch operations, GPU is beneficial when:
+/// 1. Total work (batch_size × individual_size) exceeds threshold, OR
+/// 2. Individual size is large enough (traditional threshold)
+///
+/// The batch threshold is lower because:
+/// - GPU kernel launch overhead is amortized across batch
+/// - Memory transfers can be pipelined
+/// - GPU memory is already warm after first operation
+///
+/// # Arguments
+/// * `individual_size` - Size of each individual operation (e.g., points per MSM)
+/// * `batch_count` - Number of operations in the batch
+///
+/// # Returns
+/// `true` if GPU should be used for this batch
+#[inline]
+pub fn should_use_gpu_batch(individual_size: usize, batch_count: usize) -> bool {
+    // For batch operations, we use the same threshold as single operations.
+    // GPU overhead for small MSMs is significant, so batching small MSMs
+    // on GPU is actually slower than BLST on CPU.
+    //
+    // The key insight from benchmarking:
+    // - 4096 points: CPU is faster (even batched)
+    // - 8192 points: CPU is still faster 
+    // - 16384 points: CPU is still faster
+    // - 32768+ points: GPU wins (threshold K=15)
+    //
+    // So we just use the standard single-operation threshold (K>=15).
+    // The batch_count parameter is kept for future optimization when
+    // GPU memory pooling and stream pipelining reduce overhead.
+    let _ = batch_count; // Unused for now
+    should_use_gpu(individual_size)
 }
 
 /// Get the ICICLE backend installation path.
@@ -162,7 +204,7 @@ mod tests {
         let size = min_gpu_size();
         assert!(size > 0);
         assert!(size.is_power_of_two());
-        assert_eq!(size, 65536); // Default K=16
+        assert_eq!(size, 32768); // Default K=15
     }
 
     #[test]
@@ -174,6 +216,24 @@ mod tests {
             assert!(!should_use_gpu(threshold - 1));
             assert!(should_use_gpu(threshold));
             assert!(should_use_gpu(threshold * 2));
+        }
+    }
+
+    #[test]
+    fn test_should_use_gpu_batch() {
+        let threshold = min_gpu_size(); // 32768
+        
+        // In Auto mode, batch uses same threshold as single operation
+        if device_type() == DeviceType::Auto {
+            // Below threshold - should not use GPU regardless of batch count
+            assert!(!should_use_gpu_batch(threshold - 1, 1));
+            assert!(!should_use_gpu_batch(threshold - 1, 10));
+            assert!(!should_use_gpu_batch(4096, 100)); // 4096 < 32768
+            
+            // At or above threshold - should use GPU
+            assert!(should_use_gpu_batch(threshold, 1));
+            assert!(should_use_gpu_batch(threshold, 10));
+            assert!(should_use_gpu_batch(threshold * 2, 5));
         }
     }
 

@@ -65,7 +65,7 @@ pub mod types;
 
 // Core exports
 pub use backend::{ensure_backend_loaded, is_gpu_available, GpuError};
-pub use config::{device_type, min_gpu_size, should_use_gpu, backend_path, device_id, DeviceType};
+pub use config::{device_type, min_gpu_size, should_use_gpu, should_use_gpu_batch, backend_path, device_id, DeviceType};
 
 // GPU-specific exports (only when gpu feature is enabled)
 #[cfg(feature = "gpu")]

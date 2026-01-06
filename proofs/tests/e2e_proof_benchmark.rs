@@ -171,8 +171,8 @@ fn e2e_proof_benchmark() {
         println!();
         if is_gpu_available() {
             println!("✓ GPU Backend: AVAILABLE (ICICLE CUDA)");
-            println!("  • Threshold: K≥16 (65,536 constraints)");
-            println!("  • All MSM operations will use GPU at K≥16");
+            println!("  • Threshold: K≥15 (32,768 points)");
+            println!("  • All MSM operations will use GPU at K≥15");
         } else {
             println!("⚠ GPU Backend: NOT AVAILABLE");
             println!("  Will use CPU fallback (BLST)");
@@ -193,19 +193,14 @@ fn e2e_proof_benchmark() {
     println!("═══════════════════════════════════════════════════════════════");
     
     // Test different circuit sizes with varying workloads
-    // Testing K=14,15,16,17,18,19 for comprehensive GPU validation
+    // Increased hash counts to really stress GPU with more MSM operations
+    // Each Poseidon hash adds ~450 constraints, so we scale appropriately
     let test_cases = vec![
-        (10, 10,  "K=10: Small circuit (CPU baseline)"),
-        (12, 20,  "K=12: Medium circuit (CPU)"),
-        (14, 30,  "K=14: Large CPU circuit - 16,384 constraints"),
-        (15, 35,  "K=15: Very large CPU - 32,768 constraints"),
-        (16, 40,  "K=16: GPU threshold - 65,536 constraints"),
-        (17, 45,  "K=17: Very large GPU - 131,072 constraints"),
-        (18, 50,  "K=18: Huge GPU circuit - 262,144 constraints"),
-        (19, 60,  "K=19: Maximum SRS size - 524,288 constraints"),
-        // K=20: Blocked by SRS size assertion (assert!(k <= 19) in plonk_api.rs)
-        // The Filecoin SRS only supports up to 2^19 constraints
-        // Note: K=19 works perfectly with GPU, no ICICLE bugs at this size!
+        // GPU-focused tests with larger circuits (threshold at K=15)
+        (15, 50,   "K=15: GPU threshold - 50 hashes (~23K constraints)"),
+        (16, 100,  "K=16: GPU baseline - 100 hashes (~45K constraints)"),
+        (17, 200,  "K=17: Large GPU - 200 hashes (~90K constraints)"),
+        (18, 400,  "K=18: Heavy GPU - 400 hashes (~180K constraints)"),
     ];
     
     for (k, nb_hashes, description) in test_cases {
@@ -228,11 +223,11 @@ fn e2e_proof_benchmark() {
     
     println!();
     println!("📈 Performance Analysis:");
-    println!("  • K<16: CPU (BLST) - baseline performance");
-    println!("  • K≥16: GPU (ICICLE) - accelerated MSM operations");
-    println!("  • K=16: GPU threshold, ~2-3x speedup expected");
-    println!("  • K=17-18: GPU sweet spot, ~5-10x speedup");
-    println!("  • K=18-19: GPU essential, ~20-50x speedup");
+    println!("  • K<15: CPU (BLST) - baseline performance");
+    println!("  • K≥15: GPU (ICICLE) - accelerated MSM operations");
+    println!("  • K=15: GPU threshold, ~2-3x speedup expected");
+    println!("  • K=16-17: GPU sweet spot, ~5-10x speedup");
+    println!("  • K=17-18: GPU essential, ~20-50x speedup");
     println!("  • MSMs typically account for 60-70% of total proving time");
     println!();
     
