@@ -150,6 +150,71 @@ impl GpuMsmContext {
         &self.device
     }
 
+    /// Upload G1 bases to GPU memory in Montgomery form (zero-copy conversion)
+    ///
+    /// This is the optimized path for repeated MSMs with the same bases.
+    /// Bases are kept in Montgomery form on GPU, eliminating per-MSM conversion.
+    ///
+    /// # Arguments
+    /// * `points` - G1 affine points to upload
+    ///
+    /// # Returns
+    /// Device vector of bases in GPU memory
+    pub fn upload_g1_bases(&self, points: &[G1Affine]) -> Result<DeviceVec<IcicleG1Affine>, MsmError> {
+        use icicle_runtime::set_device;
+
+        if points.is_empty() {
+            return Err(MsmError::InvalidInput("Empty points array".to_string()));
+        }
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        // Zero-copy conversion: reinterpret as ICICLE points (keeps Montgomery form)
+        let icicle_points = TypeConverter::g1_slice_as_icicle(points);
+
+        // Allocate device memory
+        let mut device_bases = DeviceVec::<IcicleG1Affine>::device_malloc(points.len())
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Upload to GPU
+        device_bases
+            .copy_from_host(HostSlice::from_slice(icicle_points))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to device failed: {:?}", e)))?;
+
+        Ok(device_bases)
+    }
+
+    /// Upload G2 bases to GPU memory in Montgomery form (zero-copy conversion)
+    ///
+    /// Same as `upload_g1_bases()` but for G2 points.
+    pub fn upload_g2_bases(&self, points: &[G2Affine]) -> Result<DeviceVec<IcicleG2Affine>, MsmError> {
+        use icicle_runtime::set_device;
+
+        if points.is_empty() {
+            return Err(MsmError::InvalidInput("Empty points array".to_string()));
+        }
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        // Zero-copy conversion: reinterpret as ICICLE points (keeps Montgomery form)
+        let icicle_points = TypeConverter::g2_slice_as_icicle(points);
+
+        // Allocate device memory
+        let mut device_bases = DeviceVec::<IcicleG2Affine>::device_malloc(points.len())
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Upload to GPU
+        device_bases
+            .copy_from_host(HostSlice::from_slice(icicle_points))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to device failed: {:?}", e)))?;
+
+        Ok(device_bases)
+    }
+
     /// Compute G1 MSM: sum(scalars[i] * points[i])
     ///
     /// Points are uploaded to GPU for this call. For repeated MSMs with the same
@@ -194,6 +259,8 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - synchronous on default stream
+        // Note: are_bases_montgomery_form = false because g1_affine_to_icicle uses to_repr()
+        // which converts out of Montgomery form. Scalars remain in Montgomery form.
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
         cfg.is_async = false;
@@ -335,6 +402,8 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - synchronous on default stream
+        // Note: are_bases_montgomery_form = false because g2_affine_to_icicle uses to_repr()
+        // which converts out of Montgomery form. Scalars remain in Montgomery form.
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
         cfg.is_async = false;
@@ -521,9 +590,11 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - async on our stream
+        // CRITICAL: Both scalars AND bases are in Montgomery form
         let mut cfg = MSMConfig::default();
         cfg.stream_handle = stream.as_ref().into();
         cfg.are_scalars_montgomery_form = true;
+        cfg.are_bases_montgomery_form = true;
         cfg.is_async = true;
 
         // Launch async MSM with device bases
@@ -576,9 +647,11 @@ impl GpuMsmContext {
         let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc_async(1, stream.as_ref())
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
+        // CRITICAL: Both scalars AND bases are in Montgomery form
         let mut cfg = MSMConfig::default();
         cfg.stream_handle = stream.as_ref().into();
         cfg.are_scalars_montgomery_form = true;
+        cfg.are_bases_montgomery_form = true;
         cfg.is_async = true;
 
         msm(

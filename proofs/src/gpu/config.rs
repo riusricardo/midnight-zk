@@ -6,7 +6,7 @@
 //! # Environment Variables
 //!
 //! - `ICICLE_BACKEND_INSTALL_DIR`: Path to ICICLE backend (default: `/opt/icicle/lib/backend`)
-//! - `MIDNIGHT_GPU_MIN_K`: Minimum K for GPU usage (default: 14, meaning 2^14 = 16384 points)
+//! - `MIDNIGHT_GPU_MIN_K`: Minimum K for GPU usage (default: 16, meaning 2^16 = 65536 points)
 //! - `MIDNIGHT_DEVICE`: Device selection ("auto", "gpu", or "cpu")
 //!   - `auto` (default): Use GPU for large operations, BLST for small ones
 //!   - `gpu`: Force GPU for all operations regardless of size
@@ -77,7 +77,7 @@ pub fn device_type() -> DeviceType {
 ///
 /// Problems smaller than this will use BLST due to GPU transfer overhead.
 /// Parsed from `MIDNIGHT_GPU_MIN_K` environment variable (as log2 value).
-/// Default: 2^14 = 16384 points
+/// Default: 2^16 = 65536 points
 pub fn min_gpu_size() -> usize {
     static MIN_SIZE: OnceLock<usize> = OnceLock::new();
 
@@ -90,7 +90,7 @@ pub fn min_gpu_size() -> usize {
                 info!("MIDNIGHT_GPU_MIN_K={} -> min_gpu_size={}", k, size);
                 size
             })
-            .unwrap_or(16384) // Default: K >= 14
+            .unwrap_or(65536) // Default: K >= 16
     })
 }
 
