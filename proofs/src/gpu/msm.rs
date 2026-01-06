@@ -1,41 +1,84 @@
-//! Multi-Scalar Multiplication (MSM) implementations
+//! GPU-Accelerated Multi-Scalar Multiplication (MSM)
 //!
-//! This module provides GPU-accelerated MSM with automatic CPU fallback.
+//! This module provides GPU-accelerated MSM operations using ICICLE's CUDA backend.
+//! MSM computes sum(scalars[i] * points[i]) - the core operation for polynomial commitments.
+//!
+//! # Architecture
+//!
+//! Following the icicle-halo2 pattern, we provide:
+//! 1. **Sync API**: Uses `IcicleStream::default()` for simple blocking operations
+//! 2. **Async API**: Creates per-operation streams for pipelining
+//!
+//! # Reference
+//!
+//! Pattern derived from:
+//! - **icicle-halo2**: https://github.com/ingonyama-zk/halo2/blob/main/halo2_proofs/src/icicle.rs
+//! - **ICICLE Rust Guide**: https://dev.ingonyama.com/start/programmers_guide/rust
+//!
+//! # Sync Usage
+//!
+//! ```rust,ignore
+//! use midnight_proofs::gpu::msm::GpuMsmContext;
+//!
+//! let ctx = GpuMsmContext::new()?;
+//! let result = ctx.msm(&scalars, &points)?;  // Blocking
+//! ```
+//!
+//! # Async Usage (icicle-halo2 pattern)
+//!
+//! ```rust,ignore
+//! // Launch async MSM
+//! let handle = ctx.msm_async(&scalars, &device_bases)?;
+//!
+//! // ... do other work while GPU computes ...
+//!
+//! // Wait for result
+//! let result = handle.wait()?;
+//! ```
 
-use crate::gpu::{DeviceType, GpuBackend, GpuConfig, GpuError, TypeConverter};
+use crate::gpu::{GpuError, TypeConverter};
+use crate::gpu::stream::ManagedStream;
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective, G2Affine, G2Projective};
-use ff::Field;
-use group::Group; // For identity() method
-use group::prime::PrimeCurveAffine; // For generator() method
-use tracing::{debug, info, warn};
+use group::Group;
+use tracing::debug;
 
-/// Trait for MSM backend implementations
-pub trait MsmBackend {
-    /// Compute MSM: sum(scalars[i] * points[i])
-    fn compute_msm(
-        &self,
-        scalars: &[Scalar],
-        points: &[G1Affine],
-    ) -> Result<G1Projective, MsmError>;
-}
+#[cfg(feature = "gpu")]
+use icicle_bls12_381::curve::{
+    G1Affine as IcicleG1Affine,
+    G1Projective as IcicleG1Projective,
+    G2Affine as IcicleG2Affine,
+    G2Projective as IcicleG2Projective,
+};
+#[cfg(feature = "gpu")]
+use icicle_core::ecntt::Projective;
+#[cfg(feature = "gpu")]
+use icicle_core::msm::{msm, MSMConfig};
+#[cfg(feature = "gpu")]
+use icicle_runtime::{
+    Device,
+    memory::{DeviceVec, HostSlice, HostOrDeviceSlice},
+};
 
-/// Errors that can occur during MSM operations
+/// Errors specific to MSM operations
 #[derive(Debug)]
 pub enum MsmError {
-    /// GPU operation failed
-    GpuError(GpuError),
-    /// CPU fallback also failed
-    CpuError(String),
-    /// Invalid input
+    /// GPU context initialization failed
+    ContextInitFailed(String),
+    /// MSM execution failed
+    ExecutionFailed(String),
+    /// Invalid input (size mismatch, empty, etc.)
     InvalidInput(String),
+    /// Underlying GPU error
+    GpuError(GpuError),
 }
 
 impl std::fmt::Display for MsmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            MsmError::GpuError(e) => write!(f, "GPU MSM error: {}", e),
-            MsmError::CpuError(e) => write!(f, "CPU MSM error: {}", e),
-            MsmError::InvalidInput(e) => write!(f, "Invalid MSM input: {}", e),
+            MsmError::ContextInitFailed(msg) => write!(f, "MSM context init failed: {}", msg),
+            MsmError::ExecutionFailed(msg) => write!(f, "MSM execution failed: {}", msg),
+            MsmError::InvalidInput(msg) => write!(f, "Invalid MSM input: {}", msg),
+            MsmError::GpuError(e) => write!(f, "GPU error: {}", e),
         }
     }
 }
@@ -48,31 +91,80 @@ impl From<GpuError> for MsmError {
     }
 }
 
-/// GPU MSM backend using ICICLE
+/// GPU MSM Context
+///
+/// Manages GPU resources for MSM operations:
+/// - Device handle for CUDA operations
+/// - Backend initialization state
+///
+/// # Thread Safety
+///
+/// This context can be safely shared between threads. Each MSM call
+/// uses synchronous execution on the default stream.
 #[cfg(feature = "gpu")]
-#[derive(Debug)]
-pub struct GpuMsmBackend {
-    pub(crate) backend: GpuBackend,
+pub struct GpuMsmContext {
+    /// Device reference
+    device: Device,
 }
 
 #[cfg(feature = "gpu")]
-impl GpuMsmBackend {
-    /// Create a new GPU MSM backend with the given configuration
-    pub fn new(config: GpuConfig) -> Result<Self, GpuError> {
-        let backend = GpuBackend::new(config)?;
-        Ok(Self { backend })
+impl std::fmt::Debug for GpuMsmContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GpuMsmContext")
+            .field("device", &"<Device>")
+            .finish()
     }
-    
-    fn compute_msm_internal(
-        &self,
-        scalars: &[Scalar],
-        points: &[G1Affine],
-    ) -> Result<G1Projective, MsmError> {
-        use icicle_core::msm::{msm, MSMConfig};
-        use icicle_core::ecntt::Projective; // For zero() method
-        use icicle_runtime::memory::{DeviceVec, HostSlice};
-        use icicle_bls12_381::curve::G1Projective as IcicleG1Projective;
-        
+}
+
+// Implement Send and Sync for GpuMsmContext
+// Safe because Device is just an identifier (string + int), no GPU resources
+#[cfg(feature = "gpu")]
+unsafe impl Send for GpuMsmContext {}
+#[cfg(feature = "gpu")]
+unsafe impl Sync for GpuMsmContext {}
+
+#[cfg(feature = "gpu")]
+impl GpuMsmContext {
+    /// Create a new GPU MSM context
+    ///
+    /// Initializes the ICICLE backend and sets the device.
+    pub fn new() -> Result<Self, MsmError> {
+        use crate::gpu::backend::ensure_backend_loaded;
+        use icicle_runtime::set_device;
+
+        // Ensure ICICLE backend is loaded
+        ensure_backend_loaded()
+            .map_err(|e| MsmError::GpuError(e))?;
+
+        // Set device context
+        let device = Device::new("CUDA", 0);
+        set_device(&device)
+            .map_err(|e| MsmError::ContextInitFailed(format!("Failed to set device: {:?}", e)))?;
+
+        debug!("GpuMsmContext created");
+
+        Ok(Self { device })
+    }
+
+    /// Get the device handle
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    /// Compute G1 MSM: sum(scalars[i] * points[i])
+    ///
+    /// Points are uploaded to GPU for this call. For repeated MSMs with the same
+    /// bases, use `msm_with_device_bases()` instead.
+    ///
+    /// # Arguments
+    /// * `scalars` - Scalar multipliers (in Montgomery form)
+    /// * `points` - G1 affine points
+    ///
+    /// # Returns
+    /// The MSM result as a G1 projective point
+    pub fn msm(&self, scalars: &[Scalar], points: &[G1Affine]) -> Result<G1Projective, MsmError> {
+        use icicle_runtime::set_device;
+
         if scalars.len() != points.len() {
             return Err(MsmError::InvalidInput(format!(
                 "Scalar and point count mismatch: {} vs {}",
@@ -80,479 +172,688 @@ impl GpuMsmBackend {
                 points.len()
             )));
         }
-        
+
         if scalars.is_empty() {
             return Ok(G1Projective::identity());
         }
-        
-        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
-        // Uses transmute - O(1) pointer cast instead of O(n) conversion
-        // The raw bytes are in Montgomery form, so we set are_scalars_montgomery_form=true
-        // The CUDA backend will convert from Montgomery to standard form on GPU
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        let start = std::time::Instant::now();
+
+        // Zero-copy scalar conversion - O(1) pointer cast
         let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
-        
-        // TODO(Phase 1): Use zero-copy for points when layout is verified
-        // For now, use parallel conversion for points
+
+        // Convert points (TODO: zero-copy when layout verified)
         let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(points);
-        
+
         // Allocate device result buffer
         let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
-        
-        // Configure MSM - tell the backend that scalars are in Montgomery form
-        // This triggers GPU-side conversion from Montgomery to standard form
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Configure MSM - synchronous on default stream
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
-        
+        cfg.is_async = false;
+
+        // Execute MSM
         msm(
             HostSlice::from_slice(icicle_scalars),
             HostSlice::from_slice(&icicle_points),
             &cfg,
-            &mut device_result[..]
-        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
-        
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("MSM failed: {:?}", e)))?;
+
         // Copy result back to host
         let mut host_result = vec![IcicleG1Projective::zero(); 1];
-        device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
-        
-        // Convert back to midnight types
+        device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        debug!("G1 MSM completed for {} points in {:?}", scalars.len(), start.elapsed());
+
         Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))
     }
-    
-    /// Compute G2 MSM on GPU using ICICLE
-    fn compute_g2_msm_internal(
-        &self,
-        scalars: &[Scalar],
-        points: &[G2Affine],
-    ) -> Result<G2Projective, MsmError> {
-        use icicle_core::msm::{msm, MSMConfig};
-        use icicle_core::ecntt::Projective; // For zero() method
-        use icicle_runtime::memory::{DeviceVec, HostSlice};
-        use icicle_bls12_381::curve::G2Projective as IcicleG2Projective;
-        
-        if scalars.len() != points.len() {
-            return Err(MsmError::InvalidInput(format!(
-                "Scalar and point count mismatch: {} vs {}",
-                scalars.len(),
-                points.len()
-            )));
-        }
-        
-        if scalars.is_empty() {
-            return Ok(G2Projective::identity());
-        }
-        
-        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
-        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
-        
-        // TODO(Phase 1): Use zero-copy for G2 points when layout is verified
-        let icicle_points = TypeConverter::g2_affine_slice_to_icicle_vec(points);
-        
-        // Allocate device result buffer
-        let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc(1)
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
-        
-        // Configure and execute G2 MSM
-        // Note: We set are_scalars_montgomery_form = true because zero-copy transmute
-        // passes raw Montgomery bytes. The CUDA backend handles conversion on GPU.
-        let mut cfg = MSMConfig::default();
-        cfg.are_scalars_montgomery_form = true;
-        msm(
-            HostSlice::from_slice(icicle_scalars),
-            HostSlice::from_slice(&icicle_points),
-            &cfg,
-            &mut device_result[..]
-        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("G2 MSM failed: {:?}", e))))?;
-        
-        // Copy result back to host
-        let mut host_result = vec![IcicleG2Projective::zero(); 1];
-        device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("{:?}", e))))?;
-        
-        // Convert back to midnight types
-        Ok(TypeConverter::icicle_to_g2_projective(&host_result[0]))
-    }
-    
-    /// Public method to compute G2 MSM
-    pub fn compute_g2_msm(
-        &self,
-        scalars: &[Scalar],
-        points: &[G2Affine],
-    ) -> Result<G2Projective, MsmError> {
-        self.compute_g2_msm_internal(scalars, points)
-    }
-}
 
-#[cfg(feature = "gpu")]
-impl MsmBackend for GpuMsmBackend {
-    fn compute_msm(
+    /// Compute G1 MSM with pre-uploaded device bases
+    ///
+    /// This is the most efficient path when bases are cached on GPU (e.g., SRS).
+    /// Eliminates per-call point upload overhead.
+    ///
+    /// # Arguments
+    /// * `scalars` - Scalar multipliers (in Montgomery form)
+    /// * `device_bases` - G1 points already in GPU memory
+    ///
+    /// # Returns
+    /// The MSM result as a G1 projective point
+    pub fn msm_with_device_bases(
         &self,
         scalars: &[Scalar],
-        points: &[G1Affine],
+        device_bases: &DeviceVec<IcicleG1Affine>,
     ) -> Result<G1Projective, MsmError> {
-        self.compute_msm_internal(scalars, points)
-    }
-}
-
-/// CPU MSM backend (fallback)
-#[derive(Debug)]
-pub struct CpuMsmBackend;
-
-impl MsmBackend for CpuMsmBackend {
-    fn compute_msm(
-        &self,
-        scalars: &[Scalar],
-        points: &[G1Affine],
-    ) -> Result<G1Projective, MsmError> {
-        if scalars.len() != points.len() {
-            return Err(MsmError::InvalidInput(format!(
-                "Scalar and point count mismatch: {} vs {}",
-                scalars.len(),
-                points.len()
-            )));
-        }
-        
-        if scalars.is_empty() {
-            return Ok(G1Projective::identity());
-        }
-        
-        // Convert affine to projective for multi_exp
-        let points_proj: Vec<G1Projective> = points.iter().map(|p| G1Projective::from(*p)).collect();
-        Ok(G1Projective::multi_exp(&points_proj, scalars))
-    }
-}
-
-impl CpuMsmBackend {
-    /// Compute G2 MSM on CPU
-    pub fn compute_g2_msm(
-        &self,
-        scalars: &[Scalar],
-        points: &[G2Affine],
-    ) -> Result<G2Projective, MsmError> {
-        if scalars.len() != points.len() {
-            return Err(MsmError::InvalidInput(format!(
-                "Scalar and point count mismatch: {} vs {}",
-                scalars.len(),
-                points.len()
-            )));
-        }
-        
-        if scalars.is_empty() {
-            return Ok(G2Projective::identity());
-        }
-        
-        // Convert affine to projective for multi_exp
-        let points_proj: Vec<G2Projective> = points.iter().map(|p| G2Projective::from(*p)).collect();
-        Ok(G2Projective::multi_exp(&points_proj, scalars))
-    }
-}
-
-/// MSM executor that automatically selects GPU or CPU backend
-#[derive(Debug)]
-pub struct MsmExecutor {
-    #[cfg(feature = "gpu")]
-    gpu_backend: Option<GpuMsmBackend>,
-    cpu_backend: CpuMsmBackend,
-    config: GpuConfig,
-}
-
-impl MsmExecutor {
-    /// Create a new MSM executor with the given configuration
-    pub fn new(config: GpuConfig) -> Self {
-        #[cfg(feature = "gpu")]
-        let gpu_backend = match GpuMsmBackend::new(config.clone()) {
-            Ok(backend) => {
-                debug!("GPU MSM backend initialized");
-                Some(backend)
-            }
-            Err(e) => {
-                warn!("GPU MSM backend initialization failed: {}, using CPU fallback", e);
-                None
-            }
-        };
-        
-        Self {
-            #[cfg(feature = "gpu")]
-            gpu_backend,
-            cpu_backend: CpuMsmBackend,
-            config,
-        }
-    }
-    
-    /// Execute MSM with automatic backend selection based on size
-    /// 
-    /// Decision is based on config.device_type and config.min_gpu_size.
-    /// Override via MIDNIGHT_DEVICE and MIDNIGHT_GPU_MIN_K environment variables.
-    pub fn execute(
-        &self,
-        scalars: &[Scalar],
-        points: &[G1Affine],
-    ) -> Result<G1Projective, MsmError> {
-        let size = scalars.len();
-        let k = (size as f64).log2().ceil() as u8;
-        
-        if self.should_use_gpu(size) {
-            #[cfg(feature = "gpu")]
-            if let Some(gpu) = &self.gpu_backend {
-                debug!(
-                    "Using GPU for MSM: {} points (K={}), device_type={:?}",
-                    size, k, self.config.device_type
-                );
-                return gpu.compute_msm(scalars, points);
-            }
-            
-            #[cfg(not(feature = "gpu"))]
-            {
-                return Err(MsmError::InvalidInput(
-                    "GPU requested but feature not enabled".to_string()
-                ));
-            }
-        }
-        
-        debug!(
-            "Using CPU for MSM: {} points (K={}), device_type={:?}, min_size={}",
-            size, k, self.config.device_type, self.config.min_gpu_size
-        );
-        self.cpu_backend.compute_msm(scalars, points)
-    }
-    
-    /// Execute G2 MSM with automatic backend selection based on size
-    /// 
-    /// Same decision logic as execute() but for G2 points.
-    /// G2 points are in the quadratic extension field Fq2.
-    pub fn execute_g2(
-        &self,
-        scalars: &[Scalar],
-        points: &[G2Affine],
-    ) -> Result<G2Projective, MsmError> {
-        let size = scalars.len();
-        let k = (size as f64).log2().ceil() as u8;
-        
-        if self.should_use_gpu(size) {
-            #[cfg(feature = "gpu")]
-            if let Some(gpu) = &self.gpu_backend {
-                debug!(
-                    "Using GPU for G2 MSM: {} points (K={}), device_type={:?}",
-                    size, k, self.config.device_type
-                );
-                return gpu.compute_g2_msm(scalars, points);
-            }
-            
-            #[cfg(not(feature = "gpu"))]
-            {
-                return Err(MsmError::InvalidInput(
-                    "GPU requested but feature not enabled".to_string()
-                ));
-            }
-        }
-        
-        debug!(
-            "Using CPU for G2 MSM: {} points (K={}), device_type={:?}, min_size={}",
-            size, k, self.config.device_type, self.config.min_gpu_size
-        );
-        self.cpu_backend.compute_g2_msm(scalars, points)
-    }
-    
-    /// Execute MSM using pre-uploaded GPU bases (zero-copy optimization)
-    /// 
-    /// Eliminates per-call conversion and upload overhead by using bases
-    /// cached in GPU memory. Primary optimization for GPU-accelerated commitments.
-    #[cfg(feature = "gpu")]
-    pub fn execute_with_device_bases(
-        &self,
-        scalars: &[Scalar],
-        device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
-    ) -> Result<G1Projective, MsmError> {
-        use icicle_core::msm::{msm, MSMConfig};
-        use icicle_core::ecntt::Projective; // For zero() method
-        use icicle_runtime::memory::{DeviceVec, HostSlice, HostOrDeviceSlice};
-        use icicle_bls12_381::curve::G1Projective as IcicleG1Projective;
-        
-        if scalars.is_empty() {
-            return Ok(G1Projective::identity());
-        }
-        
-        // CRITICAL: Must set device context in multi-threaded environment
-        // Cached GPU bases require active device context to access memory
-        // Use backend's cached device to avoid creating new device (which triggers backend reload)
         use icicle_runtime::set_device;
-        if let Some(ref gpu_backend) = self.gpu_backend {
-            set_device(gpu_backend.backend.device())
-                .map_err(|e| MsmError::GpuError(GpuError::DeviceSetFailed(format!("{:?}", e))))?;
-        } else {
-            return Err(MsmError::GpuError(GpuError::NotAvailable));
+
+        if scalars.is_empty() {
+            return Ok(G1Projective::identity());
         }
-        
+
         if scalars.len() > device_bases.len() {
             return Err(MsmError::InvalidInput(format!(
-                "More scalars ({}) than available bases ({})",
+                "More scalars ({}) than bases ({})",
                 scalars.len(),
                 device_bases.len()
             )));
         }
-        
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
         #[cfg(feature = "trace-msm")]
-        eprintln!("   [GPU] Using pre-uploaded bases (zero-copy MSM) - {} points", scalars.len());
-        
-        // OPTIMIZATION: Zero-copy scalar conversion (Phase 1)
-        // Uses transmute - O(1) pointer cast instead of O(n) allocation + conversion
+        let start = std::time::Instant::now();
+
+        // Zero-copy scalar conversion
         let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
-        
+
         // Allocate device result buffer
         let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc(1)
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Device malloc failed: {:?}", e))))?;
-        
-        // Execute MSM directly on device bases (no upload!)
-        // Note: We set are_scalars_montgomery_form = true because zero-copy transmute
-        // passes raw Montgomery bytes. The CUDA backend handles conversion on GPU.
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Configure MSM - synchronous on default stream
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
-        
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [GPU] Calling ICICLE msm() with {} scalars, slice range 0..{}", icicle_scalars.len(), scalars.len());
-        
+        cfg.is_async = false;
+
+        // Execute MSM with device bases - no upload!
         msm(
             HostSlice::from_slice(icicle_scalars),
-            &device_bases[..scalars.len()],  // Use slice of pre-uploaded bases
+            &device_bases[..scalars.len()],
             &cfg,
-            &mut device_result[..]
-        ).map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("MSM operation failed: {:?}", e))))?;
-        
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("MSM failed: {:?}", e)))?;
+
         // Copy result back to host
         let mut host_result = vec![IcicleG1Projective::zero(); 1];
-        device_result.copy_to_host(HostSlice::from_mut_slice(&mut host_result))
-            .map_err(|e| MsmError::GpuError(GpuError::OperationFailed(format!("Copy to host failed: {:?}", e))))?;
-        
-        // Convert back to midnight types
+        device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        debug!("G1 MSM (device bases) completed for {} points in {:?}", scalars.len(), start.elapsed());
+
         Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))
     }
-    
-    /// Determine if GPU should be used for the given problem size
-    /// 
-    /// Decision logic:
-    /// 1. If MIDNIGHT_DEVICE=cpu, always use CPU
-    /// 2. If MIDNIGHT_DEVICE=gpu, always use GPU (if available)
-    /// 3. If MIDNIGHT_DEVICE=auto (default), use GPU for size >= min_gpu_size
-    pub fn should_use_gpu(&self, size: usize) -> bool {
-        #[cfg(feature = "gpu")]
-        {
-            // Check device type override first
-            if self.config.device_type.is_cpu_forced() {
-                return false;
-            }
-            
-            if self.config.device_type.is_gpu_forced() {
-                return self.gpu_backend.is_some();
-            }
-            
-            // Auto mode: use GPU for large problems
-            self.gpu_backend.is_some() && size >= self.config.min_gpu_size
-        }
-        #[cfg(not(feature = "gpu"))]
-        {
-            let _ = size; // Suppress unused warning
-            false
-        }
-    }
-}
 
-impl Default for MsmExecutor {
-    fn default() -> Self {
-        Self::new(GpuConfig::default())
-    }
-}
+    /// Compute G2 MSM: sum(scalars[i] * points[i])
+    ///
+    /// # Arguments
+    /// * `scalars` - Scalar multipliers (in Montgomery form)
+    /// * `points` - G2 affine points
+    ///
+    /// # Returns
+    /// The MSM result as a G2 projective point
+    pub fn g2_msm(&self, scalars: &[Scalar], points: &[G2Affine]) -> Result<G2Projective, MsmError> {
+        use icicle_runtime::set_device;
 
-impl MsmExecutor {
-    /// Warmup the MSM executor by running a small MSM operation
-    /// 
-    /// This should be called at application startup to:
-    /// 1. Initialize the ICICLE CUDA backend
-    /// 2. Allocate GPU memory
-    /// 3. Run initial CUDA context setup
-    /// 
-    /// Without warmup, the first proof request pays ~500-1000ms initialization cost.
+        if scalars.len() != points.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "Scalar and point count mismatch: {} vs {}",
+                scalars.len(),
+                points.len()
+            )));
+        }
+
+        if scalars.is_empty() {
+            return Ok(G2Projective::identity());
+        }
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        let start = std::time::Instant::now();
+
+        // Zero-copy scalar conversion
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+
+        // Convert points (TODO: zero-copy when layout verified)
+        let icicle_points = TypeConverter::g2_affine_slice_to_icicle_vec(points);
+
+        // Allocate device result buffer
+        let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc(1)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Configure MSM - synchronous on default stream
+        let mut cfg = MSMConfig::default();
+        cfg.are_scalars_montgomery_form = true;
+        cfg.is_async = false;
+
+        // Execute G2 MSM
+        msm(
+            HostSlice::from_slice(icicle_scalars),
+            HostSlice::from_slice(&icicle_points),
+            &cfg,
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("G2 MSM failed: {:?}", e)))?;
+
+        // Copy result back to host
+        let mut host_result = vec![IcicleG2Projective::zero(); 1];
+        device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        debug!("G2 MSM completed for {} points in {:?}", scalars.len(), start.elapsed());
+
+        Ok(TypeConverter::icicle_to_g2_projective(&host_result[0]))
+    }
+
+    /// Compute G2 MSM with pre-uploaded device bases
+    pub fn g2_msm_with_device_bases(
+        &self,
+        scalars: &[Scalar],
+        device_bases: &DeviceVec<IcicleG2Affine>,
+    ) -> Result<G2Projective, MsmError> {
+        use icicle_runtime::set_device;
+
+        if scalars.is_empty() {
+            return Ok(G2Projective::identity());
+        }
+
+        if scalars.len() > device_bases.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "More scalars ({}) than bases ({})",
+                scalars.len(),
+                device_bases.len()
+            )));
+        }
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        let start = std::time::Instant::now();
+
+        // Zero-copy scalar conversion
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+
+        // Allocate device result buffer
+        let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc(1)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Configure MSM - synchronous on default stream
+        let mut cfg = MSMConfig::default();
+        cfg.are_scalars_montgomery_form = true;
+        cfg.is_async = false;
+
+        // Execute MSM with device bases
+        msm(
+            HostSlice::from_slice(icicle_scalars),
+            &device_bases[..scalars.len()],
+            &cfg,
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("G2 MSM failed: {:?}", e)))?;
+
+        // Copy result back to host
+        let mut host_result = vec![IcicleG2Projective::zero(); 1];
+        device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        debug!("G2 MSM (device bases) completed for {} points in {:?}", scalars.len(), start.elapsed());
+
+        Ok(TypeConverter::icicle_to_g2_projective(&host_result[0]))
+    }
+
+    /// Warmup the GPU by running a small MSM
+    ///
+    /// Call this at application startup to pay initialization costs upfront.
     pub fn warmup(&self) -> Result<std::time::Duration, MsmError> {
+        use ff::Field;
+        use group::prime::PrimeCurveAffine;
         use std::time::Instant;
-        
+
         let start = Instant::now();
-        
-        #[cfg(feature = "gpu")]
-        if let Some(gpu) = &self.gpu_backend {
-            info!("GPU warmup: initializing ICICLE backend...");
-            
-            // Run a small MSM to trigger full GPU initialization
-            // Size 1024 is enough to initialize without being slow
-            let warmup_size = 1024;
-            let scalars: Vec<Scalar> = (0..warmup_size)
-                .map(|i| {
-                    use ff::Field;
-                    let mut s = Scalar::ONE;
-                    for _ in 0..i % 10 {
-                        s = s.double();
-                    }
-                    s
-                })
-                .collect();
-            let points: Vec<G1Affine> = (0..warmup_size)
-                .map(|_| G1Affine::generator())
-                .collect();
-            
-            // Force GPU execution regardless of size threshold
-            let _ = gpu.compute_msm(&scalars, &points)?;
-            
-            let elapsed = start.elapsed();
-            info!("GPU warmup complete in {:?}", elapsed);
-            return Ok(elapsed);
-        }
-        
-        debug!("GPU warmup skipped (no GPU backend available)");
-        Ok(start.elapsed())
+
+        // Small warmup MSM
+        let warmup_size = 256;
+        let scalars: Vec<Scalar> = (0..warmup_size)
+            .map(|i| {
+                let mut s = Scalar::ONE;
+                for _ in 0..i % 8 {
+                    s = s.double();
+                }
+                s
+            })
+            .collect();
+        let points: Vec<G1Affine> = (0..warmup_size).map(|_| G1Affine::generator()).collect();
+
+        let _ = self.msm(&scalars, &points)?;
+
+        let elapsed = start.elapsed();
+        debug!("GPU MSM warmup complete in {:?}", elapsed);
+        Ok(elapsed)
     }
-    
-    /// Check if GPU backend is available
-    pub fn has_gpu(&self) -> bool {
-        #[cfg(feature = "gpu")]
-        {
-            self.gpu_backend.is_some()
+
+    // =========================================================================
+    // Async API (icicle-halo2 pattern)
+    // =========================================================================
+
+    /// Launch async G1 MSM with device bases, returns handle to wait on result.
+    ///
+    /// This follows the icicle-halo2 pattern of creating a stream per operation:
+    /// ```rust,ignore
+    /// // From icicle-halo2 evaluation.rs:
+    /// let mut stream = IcicleStream::create().unwrap();
+    /// let mut d_result = DeviceVec::device_malloc_async(size, &stream).unwrap();
+    /// cfg.stream_handle = stream.into();
+    /// cfg.is_async = true;
+    /// // ... launch operations ...
+    /// stream.synchronize().unwrap();
+    /// stream.destroy().unwrap();
+    /// ```
+    ///
+    /// # Arguments
+    /// * `scalars` - Scalar multipliers (in Montgomery form)
+    /// * `device_bases` - G1 points already in GPU memory
+    ///
+    /// # Returns
+    /// A handle that can be waited on to get the result
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let handle = ctx.msm_async(&scalars, &device_bases)?;
+    /// // ... do other work ...
+    /// let result = handle.wait()?;
+    /// ```
+    pub fn msm_async(
+        &self,
+        scalars: &[Scalar],
+        device_bases: &DeviceVec<IcicleG1Affine>,
+    ) -> Result<MsmHandle, MsmError> {
+        use icicle_runtime::set_device;
+
+        if scalars.is_empty() {
+            return Ok(MsmHandle::identity());
         }
-        #[cfg(not(feature = "gpu"))]
-        {
-            false
+
+        if scalars.len() > device_bases.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "More scalars ({}) than bases ({})",
+                scalars.len(),
+                device_bases.len()
+            )));
         }
+
+        // Set device context
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        // Create stream for this operation (icicle-halo2 pattern)
+        let stream = ManagedStream::create()
+            .map_err(|e| MsmError::ExecutionFailed(format!("Stream creation failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        let _start = std::time::Instant::now();
+
+        // Zero-copy scalar conversion
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+
+        // Allocate device result buffer (async)
+        let mut device_result = DeviceVec::<IcicleG1Projective>::device_malloc_async(1, stream.as_ref())
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        // Configure MSM - async on our stream
+        let mut cfg = MSMConfig::default();
+        cfg.stream_handle = stream.as_ref().into();
+        cfg.are_scalars_montgomery_form = true;
+        cfg.is_async = true;
+
+        // Launch async MSM with device bases
+        msm(
+            HostSlice::from_slice(icicle_scalars),
+            &device_bases[..scalars.len()],
+            &cfg,
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("MSM launch failed: {:?}", e)))?;
+
+        #[cfg(feature = "trace-msm")]
+        debug!("G1 MSM async launched for {} points", scalars.len());
+
+        Ok(MsmHandle {
+            stream,
+            device_result,
+            is_identity: false,
+        })
     }
-    
-    /// Get the current device type configuration
-    pub fn device_type(&self) -> DeviceType {
-        self.config.device_type
+
+    /// Launch async G2 MSM with device bases
+    pub fn g2_msm_async(
+        &self,
+        scalars: &[Scalar],
+        device_bases: &DeviceVec<IcicleG2Affine>,
+    ) -> Result<G2MsmHandle, MsmError> {
+        use icicle_runtime::set_device;
+
+        if scalars.is_empty() {
+            return Ok(G2MsmHandle::identity());
+        }
+
+        if scalars.len() > device_bases.len() {
+            return Err(MsmError::InvalidInput(format!(
+                "More scalars ({}) than bases ({})",
+                scalars.len(),
+                device_bases.len()
+            )));
+        }
+
+        set_device(&self.device)
+            .map_err(|e| MsmError::ExecutionFailed(format!("Failed to set device: {:?}", e)))?;
+
+        let stream = ManagedStream::create()
+            .map_err(|e| MsmError::ExecutionFailed(format!("Stream creation failed: {:?}", e)))?;
+
+        let icicle_scalars = TypeConverter::scalar_slice_as_icicle(scalars);
+
+        let mut device_result = DeviceVec::<IcicleG2Projective>::device_malloc_async(1, stream.as_ref())
+            .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
+
+        let mut cfg = MSMConfig::default();
+        cfg.stream_handle = stream.as_ref().into();
+        cfg.are_scalars_montgomery_form = true;
+        cfg.is_async = true;
+
+        msm(
+            HostSlice::from_slice(icicle_scalars),
+            &device_bases[..scalars.len()],
+            &cfg,
+            &mut device_result[..],
+        )
+        .map_err(|e| MsmError::ExecutionFailed(format!("G2 MSM launch failed: {:?}", e)))?;
+
+        Ok(G2MsmHandle {
+            stream,
+            device_result,
+            is_identity: false,
+        })
     }
 }
+
+// =============================================================================
+// Async Handles (icicle-halo2 pattern)
+// =============================================================================
+
+/// Handle for an in-flight async G1 MSM operation.
+///
+/// This implements the icicle-halo2 pattern where each async operation owns
+/// its stream and result buffer. Call `wait()` to synchronize and get the result.
+///
+/// # Reference
+///
+/// From icicle-halo2:
+/// ```rust,ignore
+/// stream.synchronize().unwrap();
+/// msm_results.copy_to_host_async(HostSlice::from_mut_slice(&mut result), stream).unwrap();
+/// stream.destroy().unwrap();
+/// ```
+#[cfg(feature = "gpu")]
+pub struct MsmHandle {
+    /// Owned stream for this operation
+    stream: ManagedStream,
+    /// Device buffer holding the result
+    device_result: DeviceVec<IcicleG1Projective>,
+    /// True if this represents identity (empty input)
+    is_identity: bool,
+}
+
+#[cfg(feature = "gpu")]
+impl std::fmt::Debug for MsmHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MsmHandle")
+            .field("stream", &self.stream)
+            .field("is_identity", &self.is_identity)
+            .finish()
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl MsmHandle {
+    /// Create a handle representing identity result (for empty input)
+    fn identity() -> Self {
+        // Note: We allocate 1 element instead of 0 because CUDA doesn't allow zero-size allocations.
+        // The is_identity flag ensures we return identity without reading this buffer.
+        Self {
+            stream: ManagedStream::default_stream(),
+            device_result: DeviceVec::<IcicleG1Projective>::device_malloc(1).unwrap(),
+            is_identity: true,
+        }
+    }
+
+    /// Wait for the MSM to complete and return the result.
+    ///
+    /// This synchronizes the stream, copies the result to host, and cleans up.
+    /// The stream is automatically destroyed.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let handle = ctx.msm_async(&scalars, &device_bases)?;
+    /// // ... do other work ...
+    /// let result = handle.wait()?;
+    /// ```
+    pub fn wait(mut self) -> Result<G1Projective, MsmError> {
+        if self.is_identity {
+            return Ok(G1Projective::identity());
+        }
+
+        // Synchronize stream (wait for GPU to finish)
+        self.stream.synchronize()
+            .map_err(|e| MsmError::ExecutionFailed(format!("Stream sync failed: {:?}", e)))?;
+
+        // Copy result to host
+        let mut host_result = vec![IcicleG1Projective::zero(); 1];
+        self.device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        // Stream is destroyed automatically by ManagedStream::Drop
+
+        Ok(TypeConverter::icicle_to_g1_projective(&host_result[0]))
+    }
+}
+
+/// Handle for an in-flight async G2 MSM operation.
+#[cfg(feature = "gpu")]
+pub struct G2MsmHandle {
+    stream: ManagedStream,
+    device_result: DeviceVec<IcicleG2Projective>,
+    is_identity: bool,
+}
+
+#[cfg(feature = "gpu")]
+impl std::fmt::Debug for G2MsmHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("G2MsmHandle")
+            .field("stream", &self.stream)
+            .field("is_identity", &self.is_identity)
+            .finish()
+    }
+}
+
+#[cfg(feature = "gpu")]
+impl G2MsmHandle {
+    fn identity() -> Self {
+        // Note: We allocate 1 element instead of 0 because CUDA doesn't allow zero-size allocations.
+        Self {
+            stream: ManagedStream::default_stream(),
+            device_result: DeviceVec::<IcicleG2Projective>::device_malloc(1).unwrap(),
+            is_identity: true,
+        }
+    }
+
+    /// Wait for the G2 MSM to complete and return the result.
+    pub fn wait(mut self) -> Result<G2Projective, MsmError> {
+        if self.is_identity {
+            return Ok(G2Projective::identity());
+        }
+
+        self.stream.synchronize()
+            .map_err(|e| MsmError::ExecutionFailed(format!("Stream sync failed: {:?}", e)))?;
+
+        let mut host_result = vec![IcicleG2Projective::zero(); 1];
+        self.device_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result))
+            .map_err(|e| MsmError::ExecutionFailed(format!("Copy to host failed: {:?}", e)))?;
+
+        Ok(TypeConverter::icicle_to_g2_projective(&host_result[0]))
+    }
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
 
 #[cfg(test)]
+#[cfg(feature = "gpu")]
 mod tests {
     use super::*;
+    use ff::Field;
+    use group::prime::PrimeCurveAffine;
 
     #[test]
-    fn test_cpu_msm_empty() {
-        let backend = CpuMsmBackend;
-        let result = backend.compute_msm(&[], &[]).unwrap();
+    fn test_msm_context_creation() {
+        let ctx = GpuMsmContext::new();
+        assert!(ctx.is_ok(), "Should create MSM context");
+    }
+
+    #[test]
+    fn test_msm_empty() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+        let result = ctx.msm(&[], &[]).unwrap();
         assert_eq!(result, G1Projective::identity());
     }
 
     #[test]
-    fn test_cpu_msm_size_mismatch() {
-        use ff::Field;
-        let backend = CpuMsmBackend;
-        let scalars = vec![Scalar::ONE];
-        let points = vec![];
-        let result = backend.compute_msm(&scalars, &points);
-        assert!(matches!(result, Err(MsmError::InvalidInput(_))));
+    fn test_msm_single_point() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        let scalar = Scalar::from(5u64);
+        let point = G1Affine::generator();
+
+        let result = ctx.msm(&[scalar], &[point]).expect("MSM failed");
+
+        // Expected: 5 * G
+        let expected = G1Projective::from(point) * scalar;
+        assert_eq!(result, expected);
     }
 
     #[test]
-    fn test_msm_executor_default() {
-        let executor = MsmExecutor::default();
-        // Just verify it constructs without panicking
-        let _ = executor.should_use_gpu(1000);
+    fn test_msm_multiple_points() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        let n = 64;
+        let scalars: Vec<Scalar> = (1..=n).map(|i| Scalar::from(i as u64)).collect();
+        let points: Vec<G1Affine> = (0..n).map(|_| G1Affine::generator()).collect();
+
+        let result = ctx.msm(&scalars, &points).expect("MSM failed");
+
+        // Expected: sum(i * G) for i = 1..n = (n*(n+1)/2) * G
+        let sum = n * (n + 1) / 2;
+        let expected = G1Projective::from(G1Affine::generator()) * Scalar::from(sum as u64);
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_msm_size_mismatch() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        let scalars = vec![Scalar::ONE];
+        let points = vec![];
+
+        let result = ctx.msm(&scalars, &points);
+        assert!(matches!(result, Err(MsmError::InvalidInput(_))));
+    }
+
+    /// Test async MSM with device bases
+    #[test]
+    fn test_msm_async_with_device_bases() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        let n = 64;
+        let scalars: Vec<Scalar> = (1..=n).map(|i| Scalar::from(i as u64)).collect();
+        let points: Vec<G1Affine> = (0..n).map(|_| G1Affine::generator()).collect();
+
+        // Upload points to GPU
+        let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(&points);
+        let mut device_bases = DeviceVec::<IcicleG1Affine>::device_malloc(n as usize)
+            .expect("Device malloc failed");
+        device_bases
+            .copy_from_host(HostSlice::from_slice(&icicle_points))
+            .expect("Copy to device failed");
+
+        // Launch async MSM
+        let handle = ctx.msm_async(&scalars, &device_bases).expect("Async MSM launch failed");
+
+        // Wait for result
+        let result = handle.wait().expect("Async MSM wait failed");
+
+        // Expected: sum(i * G) for i = 1..n = (n*(n+1)/2) * G
+        let sum = n * (n + 1) / 2;
+        let expected = G1Projective::from(G1Affine::generator()) * Scalar::from(sum as u64);
+        assert_eq!(result, expected);
+    }
+
+    /// Test async MSM with empty input returns identity
+    #[test]
+    fn test_msm_async_empty() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        // Create minimal device bases (CUDA doesn't allow zero-size allocations)
+        // The msm_async function checks for empty scalars before using bases
+        let device_bases = DeviceVec::<IcicleG1Affine>::device_malloc(1)
+            .expect("Device malloc failed");
+
+        // Launch async MSM with empty scalars
+        let handle = ctx.msm_async(&[], &device_bases).expect("Async MSM launch failed");
+        let result = handle.wait().expect("Async MSM wait failed");
+
+        assert_eq!(result, G1Projective::identity());
+    }
+
+    /// Test MsmHandle debug implementation
+    #[test]
+    fn test_msm_handle_debug() {
+        let ctx = GpuMsmContext::new().expect("Failed to create context");
+
+        let n = 16;
+        let scalars: Vec<Scalar> = (1..=n).map(|i| Scalar::from(i as u64)).collect();
+        let points: Vec<G1Affine> = (0..n).map(|_| G1Affine::generator()).collect();
+
+        let icicle_points = TypeConverter::g1_affine_slice_to_icicle_vec(&points);
+        let mut device_bases = DeviceVec::<IcicleG1Affine>::device_malloc(n as usize)
+            .expect("Device malloc failed");
+        device_bases
+            .copy_from_host(HostSlice::from_slice(&icicle_points))
+            .expect("Copy to device failed");
+
+        let handle = ctx.msm_async(&scalars, &device_bases).expect("Async MSM launch failed");
+
+        // Test Debug implementation
+        let debug_str = format!("{:?}", handle);
+        assert!(debug_str.contains("MsmHandle"));
+
+        // Consume handle
+        let _ = handle.wait();
     }
 }

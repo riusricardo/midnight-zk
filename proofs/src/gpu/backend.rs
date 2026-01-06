@@ -68,6 +68,8 @@ pub enum GpuError {
     DeviceSetFailed(String),
     /// GPU operation failed
     OperationFailed(String),
+    /// Stream operation failed
+    StreamError(String),
     /// GPU not available
     NotAvailable,
 }
@@ -78,6 +80,7 @@ impl std::fmt::Display for GpuError {
             GpuError::BackendLoadFailed(msg) => write!(f, "Backend load failed: {}", msg),
             GpuError::DeviceSetFailed(msg) => write!(f, "Device set failed: {}", msg),
             GpuError::OperationFailed(msg) => write!(f, "GPU operation failed: {}", msg),
+            GpuError::StreamError(msg) => write!(f, "Stream error: {}", msg),
             GpuError::NotAvailable => write!(f, "GPU not available"),
         }
     }

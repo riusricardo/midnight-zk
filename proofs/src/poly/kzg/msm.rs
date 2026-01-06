@@ -15,22 +15,22 @@ use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 #[cfg(feature = "gpu")]
 use midnight_curves::G1Affine;
 #[cfg(feature = "gpu")]
-use crate::gpu::MsmExecutor;
+use crate::gpu::GpuMsmContext;
 
 #[cfg(feature = "gpu")]
-/// Global MSM executor instance
+/// Global GPU MSM context instance
 /// 
 /// This is initialized on first use (lazy) or can be initialized eagerly
 /// via init_gpu_backend() to avoid first-call latency.
-static GLOBAL_MSM_EXECUTOR: OnceLock<MsmExecutor> = OnceLock::new();
+static GLOBAL_MSM_CONTEXT: OnceLock<GpuMsmContext> = OnceLock::new();
 
 #[cfg(feature = "gpu")]
-/// Get or initialize the global MSM executor
-fn get_msm_executor() -> &'static MsmExecutor {
-    GLOBAL_MSM_EXECUTOR.get_or_init(|| {
+/// Get or initialize the global GPU MSM context
+fn get_msm_context() -> &'static GpuMsmContext {
+    GLOBAL_MSM_CONTEXT.get_or_init(|| {
         #[cfg(feature = "trace-msm")]
-        eprintln!("[MSM] Initializing global MSM executor (lazy)");
-        MsmExecutor::default()
+        eprintln!("[MSM] Initializing global GPU MSM context (lazy)");
+        GpuMsmContext::new().expect("Failed to create GPU MSM context")
     })
 }
 
@@ -60,19 +60,19 @@ pub fn init_gpu_backend() -> Option<std::time::Duration> {
     use tracing::info;
     
     // Check if already initialized
-    if GLOBAL_MSM_EXECUTOR.get().is_some() {
+    if GLOBAL_MSM_CONTEXT.get().is_some() {
         info!("GPU backend already initialized");
         return None;
     }
     
     info!("Initializing GPU backend eagerly...");
-    let executor = MsmExecutor::default();
+    let ctx = GpuMsmContext::new().expect("Failed to create GPU MSM context");
     
     // Warmup to trigger full CUDA initialization
-    let warmup_result = executor.warmup().ok();
+    let warmup_result = ctx.warmup().ok();
     
     // Store in global
-    let _ = GLOBAL_MSM_EXECUTOR.set(executor);
+    let _ = GLOBAL_MSM_CONTEXT.set(ctx);
     
     if let Some(duration) = warmup_result {
         info!("GPU backend initialized and warmed up in {:?}", duration);
@@ -226,11 +226,12 @@ pub fn msm_with_cached_bases<C: CurveAffine>(
     // Safe: we just verified the type
     let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
     
-    // Use GPU-cached bases via global MsmExecutor
+    // Use GPU-cached bases via global MSM context
     #[cfg(feature = "trace-msm")]
     eprintln!("   [MSM-CACHED] Executing zero-copy GPU MSM");
     
-    let res = get_msm_executor().execute_with_device_bases(coeffs, device_bases)
+    let ctx = get_msm_context();
+    let res = ctx.msm_with_device_bases(coeffs, device_bases)
         .expect("Cached MSM execution failed");
     let result = unsafe { std::mem::transmute_copy(&res) };
     
@@ -332,34 +333,31 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         };
         
         if should_try_gpu {
-            // Get global MSM executor (will initialize lazily if not done eagerly)
-            let executor = get_msm_executor();
+            // Get global MSM context (will initialize lazily if not done eagerly)
+            let ctx = get_msm_context();
             
-            // Check if GPU is actually available
-            if executor.should_use_gpu(size) {
-                #[cfg(feature = "trace-msm")]
-                eprintln!("   [MSM] Using GPU backend ({} points)", size);
-                
-                // Convert projective bases to affine for GPU MSM
-                let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
-                
-                match executor.execute(coeffs, &bases_affine) {
-                    Ok(res) => {
-                        let result = unsafe { std::mem::transmute_copy(&res) };
-                        
-                        #[cfg(feature = "trace-msm")]
-                        {
-                            let elapsed = start.elapsed();
-                            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
-                        }
-                        
-                        return result;
+            #[cfg(feature = "trace-msm")]
+            eprintln!("   [MSM] Using GPU backend ({} points)", size);
+            
+            // Convert projective bases to affine for GPU MSM
+            let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
+            
+            match ctx.msm(coeffs, &bases_affine) {
+                Ok(res) => {
+                    let result = unsafe { std::mem::transmute_copy(&res) };
+                    
+                    #[cfg(feature = "trace-msm")]
+                    {
+                        let elapsed = start.elapsed();
+                        eprintln!("✓  [MSM] Completed in {:?}", elapsed);
                     }
-                    Err(e) => {
-                        // GPU failed, fall back to BLST
-                        #[cfg(feature = "trace-msm")]
-                        eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", e);
-                    }
+                    
+                    return result;
+                }
+                Err(_e) => {
+                    // GPU failed, fall back to BLST
+                    #[cfg(feature = "trace-msm")]
+                    eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", _e);
                 }
             }
         }

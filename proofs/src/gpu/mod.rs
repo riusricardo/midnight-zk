@@ -43,17 +43,22 @@
 //! ```
 
 pub mod backend;
-pub mod batch;
 pub mod config;
 pub mod msm;
+pub mod ntt;
+pub mod stream;
 pub mod types;
 
 pub use backend::{GpuBackend, GpuError, is_gpu_available};
 #[cfg(feature = "gpu")]
 pub use backend::ensure_backend_loaded;
-pub use batch::MsmBatch;
 pub use config::{DeviceType, GpuConfig};
-pub use msm::{MsmBackend, MsmExecutor};
+#[cfg(feature = "gpu")]
+pub use msm::{GpuMsmContext, MsmError, MsmHandle, G2MsmHandle};
+#[cfg(feature = "gpu")]
+pub use ntt::{GpuNttContext, NttError, NttHandle};
+#[cfg(feature = "gpu")]
+pub use stream::ManagedStream;
 pub use types::TypeConverter;
 
 /// Check if GPU support is compiled in
@@ -89,19 +94,20 @@ pub fn warmup_gpu() -> Option<std::time::Duration> {
     #[cfg(feature = "gpu")]
     {
         info!("Warming up GPU backend...");
-        let executor = MsmExecutor::default();
         
-        match executor.warmup() {
-            Ok(duration) => {
-                info!(
-                    "GPU warmup successful: backend={}, duration={:?}",
-                    if executor.has_gpu() { "CUDA" } else { "CPU" },
-                    duration
-                );
-                Some(duration)
-            }
+        match GpuMsmContext::new() {
+            Ok(ctx) => match ctx.warmup() {
+                Ok(duration) => {
+                    info!("GPU warmup successful: backend=CUDA, duration={:?}", duration);
+                    Some(duration)
+                }
+                Err(e) => {
+                    tracing::warn!("GPU warmup failed: {:?}", e);
+                    None
+                }
+            },
             Err(e) => {
-                tracing::warn!("GPU warmup failed: {:?}", e);
+                tracing::warn!("GPU context creation failed: {:?}", e);
                 None
             }
         }
