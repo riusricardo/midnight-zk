@@ -247,13 +247,24 @@ pub fn msm_with_cached_bases<C: CurveAffine>(
 #[allow(unsafe_code)]
 /// MSM using BLST multi_exp with optional GPU acceleration
 /// 
-/// This function REQUIRES midnight_curves::G1Affine and will panic if used with other curves.
+/// # Architecture Notes
 /// 
+/// This function is the **fallback path** for MSMs without pre-cached GPU bases.
+/// For SRS-based commitments (the hot path), use `msm_with_cached_bases()` instead,
+/// which uses bases already uploaded to GPU memory.
+/// 
+/// **Call sites:**
+/// - `MSMKZG::eval()` - Verification accumulator (small, BLST is fine)
+/// - Fallback when `!should_use_gpu(size)` - Small MSMs use BLST
+/// - Non-SRS MSMs - Rare, converts projective→affine each call
+///
 /// # GPU Acceleration
 /// When compiled with `gpu` feature and size >= 16384 (K≥14):
 /// - Uses ICICLE CUDA backend via GPU executor
-/// - Automatically selects GPU for K≥14, CPU for smaller circuits
-/// - GPU provides approximately 2x speedup for large circuits on capable hardware
+/// - Converts projective bases to affine (overhead for non-cached bases)
+/// - For cached SRS bases, prefer `msm_with_cached_bases()`
+///
+/// This function REQUIRES midnight_curves::G1Affine and will panic if used with other curves.
 pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();

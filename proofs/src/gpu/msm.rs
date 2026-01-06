@@ -12,7 +12,6 @@
 //! # Reference
 //!
 //! Pattern derived from:
-//! - **icicle-halo2**: https://github.com/ingonyama-zk/halo2/blob/main/halo2_proofs/src/icicle.rs
 //! - **ICICLE Rust Guide**: https://dev.ingonyama.com/start/programmers_guide/rust
 //!
 //! # Sync Usage
@@ -265,11 +264,16 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - synchronous on default stream
+        // CRITICAL: Both scalars AND bases are in Montgomery form!
+        // - Scalars: midnight-curves stores Fq in Montgomery form
+        // - Bases: uploaded in Montgomery form via get_or_upload_gpu_bases()
+        // This eliminates per-MSM D2D copy + Montgomery conversion in CUDA backend.
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
+        cfg.are_bases_montgomery_form = true;  // Bases pre-uploaded in Montgomery form
         cfg.is_async = false;
 
-        // Execute MSM with device bases - no upload!
+        // Execute MSM with device bases - zero-copy, no conversion!
         msm(
             HostSlice::from_slice(icicle_scalars),
             &device_bases[..scalars.len()],
@@ -391,11 +395,13 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - synchronous on default stream
+        // CRITICAL: Both scalars AND bases are in Montgomery form!
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
+        cfg.are_bases_montgomery_form = true;  // Bases pre-uploaded in Montgomery form
         cfg.is_async = false;
 
-        // Execute MSM with device bases
+        // Execute MSM with device bases - zero-copy, no conversion!
         msm(
             HostSlice::from_slice(icicle_scalars),
             &device_bases[..scalars.len()],
