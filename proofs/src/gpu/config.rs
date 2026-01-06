@@ -73,6 +73,55 @@ pub fn device_type() -> DeviceType {
     })
 }
 
+// ============================================================================
+// MSM Performance Tuning (ICICLE best practices)
+// ============================================================================
+
+/// MSM precompute factor.
+///
+/// Trades GPU memory for ~20-30% MSM speedup by precomputing point multiples.
+/// From ICICLE docs: "Determines the number of extra points to pre-compute for
+/// each point, affecting memory footprint and performance."
+///
+/// Parsed from `MIDNIGHT_GPU_PRECOMPUTE` environment variable.
+/// Default: 1 (no precomputation, minimal memory)
+/// Recommended: 2-4 for production with sufficient GPU memory
+pub fn precompute_factor() -> i32 {
+    static PRECOMPUTE: OnceLock<i32> = OnceLock::new();
+    *PRECOMPUTE.get_or_init(|| {
+        std::env::var("MIDNIGHT_GPU_PRECOMPUTE")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|v| {
+                let factor = v.max(1).min(8); // Clamp to 1-8
+                info!("MSM precompute_factor={} (from MIDNIGHT_GPU_PRECOMPUTE)", factor);
+                factor
+            })
+            .unwrap_or(1)
+    })
+}
+
+/// Window bitsize (c parameter) for MSM bucket method.
+///
+/// From ICICLE docs: "The 'window bitsize', a parameter controlling the
+/// computational complexity and memory footprint of the MSM operation."
+///
+/// Default: 0 (let ICICLE choose optimal based on size)
+/// Values: typically 14-18 for large MSMs
+pub fn msm_window_size() -> i32 {
+    static WINDOW: OnceLock<i32> = OnceLock::new();
+    *WINDOW.get_or_init(|| {
+        std::env::var("MIDNIGHT_MSM_WINDOW")
+            .ok()
+            .and_then(|s| s.parse::<i32>().ok())
+            .map(|v| {
+                debug!("MSM window_size={} (from MIDNIGHT_MSM_WINDOW)", v);
+                v
+            })
+            .unwrap_or(0) // 0 = auto
+    })
+}
+
 /// Minimum problem size threshold for GPU usage.
 ///
 /// Problems smaller than this will use BLST due to GPU transfer overhead.
@@ -148,11 +197,17 @@ pub fn should_use_gpu_batch(individual_size: usize, batch_count: usize) -> bool 
     // - 16384 points: CPU is still faster
     // - 32768+ points: GPU wins (threshold K=15)
     //
-    // So we just use the standard single-operation threshold (K>=15).
-    // The batch_count parameter is kept for future optimization when
-    // GPU memory pooling and stream pipelining reduce overhead.
-    let _ = batch_count; // Unused for now
-    should_use_gpu(individual_size)
+    // With ICICLE's batch_size parameter, we can batch multiple MSMs into
+    // a single kernel launch. This is beneficial when:
+    // 1. Individual MSMs are above the base threshold, OR
+    // 2. Total work (batch * individual) is large enough to amortize overhead
+    //
+    // ICICLE recommendation: Use batch_size parameter with are_points_shared_in_batch=true
+    // when all MSMs use the same bases (e.g., SRS commitments)
+    let total_work = individual_size.saturating_mul(batch_count);
+    
+    // GPU beneficial if individual size meets threshold OR total work is significant
+    should_use_gpu(individual_size) || (batch_count >= 2 && total_work >= min_gpu_size())
 }
 
 /// Get the ICICLE backend installation path.

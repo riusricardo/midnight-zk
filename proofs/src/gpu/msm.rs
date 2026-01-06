@@ -335,10 +335,20 @@ impl GpuMsmContext {
         // - Scalars: midnight-curves stores Fq in Montgomery form
         // - Bases: uploaded in Montgomery form via get_or_upload_gpu_bases()
         // This eliminates per-MSM D2D copy + Montgomery conversion in CUDA backend.
+        //
+        // ICICLE performance tuning (from docs):
+        // - precompute_factor: trades memory for ~20-30% speedup
+        // - batch_size=1: single MSM per call (batching done at higher level)
+        // - are_points_shared_in_batch: N/A for batch_size=1
+        use crate::gpu::config::{precompute_factor, msm_window_size};
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
         cfg.are_bases_montgomery_form = true;  // Bases pre-uploaded in Montgomery form
         cfg.is_async = false;
+        cfg.precompute_factor = precompute_factor();
+        if msm_window_size() > 0 {
+            cfg.c = msm_window_size();
+        }
 
         // Execute MSM with device bases - zero-copy, no conversion!
         msm(
@@ -430,11 +440,17 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // Configure MSM - ASYNC mode with dedicated stream
+        // ICICLE performance tuning parameters applied
+        use crate::gpu::config::{precompute_factor, msm_window_size};
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
         cfg.are_bases_montgomery_form = true;
         cfg.is_async = true;  // Enable async execution!
         cfg.stream_handle = stream.as_ref().into();
+        cfg.precompute_factor = precompute_factor();
+        if msm_window_size() > 0 {
+            cfg.c = msm_window_size();
+        }
 
         // Execute MSM - returns immediately, GPU continues in background
         msm(
@@ -561,10 +577,16 @@ impl GpuMsmContext {
 
         // Configure MSM - synchronous on default stream
         // CRITICAL: Both scalars AND bases are in Montgomery form!
+        // ICICLE performance tuning parameters applied
+        use crate::gpu::config::{precompute_factor, msm_window_size};
         let mut cfg = MSMConfig::default();
         cfg.are_scalars_montgomery_form = true;
         cfg.are_bases_montgomery_form = true;  // Bases pre-uploaded in Montgomery form
         cfg.is_async = false;
+        cfg.precompute_factor = precompute_factor();
+        if msm_window_size() > 0 {
+            cfg.c = msm_window_size();
+        }
 
         // Execute MSM with device bases - zero-copy, no conversion!
         msm(
@@ -687,11 +709,17 @@ impl GpuMsmContext {
 
         // Configure MSM - async on our stream
         // CRITICAL: Both scalars AND bases are in Montgomery form
+        // ICICLE performance tuning parameters applied
+        use crate::gpu::config::{precompute_factor, msm_window_size};
         let mut cfg = MSMConfig::default();
         cfg.stream_handle = stream.as_ref().into();
         cfg.are_scalars_montgomery_form = true;
         cfg.are_bases_montgomery_form = true;
         cfg.is_async = true;
+        cfg.precompute_factor = precompute_factor();
+        if msm_window_size() > 0 {
+            cfg.c = msm_window_size();
+        }
 
         // Launch async MSM with device bases
         msm(
@@ -744,11 +772,17 @@ impl GpuMsmContext {
             .map_err(|e| MsmError::ExecutionFailed(format!("Device malloc failed: {:?}", e)))?;
 
         // CRITICAL: Both scalars AND bases are in Montgomery form
+        // ICICLE performance tuning parameters applied
+        use crate::gpu::config::{precompute_factor, msm_window_size};
         let mut cfg = MSMConfig::default();
         cfg.stream_handle = stream.as_ref().into();
         cfg.are_scalars_montgomery_form = true;
         cfg.are_bases_montgomery_form = true;
         cfg.is_async = true;
+        cfg.precompute_factor = precompute_factor();
+        if msm_window_size() > 0 {
+            cfg.c = msm_window_size();
+        }
 
         msm(
             HostSlice::from_slice(icicle_scalars),

@@ -62,6 +62,7 @@ pub mod msm;
 pub mod ntt;
 pub mod stream;
 pub mod types;
+pub mod vecops;
 
 // Core exports
 pub use backend::{ensure_backend_loaded, is_gpu_available, GpuError};
@@ -75,6 +76,9 @@ pub use ntt::{GpuNttContext, NttError, NttHandle};
 #[cfg(feature = "gpu")]
 pub use stream::ManagedStream;
 pub use types::TypeConverter;
+
+// VecOps exports
+pub use vecops::{vector_add, vector_sub, vector_mul, scalar_mul, VecOpsError, should_use_gpu_vecops};
 
 /// Check if GPU support is compiled in
 pub const GPU_SUPPORT: bool = cfg!(feature = "gpu");
