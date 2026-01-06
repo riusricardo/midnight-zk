@@ -32,6 +32,57 @@ use crate::{
     utils::{arithmetic::eval_polynomial, rational::Rational},
 };
 
+/// Helper to batch commit polynomial references when using KZG with BLS12-381 (midnight_curves).
+/// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
+/// 
+/// This enables GPU pipelining for multiple MSM operations
+/// when committing multiple polynomials by overlapping GPU computation with memory transfers.
+#[cfg(feature = "gpu")]
+fn batch_commit_refs_if_kzg_bls12<F, CS>(
+    params: &CS::Parameters,
+    polys: &[&Polynomial<F, LagrangeCoeff>],
+) -> Option<Vec<CS::Commitment>>
+where
+    F: PrimeField + 'static,
+    CS: PolynomialCommitmentScheme<F>,
+{
+    use std::any::TypeId;
+    use crate::poly::kzg::params::ParamsKZG;
+    use midnight_curves::{Bls12, Fq};
+    
+    // Only batch if we have multiple polynomials (pipelining benefit requires >1)
+    if polys.len() <= 1 {
+        return None;
+    }
+    
+    // Check if we're using KZG with BLS12-381 (midnight_curves) - the GPU-supported configuration
+    if TypeId::of::<CS::Parameters>() == TypeId::of::<ParamsKZG<Bls12>>()
+        && TypeId::of::<F>() == TypeId::of::<Fq>()
+    {
+        #[cfg(feature = "trace-kzg")]
+        eprintln!("[PROVER] Batch committing {} polynomials (refs) with GPU pipelining", polys.len());
+        
+        // SAFETY: We just verified both types match at runtime via TypeId checks.
+        unsafe {
+            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
+            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
+                polys.iter()
+                    .map(|p| &*(*p as *const Polynomial<F, LagrangeCoeff> 
+                               as *const Polynomial<Fq, LagrangeCoeff>))
+                    .collect();
+            
+            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
+            
+            // Transmute back to CS::Commitment
+            Some(batch_commits.into_iter()
+                .map(|c| std::mem::transmute_copy(&c))
+                .collect())
+        }
+    } else {
+        None
+    }
+}
+
 /// Helper to batch commit advice columns when using KZG with BLS12-381 (midnight_curves).
 /// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
 /// 
@@ -131,7 +182,7 @@ pub(crate) fn compute_trace<
     #[cfg(feature = "committed-instances")] nb_committed_instances: usize,
     instances: &[&[&[F]]],
     mut rng: impl RngCore + CryptoRng,
-    transcript: &mut T,
+    mut transcript: &mut T,
 ) -> Result<ProverTrace<F>, Error>
 where
     CS::Commitment: Hashable<T::Hash>,
@@ -233,47 +284,140 @@ where
         })
         .collect::<Result<Vec<_>, _>>())?;
 
-    let lookups: Vec<Vec<lookup::prover::Committed<F>>> = bench_and_run!(_group;
-        ref transcript;  own lookups; "Construct and commit lookup product polynomials";
-        |t: &mut T, lookups: Vec<Vec<lookup::prover::Permuted<F>>>| lookups
+    // Compute lookup product polynomials (without committing yet)
+    let lookup_products: Vec<Vec<lookup::prover::ProductComputed<F>>> = lookups
         .into_iter()
-        .map(|lookups| -> Result<Vec<_>, _> {
-            // Construct and commit to products for each lookup
+        .map(|lookups| {
             lookups
                 .into_iter()
-                .map(|lookup| lookup.commit_product(pk, params, beta, gamma, &mut rng, &mut *t))
+                .map(|lookup| lookup.compute_product::<CS>(pk, beta, gamma, &mut rng))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+
+    // Batch commit all lookup product polynomials
+    #[cfg(feature = "gpu")]
+    let lookups: Vec<Vec<lookup::prover::Committed<F>>> = {
+        // Collect all product polynomials for batch committing
+        let all_polys: Vec<&Polynomial<F, LagrangeCoeff>> = lookup_products.iter()
+            .flat_map(|products| products.iter().map(|p| &p.product_poly_lagrange))
+            .collect();
+        
+        // Try batch commit optimization
+        if let Some(all_commitments) = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &all_polys) {
+            // Distribute commitments back and finalize
+            let mut commitment_iter = all_commitments.into_iter();
+            lookup_products.into_iter()
+                .map(|products| {
+                    products.into_iter()
+                        .map(|product| {
+                            let commitment = commitment_iter.next().unwrap();
+                            product.finalize::<CS, T>(pk, commitment, &mut transcript)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            // Fall back to sequential commits
+            lookup_products.into_iter()
+                .map(|products| {
+                    products.into_iter()
+                        .map(|product| {
+                            let commitment = CS::commit_lagrange(params, &product.product_poly_lagrange);
+                            product.finalize::<CS, T>(pk, commitment, &mut transcript)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    
+    #[cfg(not(feature = "gpu"))]
+    let lookups: Vec<Vec<lookup::prover::Committed<F>>> = lookup_products.into_iter()
+        .map(|products| {
+            products.into_iter()
+                .map(|product| {
+                    let commitment = CS::commit_lagrange(params, &product.product_poly_lagrange);
+                    product.finalize::<CS, T>(pk, commitment, &mut transcript)
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Result<Vec<_>, _>>())?;
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Trash argument
     let trash_challenge: F = transcript.squeeze_challenge();
 
-    let trashcans: Vec<Vec<trash::prover::Committed<F>>> = bench_and_run!(_group;
-        ref transcript ; ; "Construct trash argument";
-        |t: &mut T| instance
+    // Compute trash polynomials (without committing yet)
+    let trash_computed: Vec<Vec<trash::prover::TrashComputed<F>>> = instance
         .iter()
         .zip(advice.iter())
-        .map(|(instance, advice)| -> Result<Vec<_>, Error> {
+        .map(|(instance, advice)| {
             pk.vk
                 .cs
                 .trashcans
                 .iter()
                 .map(|trash| {
-                    trash.commit::<CS, _>(
-                        params,
+                    trash.compute(
                         domain,
                         trash_challenge,
                         &advice.advice_polys,
                         &pk.fixed_values,
                         &instance.instance_values,
                         &challenges,
-                        &mut *t,
                     )
                 })
-                .collect()
+                .collect::<Vec<_>>()
         })
-        .collect::<Result<Vec<_>, _>>())?;
+        .collect::<Vec<_>>();
+
+    // Batch commit all trash polynomials
+    #[cfg(feature = "gpu")]
+    let trashcans: Vec<Vec<trash::prover::Committed<F>>> = {
+        // Collect all trash polynomials for batch committing
+        let all_polys: Vec<&Polynomial<F, LagrangeCoeff>> = trash_computed.iter()
+            .flat_map(|trashes| trashes.iter().map(|t| &t.trash_poly_lagrange))
+            .collect();
+        
+        // Try batch commit optimization
+        if let Some(all_commitments) = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &all_polys) {
+            // Distribute commitments back and finalize
+            let mut commitment_iter = all_commitments.into_iter();
+            trash_computed.into_iter()
+                .map(|trashes| {
+                    trashes.into_iter()
+                        .map(|trash| {
+                            let commitment = commitment_iter.next().unwrap();
+                            trash.finalize::<CS, T>(domain, commitment, &mut transcript)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            // Fall back to sequential commits
+            trash_computed.into_iter()
+                .map(|trashes| {
+                    trashes.into_iter()
+                        .map(|trash| {
+                            let commitment = CS::commit_lagrange(params, &trash.trash_poly_lagrange);
+                            trash.finalize::<CS, T>(domain, commitment, &mut transcript)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        }
+    };
+    
+    #[cfg(not(feature = "gpu"))]
+    let trashcans: Vec<Vec<trash::prover::Committed<F>>> = trash_computed.into_iter()
+        .map(|trashes| {
+            trashes.into_iter()
+                .map(|trash| {
+                    let commitment = CS::commit_lagrange(params, &trash.trash_poly_lagrange);
+                    trash.finalize::<CS, T>(domain, commitment, &mut transcript)
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = bench_and_run!(_group;
