@@ -87,17 +87,9 @@ where
         // Use cached GPU bases when available (following ingonyama-zk pattern)
         #[cfg(feature = "gpu")]
         let result = {
-            use crate::gpu::config::{GpuConfig, DeviceType};
-            let config = GpuConfig::default();
+            use crate::gpu::config::should_use_gpu;
             
-            // Only use GPU path if not forced to CPU and size is large enough
-            let use_gpu = match config.device_type {
-                DeviceType::Cpu => false,
-                DeviceType::Cuda => size >= config.min_gpu_size,
-                DeviceType::Auto => size >= config.min_gpu_size,
-            };
-            
-            if use_gpu {
+            if should_use_gpu(size) {
                 use crate::poly::kzg::msm::msm_with_cached_bases;
                 let device_bases = params.get_or_upload_gpu_bases();
                 msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)
@@ -131,17 +123,9 @@ where
         // Use cached GPU Lagrange bases when available
         #[cfg(feature = "gpu")]
         let result = {
-            use crate::gpu::config::{GpuConfig, DeviceType};
-            let config = GpuConfig::default();
+            use crate::gpu::config::should_use_gpu;
             
-            // Only use GPU path if not forced to CPU and size is large enough
-            let use_gpu = match config.device_type {
-                DeviceType::Cpu => false,
-                DeviceType::Cuda => size >= config.min_gpu_size,
-                DeviceType::Auto => size >= config.min_gpu_size,
-            };
-            
-            if use_gpu {
+            if should_use_gpu(size) {
                 use crate::poly::kzg::msm::msm_with_cached_bases;
                 let device_bases = params.get_or_upload_gpu_lagrange_bases();
                 msm_with_cached_bases::<E::G1Affine>(&scalars, device_bases)

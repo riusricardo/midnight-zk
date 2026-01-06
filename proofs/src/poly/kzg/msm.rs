@@ -318,21 +318,13 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     
     #[cfg(feature = "gpu")]
     {
-        use crate::gpu::config::{GpuConfig, DeviceType};
+        use crate::gpu::config::should_use_gpu;
         
-        // Check environment-based decision BEFORE initializing GPU backend
-        // This avoids the ~700ms GPU initialization overhead for small MSMs
-        let config = GpuConfig::default();
         let size = bases.len();
         
-        // Early exit: use BLST for small MSMs unless GPU is explicitly forced
-        let should_try_gpu = match config.device_type {
-            DeviceType::Cpu => false,
-            DeviceType::Cuda => true, // Forced GPU
-            DeviceType::Auto => size >= config.min_gpu_size,
-        };
-        
-        if should_try_gpu {
+        // Check if GPU should be used (respects MIDNIGHT_DEVICE and size threshold)
+        // If false, fall through to BLST path
+        if should_use_gpu(size) {
             // Get global MSM context (will initialize lazily if not done eagerly)
             let ctx = get_msm_context();
             

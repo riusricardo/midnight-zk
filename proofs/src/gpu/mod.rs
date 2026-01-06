@@ -1,7 +1,8 @@
 //! GPU acceleration for midnight-zk proof generation
 //!
 //! This module provides GPU-accelerated implementations of computationally intensive
-//! operations in the PLONK prover, specifically Multi-Scalar Multiplication (MSM).
+//! operations in the PLONK prover, specifically Multi-Scalar Multiplication (MSM)
+//! and Number Theoretic Transform (NTT).
 //!
 //! # Features
 //!
@@ -12,15 +13,24 @@
 //!
 //! # Backend Support
 //!
-//! Currently supports:
-//! - **CUDA**: NVIDIA GPUs (requires ICICLE CUDA backend)
-//! - **CPU**: Automatic fallback when GPU unavailable
+//! - **CUDA**: NVIDIA GPUs via ICICLE CUDA backend
+//! - **BLST**: CPU fallback for small operations or when GPU disabled
+//!
+//! Note: There is NO ICICLE CPU backend. When GPU is not used, operations
+//! fall back to BLST.
+//!
+//! # Device Selection
+//!
+//! Control via `MIDNIGHT_DEVICE` environment variable:
+//! - `auto` (default): GPU for large ops (>= 2^14 points), BLST for small
+//! - `gpu`: Force GPU for all operations
+//! - `cpu`: Force BLST for all operations (disable GPU)
 //!
 //! # Setup
 //!
 //! 1. Build and install the CUDA backend:
 //!    ```bash
-//!    cd cuda-backend
+//!    cd bls12-381-cuda-backend
 //!    mkdir build && cd build
 //!    cmake .. -DCMAKE_BUILD_TYPE=Release
 //!    make icicle -j$(nproc)
@@ -29,17 +39,21 @@
 //!
 //! 2. The backend will be automatically loaded when the prover is initialized.
 //!
-//! The CUDA backend is fully open source and can be found in the `cuda-backend` directory.
-//!
 //! # Example
 //!
 //! ```rust,no_run
-//! use midnight_proofs::gpu::{GpuBackend, GpuConfig};
+//! use midnight_proofs::gpu::{ensure_backend_loaded, should_use_gpu, GpuMsmContext};
 //!
-//! // Initialize GPU backend with default config
-//! let backend = GpuBackend::new(GpuConfig::default())?;
+//! // Initialize GPU backend
+//! ensure_backend_loaded()?;
 //!
-//! // Backend will automatically select GPU or CPU based on availability
+//! // Check if GPU should be used for this size
+//! if should_use_gpu(points.len()) {
+//!     let ctx = GpuMsmContext::new()?;
+//!     // Use GPU...
+//! } else {
+//!     // Use BLST...
+//! }
 //! ```
 
 pub mod backend;
@@ -49,10 +63,11 @@ pub mod ntt;
 pub mod stream;
 pub mod types;
 
-pub use backend::{GpuBackend, GpuError, is_gpu_available};
-#[cfg(feature = "gpu")]
-pub use backend::ensure_backend_loaded;
-pub use config::{DeviceType, GpuConfig};
+// Core exports
+pub use backend::{ensure_backend_loaded, is_gpu_available, GpuError};
+pub use config::{device_type, min_gpu_size, should_use_gpu, backend_path, device_id, DeviceType};
+
+// GPU-specific exports (only when gpu feature is enabled)
 #[cfg(feature = "gpu")]
 pub use msm::{GpuMsmContext, MsmError, MsmHandle, G2MsmHandle};
 #[cfg(feature = "gpu")]
