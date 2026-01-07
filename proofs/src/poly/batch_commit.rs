@@ -56,7 +56,7 @@ where
 {
     use std::any::TypeId;
     use crate::poly::kzg::params::ParamsKZG;
-    use crate::gpu::config::should_use_gpu_batch;
+    use midnight_bls12_381_cuda::should_use_gpu_batch;
     use midnight_curves::{Bls12, Fq};
     
     if polys.is_empty() {
@@ -142,7 +142,7 @@ where
 {
     use std::any::TypeId;
     use crate::poly::kzg::params::ParamsKZG;
-    use crate::gpu::config::should_use_gpu_batch;
+    use midnight_bls12_381_cuda::should_use_gpu_batch;
     use midnight_curves::{Bls12, Fq};
     
     if polys.is_empty() {

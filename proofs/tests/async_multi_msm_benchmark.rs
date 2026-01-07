@@ -6,7 +6,7 @@
 #![cfg(all(test, feature = "gpu"))]
 
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
-use midnight_proofs::gpu::GpuMsmContext;
+use midnight_bls12_381_cuda::GpuMsmContext;
 use group::{Group, Curve};
 use ff::Field;
 use rand_chacha::ChaCha8Rng;

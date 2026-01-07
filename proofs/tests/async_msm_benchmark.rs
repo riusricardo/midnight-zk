@@ -10,7 +10,7 @@
 use ff::Field;
 use group::{Curve, Group};
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
-use midnight_proofs::gpu::{GpuMsmContext, TypeConverter};
+use midnight_bls12_381_cuda::{GpuMsmContext, TypeConverter};
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;

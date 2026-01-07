@@ -182,8 +182,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// When using these bases, set `cfg.are_bases_montgomery_form = true`.
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_bases(&self) -> &DeviceVec<IcicleG1Affine> {
-        use crate::gpu::types::TypeConverter;
-        use crate::gpu::backend::ensure_backend_loaded;
+        use midnight_bls12_381_cuda::TypeConverter;
+        use midnight_bls12_381_cuda::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_gpu.get_or_init(|| {
@@ -236,8 +236,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Bases are stored in Montgomery form for zero-copy MSM execution.
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_lagrange_bases(&self) -> &DeviceVec<IcicleG1Affine> {
-        use crate::gpu::types::TypeConverter;
-        use crate::gpu::backend::ensure_backend_loaded;
+        use midnight_bls12_381_cuda::TypeConverter;
+        use midnight_bls12_381_cuda::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_lagrange_gpu.get_or_init(|| {
@@ -295,7 +295,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use crate::gpu::config::{should_use_gpu, should_use_gpu_batch};
+        use midnight_bls12_381_cuda::{should_use_gpu, should_use_gpu_batch};
         use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
         
         if polys.is_empty() {

@@ -11,8 +11,6 @@
 
 pub mod circuit;
 pub use halo2curves;
-#[cfg(feature = "gpu")]
-pub mod gpu;
 pub mod plonk;
 pub mod poly;
 pub mod transcript;

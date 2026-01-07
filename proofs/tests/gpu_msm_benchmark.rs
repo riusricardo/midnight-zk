@@ -16,7 +16,7 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
-use midnight_proofs::gpu::{GpuMsmContext, should_use_gpu, device_type};
+use midnight_bls12_381_cuda::{GpuMsmContext, should_use_gpu, device_type};
 
 /// Benchmark MSM at a given size, comparing GPU vs CPU
 /// 
@@ -76,8 +76,8 @@ fn gpu_msm_benchmark() {
     println!("Configuration:");
     println!("  • Device type: {}", device_type());
     println!("  • GPU threshold: {} points (K ≥ {})", 
-             midnight_proofs::gpu::min_gpu_size(),
-             midnight_proofs::gpu::min_gpu_size().trailing_zeros());
+             midnight_bls12_381_cuda::min_gpu_size(),
+             midnight_bls12_381_cuda::min_gpu_size().trailing_zeros());
     
     // Initialize GPU context
     print!("  • Initializing GPU... ");

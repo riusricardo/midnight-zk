@@ -88,7 +88,7 @@ where
         // Use cached GPU bases when available (following ingonyama-zk pattern)
         #[cfg(feature = "gpu")]
         let result = {
-            use crate::gpu::config::should_use_gpu;
+            use midnight_bls12_381_cuda::should_use_gpu;
             
             if should_use_gpu(size) {
                 use crate::poly::kzg::msm::msm_with_cached_bases;
@@ -125,7 +125,7 @@ where
         // Use cached GPU Lagrange bases when available
         #[cfg(feature = "gpu")]
         let result = {
-            use crate::gpu::config::should_use_gpu;
+            use midnight_bls12_381_cuda::should_use_gpu;
             
             if should_use_gpu(size) {
                 use crate::poly::kzg::msm::msm_with_cached_bases;
@@ -400,12 +400,12 @@ where
 pub fn commit_lagrange_async<E: MultiMillerLoop>(
     params: &ParamsKZG<E>,
     poly: &Polynomial<E::Fr, LagrangeCoeff>,
-) -> Result<crate::gpu::msm::MsmHandle, Error>
+) -> Result<midnight_bls12_381_cuda::msm::MsmHandle, Error>
 where
     E::G1: Default + CurveExt<ScalarExt = E::Fr> + ProcessedSerdeObject,
     E::G1Affine: Default + CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
 {
-    use crate::gpu::config::should_use_gpu;
+    use midnight_bls12_381_cuda::should_use_gpu;
     use crate::poly::kzg::msm::msm_with_cached_bases_async;
     
     #[cfg(feature = "trace-kzg")]
@@ -433,12 +433,12 @@ where
 pub fn commit_lagrange_batch_async<E: MultiMillerLoop>(
     params: &ParamsKZG<E>,
     polys: &[&Polynomial<E::Fr, LagrangeCoeff>],
-) -> Result<Vec<crate::gpu::msm::MsmHandle>, Error>
+) -> Result<Vec<midnight_bls12_381_cuda::msm::MsmHandle>, Error>
 where
     E::G1: Default + CurveExt<ScalarExt = E::Fr> + ProcessedSerdeObject,
     E::G1Affine: Default + CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
 {
-    use crate::gpu::config::should_use_gpu;
+    use midnight_bls12_381_cuda::should_use_gpu;
     use crate::poly::kzg::msm::msm_batch_async;
     
     #[cfg(feature = "trace-kzg")]

@@ -46,7 +46,7 @@ use group::prime::PrimeCurveAffine;
 use pairing_lib::{Engine, MultiMillerLoop, PairingCurveAffine};
 
 #[cfg(feature = "__private_bench")]
-pub use crate::{fp12::Fp12, fp2::Fp2};
+pub use crate::fp12::Fp12;
 
 /// Bls12-381 engine
 #[derive(Debug, Copy, Clone)]

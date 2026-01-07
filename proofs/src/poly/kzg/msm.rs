@@ -15,7 +15,7 @@ use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 #[cfg(feature = "gpu")]
 use midnight_curves::G1Affine;
 #[cfg(feature = "gpu")]
-use crate::gpu::GpuMsmContext;
+use midnight_bls12_381_cuda::GpuMsmContext;
 
 #[cfg(feature = "gpu")]
 /// Global GPU MSM context instance
@@ -329,7 +329,7 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     
     #[cfg(feature = "gpu")]
     {
-        use crate::gpu::config::should_use_gpu;
+        use midnight_bls12_381_cuda::should_use_gpu;
         
         let size = bases.len();
         
@@ -527,7 +527,7 @@ where
 pub fn msm_with_cached_bases_async<C: CurveAffine>(
     coeffs: &[C::Scalar],
     device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
-) -> Result<crate::gpu::msm::MsmHandle, crate::poly::Error> {
+) -> Result<midnight_bls12_381_cuda::msm::MsmHandle, crate::poly::Error> {
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-ASYNC] Launching async MSM with {} points", coeffs.len());
     
@@ -554,7 +554,7 @@ pub fn msm_with_cached_bases_async<C: CurveAffine>(
 pub fn msm_batch_async<C: CurveAffine>(
     coeffs_batch: &[&[C::Scalar]],
     device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
-) -> Result<Vec<crate::gpu::msm::MsmHandle>, crate::poly::Error> {
+) -> Result<Vec<midnight_bls12_381_cuda::msm::MsmHandle>, crate::poly::Error> {
     coeffs_batch.iter()
         .map(|coeffs| msm_with_cached_bases_async::<C>(coeffs, device_bases))
         .collect()

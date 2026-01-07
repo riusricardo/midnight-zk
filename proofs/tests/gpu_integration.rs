@@ -5,7 +5,7 @@
 
 #![cfg(feature = "gpu")]
 
-use midnight_proofs::gpu::GpuMsmContext;
+use midnight_bls12_381_cuda::GpuMsmContext;
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
 use ff::Field;
 use group::{Group, Curve, prime::PrimeCurveAffine};

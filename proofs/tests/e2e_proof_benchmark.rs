@@ -183,7 +183,7 @@ fn e2e_proof_benchmark() {
     
     #[cfg(feature = "gpu")]
     {
-        use midnight_proofs::gpu::is_gpu_available;
+        use midnight_bls12_381_cuda::is_gpu_available;
         println!();
         if is_gpu_available() {
             println!("✓ GPU Backend: AVAILABLE (ICICLE CUDA)");
