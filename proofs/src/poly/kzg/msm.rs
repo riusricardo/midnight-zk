@@ -543,7 +543,7 @@ pub fn msm_with_cached_bases_async<C: CurveAffine>(
     
     let ctx = get_msm_context();
     ctx.msm_with_device_bases_async(coeffs, device_bases)
-        .map_err(|e| crate::poly::Error::OpeningError)
+        .map_err(|_| crate::poly::Error::OpeningError)
 }
 
 #[cfg(feature = "gpu")]
@@ -558,4 +558,143 @@ pub fn msm_batch_async<C: CurveAffine>(
     coeffs_batch.iter()
         .map(|coeffs| msm_with_cached_bases_async::<C>(coeffs, device_bases))
         .collect()
+}
+
+// =============================================================================
+// Batch MSM Operations
+// =============================================================================
+
+#[cfg(feature = "gpu")]
+/// Compute multiple MSMs with shared bases in a single GPU kernel.
+///
+/// This is the **critical optimization** for PLONK provers: when computing
+/// polynomial commitments, multiple MSMs share the same SRS bases but use
+/// different scalar sets. This function batches them into a single kernel launch.
+///
+/// # Arguments
+///
+/// * `coeffs_batch` - Slice of coefficient slices, one per polynomial. **All must have same length.**
+/// * `device_bases` - Pre-uploaded SRS bases on GPU (shared across all MSMs)
+///
+/// # Returns
+///
+/// Vector of commitments, one per polynomial in the batch.
+///
+/// # Panics
+///
+/// Panics if type is not midnight_curves::G1Affine
+pub fn msm_batch_with_cached_bases<C: CurveAffine>(
+    coeffs_batch: &[&[C::Scalar]],
+    device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+) -> Vec<C::Curve> {
+    #[cfg(feature = "trace-msm")]
+    let start = std::time::Instant::now();
+    #[cfg(feature = "trace-msm")]
+    eprintln!(
+        "[BATCH-MSM] Starting batch of {} MSMs with {} points each",
+        coeffs_batch.len(),
+        coeffs_batch.first().map(|c| c.len()).unwrap_or(0)
+    );
+
+    if coeffs_batch.is_empty() {
+        return Vec::new();
+    }
+
+    // Verify we're using midnight_curves (BLS12-381)
+    assert!(
+        is_blst_available::<C>(),
+        "Batch MSM must use midnight_curves::G1Affine. Found: {}",
+        std::any::type_name::<C>()
+    );
+
+    // Safe: we verified the type
+    let coeffs_batch_fq: Vec<&[Fq]> = coeffs_batch
+        .iter()
+        .map(|coeffs| unsafe { &*(*coeffs as *const _ as *const [Fq]) })
+        .collect();
+
+    // Execute batch MSM
+    let ctx = get_msm_context();
+    let results = ctx
+        .msm_batch_with_device_bases(&coeffs_batch_fq, device_bases)
+        .expect("Batch MSM execution failed");
+
+    #[cfg(feature = "trace-msm")]
+    {
+        let elapsed = start.elapsed();
+        eprintln!(
+            "✓  [BATCH-MSM] {} MSMs in {:?} ({:.2}ms per MSM, single kernel)",
+            results.len(),
+            elapsed,
+            elapsed.as_secs_f64() * 1000.0 / results.len() as f64
+        );
+    }
+
+    // Convert results to generic curve type
+    results
+        .into_iter()
+        .map(|res| unsafe { std::mem::transmute_copy(&res) })
+        .collect()
+}
+
+#[cfg(feature = "gpu")]
+/// Async variant of batch MSM - launches computation without blocking.
+///
+/// Launch batch MSM asynchronously and do CPU work while GPU computes.
+pub fn msm_batch_with_cached_bases_async<C: CurveAffine>(
+    coeffs_batch: &[&[C::Scalar]],
+    device_bases: &icicle_runtime::memory::DeviceVec<icicle_bls12_381::curve::G1Affine>,
+) -> Result<BatchMsmHandleWrapper<C>, crate::poly::Error> {
+    if coeffs_batch.is_empty() {
+        return Err(crate::poly::Error::OpeningError);
+    }
+
+    assert!(
+        is_blst_available::<C>(),
+        "Async batch MSM must use midnight_curves::G1Affine"
+    );
+
+    let coeffs_batch_fq: Vec<&[Fq]> = coeffs_batch
+        .iter()
+        .map(|coeffs| unsafe { &*(*coeffs as *const _ as *const [Fq]) })
+        .collect();
+
+    let ctx = get_msm_context();
+    let handle = ctx
+        .msm_batch_with_device_bases_async(&coeffs_batch_fq, device_bases)
+        .map_err(|_| crate::poly::Error::OpeningError)?;
+
+    Ok(BatchMsmHandleWrapper {
+        handle,
+        _phantom: std::marker::PhantomData,
+    })
+}
+
+#[cfg(feature = "gpu")]
+/// Wrapper for batch MSM async handle with type safety
+#[derive(Debug)]
+pub struct BatchMsmHandleWrapper<C: CurveAffine> {
+    handle: midnight_bls12_381_cuda::BatchMsmHandle,
+    _phantom: std::marker::PhantomData<C>,
+}
+
+#[cfg(feature = "gpu")]
+impl<C: CurveAffine> BatchMsmHandleWrapper<C> {
+    /// Get the number of MSMs in this batch
+    pub fn batch_size(&self) -> usize {
+        self.handle.batch_size()
+    }
+
+    /// Wait for batch computation to complete and retrieve all results.
+    pub fn wait(self) -> Result<Vec<C::Curve>, crate::poly::Error> {
+        let results = self
+            .handle
+            .wait()
+            .map_err(|_| crate::poly::Error::OpeningError)?;
+
+        Ok(results
+            .into_iter()
+            .map(|res| unsafe { std::mem::transmute_copy(&res) })
+            .collect())
+    }
 }
