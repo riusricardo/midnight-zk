@@ -11,8 +11,6 @@ use std::sync::Arc;
 use once_cell::sync::OnceCell;
 #[cfg(feature = "gpu")]
 use icicle_runtime::memory::DeviceVec;
-#[cfg(feature = "gpu")]
-use icicle_bls12_381::curve::G1Affine as IcicleG1Affine;
 
 use crate::{
     poly::commitment::Params,
@@ -48,12 +46,12 @@ pub struct ParamsKZG<E: Engine> {
     /// Initialized lazily via `get_or_upload_gpu_bases()`.
     /// Uses Arc to survive Clone while sharing the same GPU memory.
     #[cfg(feature = "gpu")]
-    pub(crate) g_gpu: Arc<OnceCell<DeviceVec<IcicleG1Affine>>>,
+    pub(crate) g_gpu: Arc<OnceCell<midnight_bls12_381_cuda::PrecomputedBases>>,
     
     /// Cached GPU bases for Lagrange form commitments.
     /// Initialized lazily via `get_or_upload_gpu_lagrange_bases()`.
     #[cfg(feature = "gpu")]
-    pub(crate) g_lagrange_gpu: Arc<OnceCell<DeviceVec<IcicleG1Affine>>>,
+    pub(crate) g_lagrange_gpu: Arc<OnceCell<midnight_bls12_381_cuda::PrecomputedBases>>,
 }
 
 impl<E: Engine> Debug for ParamsKZG<E> {
@@ -181,13 +179,14 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// This eliminates per-MSM D2D copy + Montgomery conversion in the CUDA backend.
     /// When using these bases, set `cfg.are_bases_montgomery_form = true`.
     #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_bases(&self) -> &DeviceVec<IcicleG1Affine> {
+    pub fn get_or_upload_gpu_bases(&self) -> &midnight_bls12_381_cuda::PrecomputedBases {
         use midnight_bls12_381_cuda::TypeConverter;
         use midnight_bls12_381_cuda::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_gpu.get_or_init(|| {
             use icicle_runtime::{Device, set_device};
+            use midnight_bls12_381_cuda::PrecomputedBases;
             
             #[cfg(feature = "trace-msm")]
             eprintln!("[GPU] Uploading {} SRS bases to GPU in Montgomery form (one-time cost)...", self.g.len());
@@ -226,7 +225,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             #[cfg(feature = "trace-msm")]
             eprintln!("✓  [GPU] Bases uploaded in Montgomery form in {:?} (zero-copy MSM ready)", start.elapsed());
             
-            device_bases
+            // Wrap in PrecomputedBases (no precomputation, just normal upload)
+            PrecomputedBases::new(device_bases, icicle_points.len())
         })
     }
     
@@ -235,13 +235,14 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Same as `get_or_upload_gpu_bases()` but for Lagrange form bases.
     /// Bases are stored in Montgomery form for zero-copy MSM execution.
     #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &DeviceVec<IcicleG1Affine> {
+    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &midnight_bls12_381_cuda::PrecomputedBases {
         use midnight_bls12_381_cuda::TypeConverter;
         use midnight_bls12_381_cuda::ensure_backend_loaded;
         use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
         
         self.g_lagrange_gpu.get_or_init(|| {
             use icicle_runtime::{Device, set_device};
+            use midnight_bls12_381_cuda::PrecomputedBases;
             
             #[cfg(feature = "trace-msm")]
             eprintln!("[GPU] Uploading {} Lagrange bases to GPU in Montgomery form (one-time cost)...", self.g_lagrange.len());
@@ -277,7 +278,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             #[cfg(feature = "trace-msm")]
             eprintln!("✓  [GPU] Lagrange bases uploaded in Montgomery form in {:?} (zero-copy MSM ready)", start.elapsed());
             
-            device_bases
+            // Wrap in PrecomputedBases (no precomputation, just normal upload)
+            PrecomputedBases::new(device_bases, icicle_points.len())
         })
     }
 
