@@ -11,9 +11,11 @@
 //!
 //! # Architecture
 //!
-//! The module uses a trait-based approach where:
-//! - `Fq` (BLS12-381 scalar) gets GPU-accelerated NTT via ICICLE when the `gpu` feature is enabled
-//! - Other field types fall back to CPU FFT via `midnight_curves::fft::best_fft`
+//! The module uses the `dispatch_ntt_inplace` helper from `gpu_accel` to
+//! automatically route to GPU or CPU based on:
+//! - Field type (only `Fq` is GPU-accelerated)
+//! - Size threshold (default: 4096 elements)
+//! - GPU availability
 //!
 //! # Usage
 //!
@@ -24,19 +26,11 @@
 //! best_fft(&mut coeffs, omega, k);
 //! ifft(&mut evals, omega_inv, k, divisor);
 //! ```
-//!
-//! # GPU Selection Criteria
-//!
-//! GPU is used when:
-//! 1. The `gpu` feature is enabled
-//! 2. The field type is `Fq` (BLS12-381 scalar)
-//! 3. The size is above the threshold (default: 2^12 = 4096 elements)
-//! 4. `MIDNIGHT_DEVICE` is not set to `cpu`
 
 use ff::PrimeField;
 
 #[cfg(feature = "gpu")]
-use midnight_bls12_381_cuda::config::should_use_gpu_ntt;
+use crate::gpu_accel::dispatch_ntt_inplace;
 
 /// Perform forward FFT (coefficients -> evaluations)
 ///
@@ -48,16 +42,28 @@ use midnight_bls12_381_cuda::config::should_use_gpu_ntt;
 /// * `omega` - Primitive root of unity for the domain
 /// * `log_n` - Log2 of the domain size
 #[inline]
-pub fn best_fft<F: PrimeField>(a: &mut [F], omega: F, log_n: u32) {
-    // Try GPU path for Fq
+pub fn best_fft<F: PrimeField + 'static>(a: &mut [F], omega: F, log_n: u32) {
     #[cfg(feature = "gpu")]
     {
-        if try_gpu_fft(a, log_n, false) {
+        // Use the dispatch helper - it handles type checking and GPU/CPU routing
+        let used_gpu = dispatch_ntt_inplace(
+            a,
+            |fq_slice| {
+                midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(fq_slice)
+                    .map_err(|e| e.to_string())
+            },
+            |data| midnight_curves::fft::best_fft(data, omega, log_n),
+        );
+        
+        if used_gpu {
+            #[cfg(feature = "trace-fft")]
+            tracing::debug!("GPU forward FFT completed for size 2^{}", log_n);
             return;
         }
     }
     
-    // Fallback to CPU
+    // CPU fallback (or non-GPU build)
+    #[cfg(not(feature = "gpu"))]
     midnight_curves::fft::best_fft(a, omega, log_n);
 }
 
@@ -71,116 +77,62 @@ pub fn best_fft<F: PrimeField>(a: &mut [F], omega: F, log_n: u32) {
 /// * `log_n` - Log2 of the domain size
 /// * `divisor` - Scaling factor (typically 1/n)
 #[inline]
-pub fn ifft<F: PrimeField>(a: &mut [F], omega_inv: F, log_n: u32, divisor: F) {
-    // Try GPU path for Fq
+pub fn ifft<F: PrimeField + 'static>(a: &mut [F], omega_inv: F, log_n: u32, divisor: F) {
     #[cfg(feature = "gpu")]
     {
-        if try_gpu_ifft(a, log_n, divisor) {
+        // Use the dispatch helper for inverse NTT
+        // Note: ICICLE's inverse NTT already includes the 1/n scaling
+        let used_gpu = dispatch_ntt_inplace(
+            a,
+            |fq_slice| {
+                midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(fq_slice)
+                    .map_err(|e| e.to_string())
+            },
+            |data| {
+                // CPU path: do FFT then apply divisor
+                midnight_curves::fft::best_fft(data, omega_inv, log_n);
+                use super::arithmetic::parallelize;
+                parallelize(data, |chunk, _| {
+                    for val in chunk {
+                        *val *= &divisor;
+                    }
+                });
+            },
+        );
+        
+        if used_gpu {
+            #[cfg(feature = "trace-fft")]
+            tracing::debug!("GPU inverse FFT completed for size 2^{}", log_n);
             return;
         }
     }
     
-    // Fallback to CPU
-    midnight_curves::fft::best_fft(a, omega_inv, log_n);
-    
-    // Apply divisor
-    use super::arithmetic::parallelize;
-    parallelize(a, |a, _| {
-        for a in a {
-            *a *= &divisor;
-        }
-    });
-}
-
-/// Try to use GPU for forward FFT on Fq
-///
-/// Returns true if GPU was used, false if fallback to CPU is needed.
-#[cfg(feature = "gpu")]
-#[allow(unused_variables)]
-fn try_gpu_fft<F: PrimeField>(a: &mut [F], log_n: u32, _is_inverse: bool) -> bool {
-    use std::any::TypeId;
-    use midnight_curves::Fq;
-    
-    // Check if F is Fq (BLS12-381 scalar)
-    if TypeId::of::<F>() != TypeId::of::<Fq>() {
-        return false;
-    }
-    
-    let n = a.len();
-    
-    // Check if GPU is beneficial for this size
-    if !should_use_gpu_ntt(n) {
-        return false;
-    }
-    
-    // Transmute to Fq and use GPU NTT
-    // SAFETY: We verified F == Fq via TypeId check above
-    let fq_slice: &mut [Fq] = unsafe {
-        std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut Fq, n)
-    };
-    
-    // Use the auto-selection API which handles GPU context
-    match midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(fq_slice) {
-        Ok(()) => {
-            #[cfg(feature = "trace-fft")]
-            tracing::debug!("GPU forward FFT completed for size 2^{}", log_n);
-            true
-        }
-        Err(e) => {
-            tracing::warn!("GPU FFT failed, falling back to CPU: {:?}", e);
-            false
-        }
+    // CPU fallback (or non-GPU build)
+    #[cfg(not(feature = "gpu"))]
+    {
+        midnight_curves::fft::best_fft(a, omega_inv, log_n);
+        
+        // Apply divisor
+        use super::arithmetic::parallelize;
+        parallelize(a, |chunk, _| {
+            for val in chunk {
+                *val *= &divisor;
+            }
+        });
     }
 }
 
-/// Try to use GPU for inverse FFT on Fq
-///
-/// Returns true if GPU was used, false if fallback to CPU is needed.
-#[cfg(feature = "gpu")]
-#[allow(unused_variables)]
-fn try_gpu_ifft<F: PrimeField>(a: &mut [F], log_n: u32, _divisor: F) -> bool {
-    use std::any::TypeId;
-    use midnight_curves::Fq;
-    
-    // Check if F is Fq (BLS12-381 scalar)
-    if TypeId::of::<F>() != TypeId::of::<Fq>() {
-        return false;
-    }
-    
-    let n = a.len();
-    
-    // Check if GPU is beneficial for this size
-    if !should_use_gpu_ntt(n) {
-        return false;
-    }
-    
-    // Transmute to Fq and use GPU NTT
-    // SAFETY: We verified F == Fq via TypeId check above
-    let fq_slice: &mut [Fq] = unsafe {
-        std::slice::from_raw_parts_mut(a.as_mut_ptr() as *mut Fq, n)
-    };
-    
-    // Use the auto-selection API which handles GPU context
-    // Note: ICICLE's inverse NTT already includes the 1/n scaling
-    match midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(fq_slice) {
-        Ok(()) => {
-            #[cfg(feature = "trace-fft")]
-            tracing::debug!("GPU inverse FFT completed for size 2^{}", log_n);
-            true
-        }
-        Err(e) => {
-            tracing::warn!("GPU IFFT failed, falling back to CPU: {:?}", e);
-            false
-        }
-    }
-}
-
-/// Check if GPU FFT is available for the current configuration
+/// Check if GPU FFT is available for the current configuration.
+/// 
+/// Returns `true` if the GPU feature is enabled and GPU hardware is detected.
 #[cfg(feature = "gpu")]
 pub fn gpu_fft_available() -> bool {
     midnight_bls12_381_cuda::is_gpu_available()
 }
 
+/// Check if GPU FFT is available for the current configuration.
+/// 
+/// Returns `false` when compiled without GPU support.
 #[cfg(not(feature = "gpu"))]
 pub fn gpu_fft_available() -> bool {
     false

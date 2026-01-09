@@ -19,6 +19,7 @@ Cargo.lock
 # External repositories (GPU/CUDA dependencies)
 blst_repo/
 icicle_repo/
+circuits/examples/assets
 
 # GPU/CUDA build artifacts
 *.so

@@ -9,8 +9,14 @@ use rand_core::RngCore;
 use std::sync::Arc;
 #[cfg(feature = "gpu")]
 use once_cell::sync::OnceCell;
+
+// GPU types via bridge module (single import point)
 #[cfg(feature = "gpu")]
-use icicle_runtime::memory::DeviceVec;
+use crate::gpu_accel::{
+    PrecomputedBases, TypeConverter, DeviceVec, HostSlice, IcicleStream,
+    IcicleDevice, icicle_set_device, ensure_backend_loaded,
+    should_use_gpu, should_use_gpu_batch,
+};
 
 use crate::{
     poly::commitment::Params,
@@ -46,12 +52,12 @@ pub struct ParamsKZG<E: Engine> {
     /// Initialized lazily via `get_or_upload_gpu_bases()`.
     /// Uses Arc to survive Clone while sharing the same GPU memory.
     #[cfg(feature = "gpu")]
-    pub(crate) g_gpu: Arc<OnceCell<midnight_bls12_381_cuda::PrecomputedBases>>,
+    pub(crate) g_gpu: Arc<OnceCell<PrecomputedBases>>,
     
     /// Cached GPU bases for Lagrange form commitments.
     /// Initialized lazily via `get_or_upload_gpu_lagrange_bases()`.
     #[cfg(feature = "gpu")]
-    pub(crate) g_lagrange_gpu: Arc<OnceCell<midnight_bls12_381_cuda::PrecomputedBases>>,
+    pub(crate) g_lagrange_gpu: Arc<OnceCell<PrecomputedBases>>,
 }
 
 impl<E: Engine> Debug for ParamsKZG<E> {
@@ -179,15 +185,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// This eliminates per-MSM D2D copy + Montgomery conversion in the CUDA backend.
     /// When using these bases, set `cfg.are_bases_montgomery_form = true`.
     #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_bases(&self) -> &midnight_bls12_381_cuda::PrecomputedBases {
-        use midnight_bls12_381_cuda::TypeConverter;
-        use midnight_bls12_381_cuda::ensure_backend_loaded;
-        use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
-        
+    pub fn get_or_upload_gpu_bases(&self) -> &PrecomputedBases {
         self.g_gpu.get_or_init(|| {
-            use icicle_runtime::{Device, set_device};
-            use midnight_bls12_381_cuda::PrecomputedBases;
-            
             #[cfg(feature = "trace-msm")]
             eprintln!("[GPU] Uploading {} SRS bases to GPU in Montgomery form (one-time cost)...", self.g.len());
             
@@ -199,8 +198,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             
             // CRITICAL: Set device before allocating GPU memory
             // This is needed because get_or_init() might be called from different thread contexts
-            let device = Device::new("CUDA", 0);
-            set_device(&device).expect("Failed to set GPU device");
+            let device = IcicleDevice::new("CUDA", 0);
+            icicle_set_device(&device).expect("Failed to set GPU device");
             
             // Convert G1Projective to G1Affine
             let mut bases_affine = vec![E::G1Affine::identity(); self.g.len()];
@@ -235,15 +234,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Same as `get_or_upload_gpu_bases()` but for Lagrange form bases.
     /// Bases are stored in Montgomery form for zero-copy MSM execution.
     #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &midnight_bls12_381_cuda::PrecomputedBases {
-        use midnight_bls12_381_cuda::TypeConverter;
-        use midnight_bls12_381_cuda::ensure_backend_loaded;
-        use icicle_runtime::{stream::IcicleStream, memory::HostSlice};
-        
+    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &PrecomputedBases {
         self.g_lagrange_gpu.get_or_init(|| {
-            use icicle_runtime::{Device, set_device};
-            use midnight_bls12_381_cuda::PrecomputedBases;
-            
             #[cfg(feature = "trace-msm")]
             eprintln!("[GPU] Uploading {} Lagrange bases to GPU in Montgomery form (one-time cost)...", self.g_lagrange.len());
             
@@ -254,8 +246,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             ensure_backend_loaded().expect("Failed to load ICICLE backend");
             
             // CRITICAL: Set device before allocating GPU memory
-            let device = Device::new("CUDA", 0);
-            set_device(&device).expect("Failed to set GPU device");
+            let device = IcicleDevice::new("CUDA", 0);
+            icicle_set_device(&device).expect("Failed to set GPU device");
             
             // Convert G1Projective to G1Affine
             let mut bases_affine = vec![E::G1Affine::identity(); self.g_lagrange.len()];
@@ -297,7 +289,6 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use midnight_bls12_381_cuda::{should_use_gpu, should_use_gpu_batch};
         use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
         
         if polys.is_empty() {

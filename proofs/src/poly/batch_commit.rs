@@ -5,6 +5,10 @@
 //! the GPU feature is enabled, multiple commits are launched asynchronously to
 //! overlap GPU computation with memory transfers.
 //!
+//! # Usage
+//!
+//! The module uses the type-safe dispatch helpers from `gpu_accel` to automatically
+//! route to GPU or CPU based on type and size.
 //!
 //! # Example
 //!
@@ -21,6 +25,15 @@
 use ff::PrimeField;
 use crate::poly::{LagrangeCoeff, Polynomial};
 use crate::poly::commitment::PolynomialCommitmentScheme;
+
+#[cfg(feature = "gpu")]
+use std::mem::{size_of, align_of};
+#[cfg(feature = "gpu")]
+use crate::gpu_accel::should_use_gpu_batch;
+#[cfg(feature = "gpu")]
+use crate::poly::kzg::params::ParamsKZG;
+#[cfg(feature = "gpu")]
+use midnight_curves::{Bls12, Fq};
 
 /// Batch commit multiple Lagrange polynomials with GPU pipelining when available.
 ///
@@ -54,11 +67,7 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use std::any::TypeId;
-    use std::mem::{size_of, align_of};
-    use crate::poly::kzg::params::ParamsKZG;
-    use midnight_bls12_381_cuda::should_use_gpu_batch;
-    use midnight_curves::{Bls12, Fq};
+    use crate::gpu_accel::is_fq;
     
     if polys.is_empty() {
         return vec![];
@@ -76,10 +85,10 @@ where
     let gpu_beneficial = should_use_gpu_batch(individual_size, batch_count);
     
     // Use size_of/align_of checks for Parameters (to avoid 'static bound requirement)
-    // and TypeId for F (which has 'static bound from PrimeField)
+    // and is_fq helper for F (cleaner than manual TypeId)
     let params_match = size_of::<CS::Parameters>() == size_of::<ParamsKZG<Bls12>>()
         && align_of::<CS::Parameters>() == align_of::<ParamsKZG<Bls12>>();
-    let field_match = TypeId::of::<F>() == TypeId::of::<Fq>();
+    let field_match = is_fq::<F>();
     
     if gpu_beneficial && params_match && field_match {
         #[cfg(feature = "trace-kzg")]
@@ -88,7 +97,7 @@ where
         // SAFETY: We just verified both types match at runtime via TypeId checks.
         // This is safe because:
         // 1. size_of/align_of check guarantees CS::Parameters is ParamsKZG<Bls12>
-        // 2. TypeId check guarantees F is midnight_curves::Fq
+        // 2. is_fq check guarantees F is midnight_curves::Fq
         // 3. Polynomial<F, L> and Polynomial<Fq, L> have identical memory layout
         //    (both are Vec<F> where F has same size and alignment)
         unsafe {
@@ -144,11 +153,7 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use std::any::TypeId;
-    use std::mem::{size_of, align_of};
-    use crate::poly::kzg::params::ParamsKZG;
-    use midnight_bls12_381_cuda::should_use_gpu_batch;
-    use midnight_curves::{Bls12, Fq};
+    use crate::gpu_accel::is_fq;
     
     if polys.is_empty() {
         return vec![];
@@ -165,11 +170,10 @@ where
     let batch_count = polys.len();
     let gpu_beneficial = should_use_gpu_batch(individual_size, batch_count);
     
-    // Use size_of/align_of checks for Parameters (to avoid 'static bound requirement)
-    // and TypeId for F (which has 'static bound from PrimeField)
+    // Use size_of/align_of checks for Parameters and is_fq for field
     let params_match = size_of::<CS::Parameters>() == size_of::<ParamsKZG<Bls12>>()
         && align_of::<CS::Parameters>() == align_of::<ParamsKZG<Bls12>>();
-    let field_match = TypeId::of::<F>() == TypeId::of::<Fq>();
+    let field_match = is_fq::<F>();
     
     if gpu_beneficial && params_match && field_match {
         #[cfg(feature = "trace-kzg")]

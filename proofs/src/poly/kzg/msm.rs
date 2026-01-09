@@ -1,4 +1,4 @@
-use std::{any::TypeId, fmt::Debug};
+use std::fmt::Debug;
 
 #[cfg(feature = "gpu")]
 use std::sync::OnceLock;
@@ -13,8 +13,13 @@ use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
 #[cfg(feature = "gpu")]
 use midnight_curves::G1Affine;
+
+// GPU types via bridge module (single import point)
 #[cfg(feature = "gpu")]
-use midnight_bls12_381_cuda::GpuMsmContext;
+use crate::gpu_accel::{
+    GpuMsmContext, PrecomputedBases, MsmHandle, should_use_gpu,
+    is_g1_affine, try_as_fq_slice, projective_to_curve,
+};
 
 #[cfg(feature = "gpu")]
 /// Global GPU MSM context instance
@@ -25,7 +30,7 @@ static GLOBAL_MSM_CONTEXT: OnceLock<GpuMsmContext> = OnceLock::new();
 
 #[cfg(feature = "gpu")]
 /// Get or initialize the global GPU MSM context
-fn get_msm_context() -> &'static GpuMsmContext {
+pub fn get_msm_context() -> &'static GpuMsmContext {
     GLOBAL_MSM_CONTEXT.get_or_init(|| {
         #[cfg(feature = "trace-msm")]
         eprintln!("[MSM] Initializing global GPU MSM context (lazy)");
@@ -190,8 +195,15 @@ where
 /// This should always return true for midnight_curves::G1Affine (BLS12-381).
 /// If this returns false, the code will panic in msm_specific().
 #[inline]
-pub fn is_blst_available<C: CurveAffine>() -> bool {
-    TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
+pub fn is_blst_available<C: CurveAffine + 'static>() -> bool {
+    // Use the dispatch helper for cleaner type checking
+    #[cfg(feature = "gpu")]
+    { is_g1_affine::<C>() }
+    #[cfg(not(feature = "gpu"))]
+    {
+        use std::any::TypeId;
+        TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
+    }
 }
 
 #[cfg(feature = "gpu")]
@@ -206,38 +218,35 @@ pub fn is_blst_available<C: CurveAffine>() -> bool {
 /// 
 /// # Panics
 /// Panics if type is not midnight_curves::G1Affine
-pub fn msm_with_cached_bases<C: CurveAffine>(
+pub fn msm_with_cached_bases<C: CurveAffine + 'static>(
     coeffs: &[C::Scalar],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> C::Curve {
+    device_bases: &PrecomputedBases,
+) -> C::Curve
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-CACHED] Starting with {} points (using pre-uploaded GPU bases)", coeffs.len());
     
-    // Verify we're using midnight_curves (BLS12-381)
-    assert!(
-        is_blst_available::<C>(),
-        "MSM must use midnight_curves::G1Affine. Found: {}",
-        std::any::type_name::<C>()
-    );
-    
-    // Safe: we just verified the type
-    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+    // Verify we're using midnight_curves (BLS12-381) and convert coefficients
+    let fq_coeffs = try_as_fq_slice(coeffs)
+        .expect("MSM must use midnight_curves::G1Affine (BLS12-381)");
     
     // Launch async MSM (enables better CUDA stream pipelining)
     #[cfg(feature = "trace-msm")]
     eprintln!("   [MSM-CACHED] Launching async MSM (non-blocking)");
     
     let ctx = get_msm_context();
-    let handle = ctx.msm_with_device_bases_async(coeffs, device_bases)
+    let handle = ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
         .expect("Async MSM launch failed");
     
     // CPU could do other work here while GPU uploads and computes
     
     let res = handle.wait()
         .expect("Async MSM wait failed");
-    let result = unsafe { std::mem::transmute_copy(&res) };
+    let result = projective_to_curve::<C>(res);
     
     #[cfg(feature = "trace-msm")]
     {
@@ -333,8 +342,6 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     
     #[cfg(feature = "gpu")]
     {
-        use midnight_bls12_381_cuda::should_use_gpu;
-        
         let size = bases.len();
         
         // Check if GPU should be used (respects MIDNIGHT_DEVICE and size threshold)
@@ -528,25 +535,22 @@ where
 ///     .map(|h| h.wait())
 ///     .collect::<Result<_, _>>()?;
 /// ```
-pub fn msm_with_cached_bases_async<C: CurveAffine>(
+pub fn msm_with_cached_bases_async<C: CurveAffine + 'static>(
     coeffs: &[C::Scalar],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> Result<midnight_bls12_381_cuda::msm::MsmHandle, crate::poly::Error> {
+    device_bases: &PrecomputedBases,
+) -> Result<MsmHandle, crate::poly::Error>
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-ASYNC] Launching async MSM with {} points", coeffs.len());
     
-    // Verify we're using midnight_curves (BLS12-381)
-    assert!(
-        is_blst_available::<C>(),
-        "MSM must use midnight_curves::G1Affine. Found: {}",
-        std::any::type_name::<C>()
-    );
-    
-    // Safe: we just verified the type
-    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+    // Use dispatch helper for type-safe conversion
+    let fq_coeffs = try_as_fq_slice(coeffs)
+        .expect("MSM must use midnight_curves::G1Affine (BLS12-381)");
     
     let ctx = get_msm_context();
-    ctx.msm_with_device_bases_async(coeffs, device_bases)
+    ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
         .map_err(|_| crate::poly::Error::OpeningError)
 }
 
@@ -557,8 +561,8 @@ pub fn msm_with_cached_bases_async<C: CurveAffine>(
 /// it minimizes launch overhead and enables better GPU pipelining.
 pub fn msm_batch_async<C: CurveAffine>(
     coeffs_batch: &[&[C::Scalar]],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> Result<Vec<midnight_bls12_381_cuda::msm::MsmHandle>, crate::poly::Error> {
+    device_bases: &PrecomputedBases,
+) -> Result<Vec<MsmHandle>, crate::poly::Error> {
     coeffs_batch.iter()
         .map(|coeffs| msm_with_cached_bases_async::<C>(coeffs, device_bases))
         .collect()
@@ -587,10 +591,13 @@ pub fn msm_batch_async<C: CurveAffine>(
 /// # Panics
 ///
 /// Panics if type is not midnight_curves::G1Affine
-pub fn msm_batch_with_cached_bases<C: CurveAffine>(
+pub fn msm_batch_with_cached_bases<C: CurveAffine + 'static>(
     coeffs_batch: &[&[C::Scalar]],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> Vec<C::Curve> {
+    device_bases: &PrecomputedBases,
+) -> Vec<C::Curve>
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
@@ -604,17 +611,11 @@ pub fn msm_batch_with_cached_bases<C: CurveAffine>(
         return Vec::new();
     }
 
-    // Verify we're using midnight_curves (BLS12-381)
-    assert!(
-        is_blst_available::<C>(),
-        "Batch MSM must use midnight_curves::G1Affine. Found: {}",
-        std::any::type_name::<C>()
-    );
-
-    // Safe: we verified the type
+    // Use dispatch helper for type-safe conversion of all batches
     let coeffs_batch_fq: Vec<&[Fq]> = coeffs_batch
         .iter()
-        .map(|coeffs| unsafe { &*(*coeffs as *const _ as *const [Fq]) })
+        .map(|coeffs| try_as_fq_slice(coeffs)
+            .expect("Batch MSM must use midnight_curves::G1Affine (BLS12-381)"))
         .collect();
 
     // Execute batch MSM
@@ -634,10 +635,10 @@ pub fn msm_batch_with_cached_bases<C: CurveAffine>(
         );
     }
 
-    // Convert results to generic curve type
+    // Convert results to generic curve type using dispatch helper
     results
         .into_iter()
-        .map(|res| unsafe { std::mem::transmute_copy(&res) })
+        .map(|res| projective_to_curve::<C>(res))
         .collect()
 }
 
@@ -645,22 +646,22 @@ pub fn msm_batch_with_cached_bases<C: CurveAffine>(
 /// Async variant of batch MSM - launches computation without blocking.
 ///
 /// Launch batch MSM asynchronously and do CPU work while GPU computes.
-pub fn msm_batch_with_cached_bases_async<C: CurveAffine>(
+pub fn msm_batch_with_cached_bases_async<C: CurveAffine + 'static>(
     coeffs_batch: &[&[C::Scalar]],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> Result<BatchMsmHandleWrapper<C>, crate::poly::Error> {
+    device_bases: &PrecomputedBases,
+) -> Result<BatchMsmHandleWrapper<C>, crate::poly::Error>
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
     if coeffs_batch.is_empty() {
         return Err(crate::poly::Error::OpeningError);
     }
 
-    assert!(
-        is_blst_available::<C>(),
-        "Async batch MSM must use midnight_curves::G1Affine"
-    );
-
+    // Use dispatch helper for type-safe conversion
     let coeffs_batch_fq: Vec<&[Fq]> = coeffs_batch
         .iter()
-        .map(|coeffs| unsafe { &*(*coeffs as *const _ as *const [Fq]) })
+        .map(|coeffs| try_as_fq_slice(coeffs)
+            .expect("Async batch MSM must use midnight_curves::G1Affine"))
         .collect();
 
     let ctx = get_msm_context();
@@ -678,12 +679,12 @@ pub fn msm_batch_with_cached_bases_async<C: CurveAffine>(
 /// Wrapper for batch MSM async handle with type safety
 #[derive(Debug)]
 pub struct BatchMsmHandleWrapper<C: CurveAffine> {
-    handle: midnight_bls12_381_cuda::BatchMsmHandle,
+    handle: crate::gpu_accel::BatchMsmHandle,
     _phantom: std::marker::PhantomData<C>,
 }
 
 #[cfg(feature = "gpu")]
-impl<C: CurveAffine> BatchMsmHandleWrapper<C> {
+impl<C: CurveAffine + 'static> BatchMsmHandleWrapper<C> {
     /// Get the number of MSMs in this batch
     pub fn batch_size(&self) -> usize {
         self.handle.batch_size()
@@ -696,9 +697,10 @@ impl<C: CurveAffine> BatchMsmHandleWrapper<C> {
             .wait()
             .map_err(|_| crate::poly::Error::OpeningError)?;
 
+        // Use dispatch helper for type-safe conversion
         Ok(results
             .into_iter()
-            .map(|res| unsafe { std::mem::transmute_copy(&res) })
+            .map(|res| projective_to_curve::<C>(res))
             .collect())
     }
 }
@@ -742,10 +744,13 @@ impl<C: CurveAffine> BatchMsmHandleWrapper<C> {
 ///
 /// let commitments = msm_batch_pipelined::<G1Affine>(&poly_coeffs, &device_bases);
 /// ```
-pub fn msm_batch_pipelined<C: CurveAffine>(
+pub fn msm_batch_pipelined<C: CurveAffine + 'static>(
     coeffs_batch: &[&[C::Scalar]],
-    device_bases: &midnight_bls12_381_cuda::PrecomputedBases,
-) -> Vec<C::Curve> {
+    device_bases: &PrecomputedBases,
+) -> Vec<C::Curve>
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
     if coeffs_batch.is_empty() {
         return Vec::new();
     }
@@ -755,19 +760,14 @@ pub fn msm_batch_pipelined<C: CurveAffine>(
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-PIPELINE] Launching {} MSMs asynchronously", coeffs_batch.len());
 
-    // Verify type
-    assert!(
-        is_blst_available::<C>(),
-        "Pipelined MSM must use midnight_curves::G1Affine"
-    );
-
-    // Launch all MSMs without waiting
+    // Launch all MSMs without waiting, using dispatch helper for conversion
     let handles: Vec<_> = coeffs_batch
         .iter()
         .map(|coeffs| {
-            let coeffs_fq = unsafe { &*(*coeffs as *const _ as *const [Fq]) };
+            let fq_coeffs = try_as_fq_slice(coeffs)
+                .expect("Pipelined MSM must use midnight_curves::G1Affine");
             let ctx = get_msm_context();
-            ctx.msm_with_device_bases_async(coeffs_fq, device_bases)
+            ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
                 .expect("Failed to launch async MSM")
         })
         .collect();
@@ -778,12 +778,12 @@ pub fn msm_batch_pipelined<C: CurveAffine>(
     // CPU can do work here while GPU computes all MSMs
     // Example: prepare proof metadata, next phase setup, etc.
 
-    // Wait for all results
+    // Wait for all results, using dispatch helper for conversion
     let results: Vec<C::Curve> = handles
         .into_iter()
         .map(|handle| {
             let res = handle.wait().expect("Failed to wait on async MSM");
-            unsafe { std::mem::transmute_copy(&res) }
+            projective_to_curve::<C>(res)
         })
         .collect();
 

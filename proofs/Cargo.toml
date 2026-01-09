@@ -49,13 +49,13 @@ criterion = { version = "0.7", optional = true }
 tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 num-bigint = { workspace = true }
 
-# GPU acceleration via external crate
+# GPU acceleration via external crate (all GPU code flows through this)
+# ICICLE dependencies come transitively through midnight-bls12-381-cuda
 midnight-bls12-381-cuda = { path = "../bls12-381-cuda-backend", optional = true }
 
-# GPU acceleration dependencies (optional)
+# Direct ICICLE dependencies for params.rs base uploads
+# These are needed because we re-export ICICLE types through gpu_bridge
 icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", optional = true }
-icicle-core = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", optional = true }
-icicle-bls12-381 = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", features = ["msm", "g2"], optional = true }
 once_cell = { version = "1.20", optional = true }
 
 # Compile-time assertions for memory layout verification
@@ -110,7 +110,8 @@ trace-kzg = []        # Trace KZG commitment operations
 trace-all = ["trace-msm", "trace-fft", "trace-phases", "trace-kzg"]
 
 # GPU acceleration features
-gpu = ["midnight-bls12-381-cuda/gpu", "icicle-runtime", "icicle-core", "icicle-bls12-381", "once_cell"]
+# All GPU code flows through gpu_bridge module and midnight-bls12-381-cuda crate
+gpu = ["midnight-bls12-381-cuda/gpu", "icicle-runtime", "once_cell"]
 gpu-cuda = ["gpu"]    # Future: separate CUDA backend
 
 [lib]
