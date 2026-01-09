@@ -116,14 +116,15 @@ gpu-cuda = ["gpu"]    # Future: separate CUDA backend
 [lib]
 bench = false
 
-[[example]]
-name = "gpu_benchmark"
-required-features = ["gpu"]
+# Temporarily commented out - examples removed
+# [[example]]
+# name = "gpu_benchmark"
+# required-features = ["gpu"]
 
-[[example]]
-name = "gpu_init"
-required-features = ["gpu"]
+# [[example]]
+# name = "gpu_init"
+# required-features = ["gpu"]
 
-[[example]]
-name = "plonk_msm_benchmark"
-required-features = ["gpu"]
+# [[example]]
+# name = "plonk_msm_benchmark"
+# required-features = ["gpu"]
