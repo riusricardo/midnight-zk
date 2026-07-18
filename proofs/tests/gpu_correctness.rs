@@ -166,6 +166,57 @@ fn gpu_downsize_invalidates_base_cache() {
     assert_eq!(gpu_c, cpu_c, "downsized GPU commit != BLST (stale cache?)");
 }
 
+/// Batch domain transforms must equal their per-polynomial counterparts
+/// element-wise (they share the GPU batch path, which the prover doesn't use
+/// yet — this keeps the API honest until device residency makes it pay).
+#[test]
+fn gpu_domain_batch_transforms_match_singles() {
+    if !gpu_present() {
+        return;
+    }
+    let k = 13u32;
+    let n = 1usize << k;
+    let b = 4usize;
+    let domain = EvaluationDomain::<Fq>::new(2, k);
+    let mut rng = ChaCha8Rng::seed_from_u64(99);
+
+    let lagrange_polys: Vec<_> = (0..b)
+        .map(|_| {
+            let mut p = domain.empty_lagrange();
+            for v in p.iter_mut() {
+                *v = Fq::random(&mut rng);
+            }
+            p
+        })
+        .collect();
+
+    let singles: Vec<_> = lagrange_polys
+        .iter()
+        .map(|p| domain.lagrange_to_coeff(p.clone()))
+        .collect();
+    let batched = domain.lagrange_to_coeff_batch(lagrange_polys);
+    for (i, (s, bt)) in singles.iter().zip(batched.iter()).enumerate() {
+        assert_eq!(s.len(), n);
+        assert!(
+            s.iter().zip(bt.iter()).all(|(a, b)| a == b),
+            "lagrange_to_coeff_batch differs from singles at poly {i}"
+        );
+    }
+
+    let ext_singles: Vec<_> = singles
+        .iter()
+        .map(|p| domain.coeff_to_extended(p.clone()))
+        .collect();
+    let ext_batched = domain.coeff_to_extended_batch(&singles);
+    for (i, (s, bt)) in ext_singles.iter().zip(ext_batched.iter()).enumerate() {
+        assert!(
+            s.iter().zip(bt.iter()).all(|(a, b)| a == b) && s.len() == bt.len(),
+            "coeff_to_extended_batch differs from singles at poly {i}"
+        );
+    }
+    println!("✓ domain batch transforms == singles (b={b} × 2^{k})");
+}
+
 // =============================================================================
 // End-to-end: a full GPU-accelerated proof must VERIFY (the ultimate GATE-0 gate).
 // =============================================================================
@@ -304,5 +355,82 @@ mod e2e {
             return;
         }
         prove_and_verify(18);
+    }
+
+    /// Proof-level timing: keygen / prove / verify per K, proof always verified.
+    /// Deliberately NOT gated on `gpu_present()` — pointing `ICICLE_BACKEND_INSTALL_DIR`
+    /// at a nonexistent dir is the pure-CPU arm of the comparison.
+    ///
+    ///   E2E_BENCH_KS=12,14,16 ICICLE_BACKEND_INSTALL_DIR=... \
+    ///     cargo test --test gpu_correctness --features gpu --release -- \
+    ///     e2e::gpu_e2e_proof_benchmark --ignored --nocapture
+    #[test]
+    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
+    fn gpu_e2e_proof_benchmark() {
+        use std::time::Instant;
+
+        let ks: Vec<u32> = std::env::var("E2E_BENCH_KS")
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().parse().expect("bad E2E_BENCH_KS"))
+                    .collect()
+            })
+            .unwrap_or_else(|_| vec![12, 14, 16]);
+
+        println!(
+            "\ngpu={} backend_dir={}",
+            midnight_bls12_381_cuda::is_gpu_available(),
+            std::env::var("ICICLE_BACKEND_INSTALL_DIR").unwrap_or_else(|_| "<default>".into()),
+        );
+        println!(
+            "{:>4} {:>12} {:>12} {:>12}",
+            "K", "keygen(ms)", "prove(ms)", "verify(ms)"
+        );
+
+        for k in ks {
+            let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
+            let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
+            let circuit = DomainFillingCircuit { k, fill_ratio: 0.5 };
+
+            let t = Instant::now();
+            let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)
+                .expect("keygen_vk");
+            let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
+            let keygen_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            let t = Instant::now();
+            let mut transcript = CircuitTranscript::<Blake2bState>::init();
+            create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
+                &params,
+                &pk,
+                &[circuit],
+                #[cfg(feature = "committed-instances")]
+                0,
+                &[&[]],
+                &mut rng,
+                &mut transcript,
+            )
+            .expect("create_proof");
+            let proof = transcript.finalize();
+            let prove_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            let t = Instant::now();
+            let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(&proof);
+            let guard = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
+                pk.get_vk(),
+                #[cfg(feature = "committed-instances")]
+                &[&[]],
+                &[&[]],
+                &mut vt,
+            )
+            .expect("prepare");
+            assert!(
+                guard.verify(&params.verifier_params()).is_ok(),
+                "proof failed to verify at k={k}"
+            );
+            let verify_ms = t.elapsed().as_secs_f64() * 1e3;
+
+            println!("{k:>4} {keygen_ms:>12.1} {prove_ms:>12.1} {verify_ms:>12.1}");
+        }
     }
 }

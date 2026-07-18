@@ -433,3 +433,71 @@ fn profile_msm_single() {
     println!("MSM completed in {:?}", elapsed);
     println!("Result (first bytes): {:?}", &format!("{:?}", result)[..80]);
 }
+
+/// Single-call batch MSM (config.batch_size > 1) must equal per-poly singles
+/// and BLST — exercises the backend's batch loop over shared bases, which
+/// previously computed only member 0 and returned uninitialized memory for
+/// the rest (config.batch_size was silently ignored). Covers factor 1 and 8,
+/// sync and async.
+#[test]
+fn gpu_msm_batch_matches_singles() {
+    if !midnight_bls12_381_cuda::is_gpu_available() {
+        eprintln!("[skip] no GPU");
+        return;
+    }
+    let k = 13u32;
+    let n = 1usize << k;
+    let b = 5usize;
+    let mut rng = ChaCha8Rng::seed_from_u64(4242);
+
+    let points_proj: Vec<G1Projective> = (0..n).map(|_| G1Projective::random(&mut rng)).collect();
+    let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
+    let scalar_sets: Vec<Vec<Scalar>> = (0..b)
+        .map(|_| (0..n).map(|_| Scalar::random(&mut rng)).collect())
+        .collect();
+    let expected: Vec<G1Projective> = scalar_sets
+        .iter()
+        .map(|s| G1Projective::multi_exp(&points_proj, s))
+        .collect();
+
+    let ctx = GpuMsmContext::new().expect("ctx");
+    let _ = ctx.warmup();
+
+    for factor in [1u32, 8] {
+        let device_bases = if factor == 1 {
+            ctx.upload_g1_bases(&points).expect("upload")
+        } else {
+            ctx.precompute_bases(&points, factor as i32).expect("precompute")
+        };
+
+        let refs: Vec<&[Scalar]> = scalar_sets.iter().map(|s| s.as_slice()).collect();
+
+        // Sync single-call batch
+        let batch_res = ctx
+            .msm_batch_with_device_bases(&refs, &device_bases)
+            .expect("batch msm");
+        assert_eq!(batch_res.len(), b);
+        for (i, (got, want)) in batch_res.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "sync batch member {i} differs (factor {factor})");
+        }
+
+        // Async single-call batch
+        let handle = ctx
+            .msm_batch_with_device_bases_async(&refs, &device_bases)
+            .expect("async batch launch");
+        let async_res = handle.wait().expect("async batch wait");
+        for (i, (got, want)) in async_res.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(got, want, "async batch member {i} differs (factor {factor})");
+        }
+
+        // Per-member async singles (the path commit_lagrange_batch uses)
+        for (i, s) in scalar_sets.iter().enumerate() {
+            let h = ctx
+                .msm_with_device_bases_async(s, &device_bases)
+                .expect("async single launch");
+            let r = h.wait().expect("async single wait");
+            assert_eq!(r, expected[i], "async single {i} differs (factor {factor})");
+        }
+        println!("✓ batch == singles == blst (b={b} × 2^{k}, factor {factor}, sync+async)");
+    }
+}

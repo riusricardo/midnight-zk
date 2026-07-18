@@ -235,6 +235,42 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
         }
     }
 
+    /// Batch variant of [`Self::lagrange_to_coeff`]: transforms all polynomials
+    /// with a single (GPU grid-batched, when beneficial) inverse NTT instead of
+    /// one launch+sync round-trip per polynomial.
+    ///
+    /// MEASURED (2026-07-18, RTX 5060): at the proof level this is a WASH vs the
+    /// per-polynomial loop — the polynomials live in separate allocations, so
+    /// batching pays a host gather + split-out that cancels the launch-overhead
+    /// savings. Not used by the prover until buffers are device-resident/pinned.
+    pub fn lagrange_to_coeff_batch(
+        &self,
+        polys: Vec<Polynomial<F, LagrangeCoeff>>,
+    ) -> Vec<Polynomial<F, Coeff>> {
+        let n = 1usize << self.k;
+        if polys.len() < 2 {
+            return polys.into_iter().map(|p| self.lagrange_to_coeff(p)).collect();
+        }
+        let mut buf: Vec<F> = Vec::with_capacity(polys.len() * n);
+        for p in &polys {
+            assert_eq!(p.values.len(), n);
+            buf.extend_from_slice(&p.values);
+        }
+        crate::utils::fft::ifft_batch(&mut buf, n, self.omega_inv, self.k, self.ifft_divisor);
+        // Reuse the input allocations for the outputs.
+        polys
+            .into_iter()
+            .zip(buf.chunks_exact(n))
+            .map(|(mut p, chunk)| {
+                p.values.copy_from_slice(chunk);
+                Polynomial {
+                    values: p.values,
+                    _marker: PhantomData,
+                }
+            })
+            .collect()
+    }
+
     /// This takes us from an n-length coefficient vector into the
     /// lagrange evaluation domain.
     pub fn coeff_to_lagrange(&self, mut a: Polynomial<F, Coeff>) -> Polynomial<F, LagrangeCoeff> {
@@ -264,6 +300,40 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
             values: a.values,
             _marker: PhantomData,
         }
+    }
+
+    /// Batch variant of [`Self::coeff_to_extended`]: moves all polynomials into
+    /// the coset and runs ONE (GPU grid-batched, when beneficial) forward NTT at
+    /// the extended size instead of one launch+sync round-trip per polynomial.
+    ///
+    /// MEASURED (2026-07-18, RTX 5060): at the proof level this REGRESSES vs the
+    /// per-polynomial loop (K16 proof ~185→~225 ms) — the extended-size gather
+    /// buffer (zero-init + gather + split-out, e.g. 8×2^18×32B = 64 MB) costs
+    /// more host traffic than the batched kernels save. Not used by the prover
+    /// until buffers are device-resident/pinned.
+    pub fn coeff_to_extended_batch(
+        &self,
+        polys: &[Polynomial<F, Coeff>],
+    ) -> Vec<Polynomial<F, ExtendedLagrangeCoeff>> {
+        let n = 1usize << self.k;
+        let ext = self.extended_len();
+        if polys.len() < 2 {
+            return polys.iter().map(|p| self.coeff_to_extended(p.clone())).collect();
+        }
+        let mut buf = vec![F::ZERO; polys.len() * ext];
+        for (i, p) in polys.iter().enumerate() {
+            assert_eq!(p.values.len(), n);
+            let dst = &mut buf[i * ext..i * ext + n];
+            dst.copy_from_slice(&p.values);
+            self.distribute_powers_zeta(dst, true);
+        }
+        crate::utils::fft::best_fft_batch(&mut buf, ext, self.extended_omega, self.extended_k);
+        buf.chunks_exact(ext)
+            .map(|chunk| Polynomial {
+                values: chunk.to_vec(),
+                _marker: PhantomData,
+            })
+            .collect()
     }
 
     /// This takes us from the extended evaluation domain and gets us the

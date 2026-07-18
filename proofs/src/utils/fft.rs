@@ -122,8 +122,75 @@ pub fn ifft<F: PrimeField + 'static>(a: &mut [F], omega_inv: F, log_n: u32, divi
     }
 }
 
+/// Forward FFT over a batch of same-size polynomials stored contiguously
+/// (`batch.len() = batch_count * poly_size`).
+///
+/// On the GPU path all polynomials go up in ONE transfer and one grid-batched
+/// kernel sequence instead of `batch_count` separate launch+sync round-trips.
+/// Falls back to per-polynomial `best_fft` for non-`Fq` fields or GPU failure.
+pub fn best_fft_batch<F: PrimeField + 'static>(
+    batch: &mut [F],
+    poly_size: usize,
+    omega: F,
+    log_n: u32,
+) {
+    debug_assert_eq!(batch.len() % poly_size, 0);
+    #[cfg(feature = "gpu")]
+    {
+        // The `_auto` handles GPU/CPU routing (threshold, MIDNIGHT_DEVICE) itself.
+        match midnight_bls12_381_cuda::with_fq_slice_mut(batch, |fq| {
+            midnight_bls12_381_cuda::ntt::forward_ntt_batch_inplace_auto(fq, poly_size)
+        }) {
+            Some(Ok(())) => return,
+            Some(Err(e)) => {
+                tracing::warn!("batch NTT failed, falling back to CPU: {}", e);
+            }
+            None => {} // field is not Fq — CPU below
+        }
+    }
+    for chunk in batch.chunks_exact_mut(poly_size) {
+        midnight_curves::fft::best_fft(chunk, omega, log_n);
+    }
+}
+
+/// Inverse FFT over a batch of same-size polynomials stored contiguously.
+///
+/// Both the GPU path and the backend's CPU arm already include the `1/n`
+/// scaling (same convention as [`ifft`]); the local CPU fallback applies
+/// `divisor` explicitly.
+pub fn ifft_batch<F: PrimeField + 'static>(
+    batch: &mut [F],
+    poly_size: usize,
+    omega_inv: F,
+    log_n: u32,
+    divisor: F,
+) {
+    debug_assert_eq!(batch.len() % poly_size, 0);
+    #[cfg(feature = "gpu")]
+    {
+        match midnight_bls12_381_cuda::with_fq_slice_mut(batch, |fq| {
+            midnight_bls12_381_cuda::ntt::inverse_ntt_batch_inplace_auto(fq, poly_size)
+        }) {
+            Some(Ok(())) => return,
+            Some(Err(e)) => {
+                tracing::warn!("batch iNTT failed, falling back to CPU: {}", e);
+            }
+            None => {}
+        }
+    }
+    use super::arithmetic::parallelize;
+    for chunk in batch.chunks_exact_mut(poly_size) {
+        midnight_curves::fft::best_fft(chunk, omega_inv, log_n);
+        parallelize(chunk, |c, _| {
+            for val in c {
+                *val *= &divisor;
+            }
+        });
+    }
+}
+
 /// Check if GPU FFT is available for the current configuration.
-/// 
+///
 /// Returns `true` if the GPU feature is enabled and GPU hardware is detected.
 #[cfg(feature = "gpu")]
 pub fn gpu_fft_available() -> bool {
