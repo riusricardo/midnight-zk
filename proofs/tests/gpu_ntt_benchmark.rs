@@ -116,6 +116,83 @@ fn gpu_ntt_impulse_response() {
     println!("✓ NTT impulse response verified (K=12,13,16,17 × j=0,1,7,n-1)");
 }
 
+/// Batched NTT must produce exactly the same transforms as one-by-one calls.
+#[test]
+fn gpu_ntt_batch_matches_singles() {
+    let k = 14u32;
+    let n = 1usize << k;
+    let b = 8usize;
+    let mut rng = ChaCha8Rng::seed_from_u64(0xBA7C4);
+    let data: Vec<Scalar> = (0..n * b).map(|_| Scalar::random(&mut rng)).collect();
+
+    let batched = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n)
+        .expect("batched NTT failed");
+    assert_eq!(batched.len(), n * b);
+
+    for i in 0..b {
+        let mut single = data[i * n..(i + 1) * n].to_vec();
+        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut single)
+            .expect("single NTT failed");
+        assert_eq!(&batched[i * n..(i + 1) * n], &single[..], "batch element {} differs", i);
+    }
+
+    let inv = midnight_bls12_381_cuda::ntt::inverse_ntt_batch_auto(&batched, n)
+        .expect("batched iNTT failed");
+    assert_eq!(inv, data, "batched roundtrip != identity");
+
+    println!("✓ batched NTT == singles and roundtrips (b={} × 2^{})", b, k);
+}
+
+/// Batched call vs host loop of singles (same total work) — measures what
+/// grid-level batching buys the prover's many same-size column transforms.
+#[test]
+#[ignore]
+fn gpu_ntt_batch_benchmark() {
+    let k = 18u32;
+    let n = 1usize << k;
+    let b = 16usize;
+    let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
+    let data: Vec<Scalar> = (0..n * b).map(|_| Scalar::random(&mut rng)).collect();
+
+    // Full-size warmup for BOTH arms: domain init, mem-pool growth to the
+    // batch working set, and host page-faults must land outside the timings.
+    let _ = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n).unwrap();
+    let mut warm = data.clone();
+    for i in 0..b {
+        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut warm[i * n..(i + 1) * n])
+            .unwrap();
+    }
+
+    let t = Instant::now();
+    let batched = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n).unwrap();
+    let batched_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let mut loop_out = data.clone();
+    let t = Instant::now();
+    for i in 0..b {
+        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut loop_out[i * n..(i + 1) * n])
+            .unwrap();
+    }
+    let loop_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    // In-place batched: no output Vec allocation / zeroing / copy-back —
+    // the API the prover integration should use.
+    let ctx = midnight_bls12_381_cuda::ntt::GpuNttContext::new(24).unwrap();
+    let mut inplace_out = data.clone();
+    ctx.forward_ntt_batch_inplace(&mut inplace_out, n).unwrap(); // warm
+    inplace_out.copy_from_slice(&data);
+    let t = Instant::now();
+    ctx.forward_ntt_batch_inplace(&mut inplace_out, n).unwrap();
+    let inplace_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    assert_eq!(batched, loop_out, "batch and loop disagree");
+    assert_eq!(inplace_out, loop_out, "in-place batch and loop disagree");
+    println!(
+        "batch {}×2^{}: batched(Vec) {:.2} ms | batched(in-place) {:.2} ms | loop-of-singles {:.2} ms",
+        b, k, batched_ms, inplace_ms, loop_ms
+    );
+}
+
 #[test]
 #[ignore]
 fn gpu_ntt_benchmark() {

@@ -269,6 +269,50 @@ fn gpu_msm_correctness_degenerate_scalars() {
     println!("✓ GPU MSM degenerate-scalar correctness verified at K=16");
 }
 
+/// Duplicate/repeated base points: the only realistic trigger of the P+P
+/// (doubling) and P+(-P) (infinity) edge cases inside bucket accumulation —
+/// signed digits can put +P and -P for the same base into one bucket.
+#[test]
+fn gpu_msm_correctness_duplicate_points() {
+    let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
+    let k = 14;
+    let size = 1usize << k;
+    let mut rng = ChaCha8Rng::seed_from_u64(0xD0B1E);
+
+    // A quarter of the points are copies of point 0; another quarter copies
+    // of point 1 — guarantees many same-base collisions inside buckets.
+    let mut points_proj: Vec<G1Projective> = (0..size)
+        .map(|_| G1Projective::random(&mut rng))
+        .collect();
+    for i in 0..size / 4 {
+        points_proj[i] = points_proj[0];
+    }
+    for i in size / 4..size / 2 {
+        points_proj[i] = points_proj[size / 2];
+    }
+    let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
+    let device_bases = ctx.upload_g1_bases(&points).expect("Failed to upload bases");
+
+    // Case 1: random scalars over duplicated points
+    let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
+    let gpu = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let cpu = G1Projective::multi_exp(&points_proj, &scalars);
+    assert_eq!(gpu, cpu, "duplicate-points random-scalar mismatch");
+
+    // Case 2: engineered +P/-P collisions — scalar s and r-s put +P and -P
+    // digit contributions of the SAME base into mirrored buckets.
+    let s = Scalar::random(&mut rng);
+    let neg_s = -s;
+    let scalars2: Vec<Scalar> = (0..size)
+        .map(|i| if i % 2 == 0 { s } else { neg_s })
+        .collect();
+    let gpu2 = ctx.msm_with_device_bases(&scalars2, &device_bases).expect("GPU MSM failed");
+    let cpu2 = G1Projective::multi_exp(&points_proj, &scalars2);
+    assert_eq!(gpu2, cpu2, "duplicate-points +/-s mismatch");
+
+    println!("✓ GPU MSM duplicate-point edge cases verified at K=14");
+}
+
 /// Host-side simulation of the chunked-accumulation partial-chain distribution.
 /// Replicates the CUDA signed-digit decomposition (c=15, 18 windows, zero->skip)
 /// for the exact PROFILE_K scalars and reports how many boundary-partial chains
