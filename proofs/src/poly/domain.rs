@@ -5,7 +5,9 @@ use std::marker::PhantomData;
 
 use ff::WithSmallOrderMulGroup;
 use group::ff::{BatchInvert, Field};
-use midnight_curves::fft::best_fft;
+
+// Use GPU-aware FFT when available, falls back to CPU automatically
+use crate::utils::fft::best_fft;
 
 use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
 use crate::utils::{arithmetic::parallelize, rational::Rational};

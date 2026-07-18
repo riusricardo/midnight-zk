@@ -25,6 +25,9 @@ pub mod kzg;
 
 pub mod commitment;
 
+/// Batch commitment operations with GPU pipelining support
+pub mod batch_commit;
+
 pub use domain::*;
 pub use query::{ProverQuery, VerifierQuery};
 
