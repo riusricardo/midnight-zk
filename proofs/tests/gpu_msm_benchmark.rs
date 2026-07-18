@@ -202,26 +202,147 @@ fn gpu_msm_benchmark_quick() {
 #[test]
 fn gpu_msm_correctness() {
     let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
-    
+
     for k in [10, 12, 14, 16] {
         let size = 1usize << k;
         let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
-        
+
         let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
         let points_proj: Vec<G1Projective> = (0..size)
             .map(|_| G1Projective::random(&mut rng))
             .collect();
         let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
-        
+
         // Test optimized path: upload bases then run MSM
         let device_bases = ctx.upload_g1_bases(&points).expect("Failed to upload bases");
         let gpu_result = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
         let cpu_result = G1Projective::multi_exp(&points_proj, &scalars);
-        
+
         assert_eq!(gpu_result, cpu_result, "GPU/CPU mismatch at K={}", k);
     }
-    
+
     println!("✓ GPU MSM correctness verified for K=10,12,14,16");
+}
+
+/// Degenerate scalar distributions that stress bucket accumulation:
+/// - all-equal scalars: every window's contributions land in ONE bucket
+///   (maximal mega-buckets / partial chains)
+/// - all-zero scalars: every digit is a zero digit (all-INVALID stream)
+/// - zero-padded tail: realistic prover shape (dense prefix, zero tail)
+/// - tiny scalars: only the lowest window is populated
+#[test]
+fn gpu_msm_correctness_degenerate_scalars() {
+    let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
+    let k = 16;
+    let size = 1usize << k;
+    let mut rng = ChaCha8Rng::seed_from_u64(0xD15C0);
+
+    let points_proj: Vec<G1Projective> = (0..size)
+        .map(|_| G1Projective::random(&mut rng))
+        .collect();
+    let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
+    let device_bases = ctx.upload_g1_bases(&points).expect("Failed to upload bases");
+
+    let one = Scalar::ONE;
+    let some = Scalar::random(&mut rng);
+    let cases: Vec<(&str, Vec<Scalar>)> = vec![
+        ("all-equal", vec![some; size]),
+        ("all-zero", vec![Scalar::ZERO; size]),
+        ("all-one", vec![one; size]),
+        ("zero-padded-tail", {
+            let mut v: Vec<Scalar> = (0..size / 4).map(|_| Scalar::random(&mut rng)).collect();
+            v.resize(size, Scalar::ZERO);
+            v
+        }),
+        ("tiny", (0..size).map(|i| Scalar::from(i as u64 % 7)).collect()),
+    ];
+
+    for (name, scalars) in cases {
+        let gpu_result = ctx
+            .msm_with_device_bases(&scalars, &device_bases)
+            .expect("GPU MSM failed");
+        let cpu_result = G1Projective::multi_exp(&points_proj, &scalars);
+        assert_eq!(gpu_result, cpu_result, "GPU/CPU mismatch at K={} case={}", k, name);
+        println!("  ✓ {}", name);
+    }
+
+    println!("✓ GPU MSM degenerate-scalar correctness verified at K=16");
+}
+
+/// Host-side simulation of the chunked-accumulation partial-chain distribution.
+/// Replicates the CUDA signed-digit decomposition (c=15, 18 windows, zero->skip)
+/// for the exact PROFILE_K scalars and reports how many boundary-partial chains
+/// the combine pass must walk, their total adds, and the longest chain.
+#[test]
+#[ignore]
+fn sim_chain_distribution() {
+    use ff::PrimeField;
+    let k: usize = std::env::var("PROFILE_K").unwrap_or_else(|_| "19".into()).parse().unwrap();
+    let size = 1usize << k;
+    let c: i64 = 15;
+    let windows: usize = 18; // ceil(256/15) with bitsize = LIMBS*64
+    let nb: i64 = 1 << (c - 1);
+    let bpw = (nb + 1) as usize;
+
+    let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
+    let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
+
+    let mut counts = vec![0u32; windows * bpw];
+    let mut zeros = 0u64;
+    for s in &scalars {
+        let repr = s.to_repr();
+        let bytes: &[u8] = repr.as_ref();
+        let mut limbs = [0u64; 4];
+        for i in 0..4 {
+            limbs[i] = u64::from_le_bytes(bytes[i * 8..(i + 1) * 8].try_into().unwrap());
+        }
+        let mut carry: i64 = 0;
+        for w in 0..windows {
+            let bit = (w as i64) * c;
+            let li = (bit / 64) as usize;
+            let off = (bit % 64) as u32;
+            let mut window = limbs[li] >> off;
+            if off as i64 + c > 64 && li + 1 < 4 {
+                window |= limbs[li + 1] << (64 - off);
+            }
+            window &= (1u64 << c) - 1;
+            let mut val = window as i64 + carry;
+            carry = 0;
+            if val > nb {
+                val = (1i64 << c) - val;
+                carry = 1;
+            }
+            if val == 0 {
+                zeros += 1;
+            } else {
+                counts[w * bpw + (val as usize - 1)] += 1;
+            }
+        }
+        assert_eq!(carry, 0, "final carry must not occur for valid scalars");
+    }
+
+    let chunk: u64 = 128;
+    let mut pos: u64 = 0;
+    let (mut nchains, mut total_adds, mut max_chain) = (0u64, 0u64, 0u64);
+    let mut top_buckets: Vec<u32> = counts.iter().copied().collect();
+    top_buckets.sort_unstable_by(|a, b| b.cmp(a));
+    for &cnt in &counts {
+        if cnt == 0 { continue; }
+        let start = pos;
+        let end = pos + cnt as u64;
+        pos = end;
+        let spans = (end - 1) / chunk - start / chunk + 1;
+        if spans >= 2 {
+            nchains += 1;
+            let adds = spans - 1;
+            total_adds += adds;
+            max_chain = max_chain.max(adds);
+        }
+    }
+    println!(
+        "K={} valid={} zeros={} | chains={} total_chain_adds={} max_chain={} | top buckets: {:?}",
+        k, pos, zeros, nchains, total_adds, max_chain, &top_buckets[..8]
+    );
 }
 
 /// Profiling test - runs a single MSM at K specified by PROFILE_K env var

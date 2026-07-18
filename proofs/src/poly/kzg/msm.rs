@@ -29,13 +29,33 @@ use crate::gpu_accel::{
 static GLOBAL_MSM_CONTEXT: OnceLock<GpuMsmContext> = OnceLock::new();
 
 #[cfg(feature = "gpu")]
-/// Get or initialize the global GPU MSM context
+/// Try to get or initialize the global GPU MSM context, returning `None` (for CPU fallback)
+/// instead of panicking when the GPU/backend is unavailable (correctness fix C5).
+pub fn try_get_msm_context() -> Option<&'static GpuMsmContext> {
+    if let Some(ctx) = GLOBAL_MSM_CONTEXT.get() {
+        return Some(ctx);
+    }
+    match GpuMsmContext::new() {
+        Ok(ctx) => {
+            // If another thread won the init race, `set` fails and we return the winner.
+            let _ = GLOBAL_MSM_CONTEXT.set(ctx);
+            GLOBAL_MSM_CONTEXT.get()
+        }
+        Err(_e) => {
+            #[cfg(feature = "trace-msm")]
+            eprintln!("[MSM] GPU MSM context unavailable: {:?}", _e);
+            None
+        }
+    }
+}
+
+#[cfg(feature = "gpu")]
+/// Get or initialize the global GPU MSM context.
+///
+/// Panics if the GPU is unavailable; hot paths that can fall back to CPU should prefer
+/// [`try_get_msm_context`].
 pub fn get_msm_context() -> &'static GpuMsmContext {
-    GLOBAL_MSM_CONTEXT.get_or_init(|| {
-        #[cfg(feature = "trace-msm")]
-        eprintln!("[MSM] Initializing global GPU MSM context (lazy)");
-        GpuMsmContext::new().expect("Failed to create GPU MSM context")
-    })
+    try_get_msm_context().expect("Failed to create GPU MSM context")
 }
 
 /// Initialize GPU backend eagerly
@@ -229,32 +249,41 @@ where
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-CACHED] Starting with {} points (using pre-uploaded GPU bases)", coeffs.len());
-    
-    // Verify we're using midnight_curves (BLS12-381) and convert coefficients
-    let fq_coeffs = try_as_fq_slice(coeffs)
-        .expect("MSM must use midnight_curves::G1Affine (BLS12-381)");
-    
-    // Launch async MSM (enables better CUDA stream pipelining)
-    #[cfg(feature = "trace-msm")]
-    eprintln!("   [MSM-CACHED] Launching async MSM (non-blocking)");
-    
-    let ctx = get_msm_context();
-    let handle = ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
-        .expect("Async MSM launch failed");
-    
-    // CPU could do other work here while GPU uploads and computes
-    
-    let res = handle.wait()
-        .expect("Async MSM wait failed");
-    let result = projective_to_curve::<C>(res);
-    
+
+    let result = try_msm_with_cached_bases::<C>(coeffs, device_bases)
+        .expect("GPU MSM with cached bases failed");
+
     #[cfg(feature = "trace-msm")]
     {
         let elapsed = start.elapsed();
         eprintln!("✓  [MSM-CACHED] Completed in {:?} (async-internal pattern)", elapsed);
     }
-    
+
     result
+}
+
+#[cfg(feature = "gpu")]
+/// Fallible MSM using pre-uploaded GPU bases.
+///
+/// Returns an error (for CPU fallback) instead of panicking when the GPU/backend is
+/// unavailable or the MSM fails (correctness fix C5). This is the primitive used by the
+/// commit hot path; [`msm_with_cached_bases`] is the panicking convenience wrapper.
+pub fn try_msm_with_cached_bases<C: CurveAffine + 'static>(
+    coeffs: &[C::Scalar],
+    device_bases: &PrecomputedBases,
+) -> Result<C::Curve, crate::poly::Error>
+where
+    C::Scalar: ff::PrimeField + 'static,
+{
+    // Verify we're using midnight_curves (BLS12-381) and convert coefficients
+    let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
+
+    let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;
+    let handle = ctx
+        .msm_with_device_bases_async(fq_coeffs, device_bases)
+        .map_err(|_| crate::poly::Error::OpeningError)?;
+    let res = handle.wait().map_err(|_| crate::poly::Error::OpeningError)?;
+    Ok(projective_to_curve::<C>(res))
 }
 
 #[allow(unsafe_code)]
@@ -346,32 +375,35 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         
         // Check if GPU should be used (respects MIDNIGHT_DEVICE and size threshold)
         // If false, fall through to BLST path
+        // Correctness fix C5: probe the GPU context WITHOUT panicking. On GPU
+        // unavailability (`try_get_msm_context` -> None) or any GPU error, fall through to
+        // the BLST (CPU) path below. This makes `msm_specific` a safe fallback target for
+        // the commit hot path even on a `gpu`-built binary running with no usable GPU.
         if should_use_gpu(size) {
-            // Get global MSM context (will initialize lazily if not done eagerly)
-            let ctx = get_msm_context();
-            
-            #[cfg(feature = "trace-msm")]
-            eprintln!("   [MSM] Using GPU backend ({} points)", size);
-            
-            // Convert projective bases to affine for GPU MSM
-            let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
-            
-            match ctx.msm(coeffs, &bases_affine) {
-                Ok(res) => {
-                    let result = unsafe { std::mem::transmute_copy(&res) };
-                    
-                    #[cfg(feature = "trace-msm")]
-                    {
-                        let elapsed = start.elapsed();
-                        eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+            if let Some(ctx) = try_get_msm_context() {
+                #[cfg(feature = "trace-msm")]
+                eprintln!("   [MSM] Using GPU backend ({} points)", size);
+
+                // Convert projective bases to affine for GPU MSM
+                let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
+
+                match ctx.msm(coeffs, &bases_affine) {
+                    Ok(res) => {
+                        let result = unsafe { std::mem::transmute_copy(&res) };
+
+                        #[cfg(feature = "trace-msm")]
+                        {
+                            let elapsed = start.elapsed();
+                            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
+                        }
+
+                        return result;
                     }
-                    
-                    return result;
-                }
-                Err(_e) => {
-                    // GPU failed, fall back to BLST
-                    #[cfg(feature = "trace-msm")]
-                    eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", _e);
+                    Err(_e) => {
+                        // GPU failed, fall back to BLST
+                        #[cfg(feature = "trace-msm")]
+                        eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", _e);
+                    }
                 }
             }
         }

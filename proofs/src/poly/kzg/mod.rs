@@ -89,11 +89,18 @@ where
         #[cfg(feature = "gpu")]
         let result = {
             use crate::gpu_accel::should_use_gpu;
-            
+            use crate::poly::kzg::msm::try_msm_with_cached_bases;
+
             if should_use_gpu(size) {
-                use crate::poly::kzg::msm::msm_with_cached_bases;
-                let device_bases = params.get_or_upload_gpu_bases();
-                msm_with_cached_bases::<E::G1Affine>(scalars, device_bases)
+                // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
+                // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
+                match params
+                    .try_get_or_upload_gpu_bases()
+                    .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
+                {
+                    Ok(r) => r,
+                    Err(_e) => msm_specific::<E::G1Affine>(scalars, &params.g[..size]),
+                }
             } else {
                 msm_specific::<E::G1Affine>(scalars, &params.g[..size])
             }
@@ -126,11 +133,18 @@ where
         #[cfg(feature = "gpu")]
         let result = {
             use crate::gpu_accel::should_use_gpu;
-            
+            use crate::poly::kzg::msm::try_msm_with_cached_bases;
+
             if should_use_gpu(size) {
-                use crate::poly::kzg::msm::msm_with_cached_bases;
-                let device_bases = params.get_or_upload_gpu_lagrange_bases();
-                msm_with_cached_bases::<E::G1Affine>(scalars, device_bases)
+                // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
+                // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
+                match params
+                    .try_get_or_upload_gpu_lagrange_bases()
+                    .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
+                {
+                    Ok(r) => r,
+                    Err(_e) => msm_specific::<E::G1Affine>(scalars, &params.g_lagrange[0..size]),
+                }
             } else {
                 msm_specific::<E::G1Affine>(scalars, &params.g_lagrange[0..size])
             }

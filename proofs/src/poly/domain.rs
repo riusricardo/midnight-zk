@@ -367,13 +367,16 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     }
 
     fn ifft(a: &mut [F], omega_inv: F, log_n: u32, divisor: F) {
-        best_fft(a, omega_inv, log_n);
-        parallelize(a, |a, _| {
-            for a in a {
-                // Finish iFFT
-                *a *= &divisor;
-            }
-        });
+        // Correctness fix C1: route the inverse transform through the GPU-aware inverse
+        // dispatcher `utils::fft::ifft`, which runs a TRUE inverse NTT (ICICLE
+        // NTTDir::kInverse) on the GPU and `best_fft(omega_inv)` + divisor on the CPU.
+        //
+        // The previous body called `best_fft(a, omega_inv, log_n)` directly. On the GPU
+        // path `best_fft` discards `omega_inv` and runs a FORWARD NTT, so `ifft` returned
+        // `(1/n)*DFT` instead of the inverse for any domain >= 4096 (K>=12) -> invalid
+        // proofs. The dispatcher applies the 1/n scaling exactly once per branch (the GPU
+        // inverse already scales by 1/n), so we must NOT re-apply `divisor` here (fix R3).
+        crate::utils::fft::ifft(a, omega_inv, log_n, divisor);
     }
 
     /// Get the size of the domain

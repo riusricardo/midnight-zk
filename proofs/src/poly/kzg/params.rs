@@ -94,6 +94,17 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         assert!(n < self.g_lagrange.len() as u32);
         self.g.truncate(n as usize);
         self.g_lagrange = g_to_lagrange(&self.g, new_k);
+
+        // Correctness fix C2: the GPU base caches were uploaded for the OLD (larger)
+        // domain and are shared across `Clone` via `Arc<OnceCell>`. Reset them so the next
+        // commit re-uploads bases for the downsized domain. Without this, a params that is
+        // cloned/reused and then downsized silently commits against stale bases, producing
+        // wrong (but well-formed) Lagrange/coefficient commitments.
+        #[cfg(feature = "gpu")]
+        {
+            self.g_gpu = Arc::new(OnceCell::new());
+            self.g_lagrange_gpu = Arc::new(OnceCell::new());
+        }
     }
 
     /// Initializes parameters for the curve, draws toxic secret from given rng.
@@ -186,46 +197,44 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// When using these bases, set `cfg.are_bases_montgomery_form = true`.
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_bases(&self) -> &PrecomputedBases {
-        self.g_gpu.get_or_init(|| {
-            #[cfg(feature = "trace-msm")]
-            eprintln!("[GPU] Uploading {} SRS bases to GPU in Montgomery form (one-time cost)...", self.g.len());
-            
-            #[cfg(feature = "trace-msm")]
-            let start = std::time::Instant::now();
-            
+        self.try_get_or_upload_gpu_bases()
+            .expect("Failed to upload GPU bases")
+    }
+
+    /// Fallible variant of [`Self::get_or_upload_gpu_bases`]: returns an error (for CPU
+    /// fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
+    #[cfg(feature = "gpu")]
+    pub fn try_get_or_upload_gpu_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        self.g_gpu.get_or_try_init(|| {
             // Ensure ICICLE backend is loaded (singleton - only loads once globally)
-            ensure_backend_loaded().expect("Failed to load ICICLE backend");
-            
-            // CRITICAL: Set device before allocating GPU memory
-            // This is needed because get_or_init() might be called from different thread contexts
+            ensure_backend_loaded().map_err(|_| crate::poly::Error::OpeningError)?;
+
+            // Set device before allocating GPU memory (may run on any thread context).
             let device = IcicleDevice::new("CUDA", 0);
-            icicle_set_device(&device).expect("Failed to set GPU device");
-            
+            icicle_set_device(&device).map_err(|_| crate::poly::Error::OpeningError)?;
+
             // Convert G1Projective to G1Affine
             let mut bases_affine = vec![E::G1Affine::identity(); self.g.len()];
             E::G1::batch_normalize(&self.g, &mut bases_affine);
-            
-            // Zero-copy view as ICICLE points (Montgomery form preserved!)
-            // midnight-curves stores Fp coordinates in Montgomery form internally,
-            // which is exactly what ICICLE expects when are_bases_montgomery_form=true.
+
+            // Zero-copy view as ICICLE points (Montgomery form preserved; midnight-curves
+            // stores Fp coordinates in Montgomery form, which is what the backend expects
+            // when are_bases_montgomery_form=true).
             let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
                 std::mem::transmute(bases_affine.as_slice())
             };
             let icicle_points = TypeConverter::g1_slice_as_icicle(bases_midnight);
-            
-            // Upload to GPU (Montgomery form - no conversion needed at MSM time!)
+
+            // Upload to GPU (Montgomery form - no conversion needed at MSM time).
             let stream = IcicleStream::default();
             let mut device_bases = DeviceVec::device_malloc_async(icicle_points.len(), &stream)
-                .expect("Failed to allocate GPU memory for bases");
-            device_bases.copy_from_host_async(HostSlice::from_slice(icicle_points), &stream)
-                .expect("Failed to upload bases to GPU");
-            stream.synchronize().expect("Failed to synchronize GPU stream");
-            
-            #[cfg(feature = "trace-msm")]
-            eprintln!("✓  [GPU] Bases uploaded in Montgomery form in {:?} (zero-copy MSM ready)", start.elapsed());
-            
-            // Wrap in PrecomputedBases (no precomputation, just normal upload)
-            PrecomputedBases::new(device_bases, icicle_points.len())
+                .map_err(|_| crate::poly::Error::OpeningError)?;
+            device_bases
+                .copy_from_host_async(HostSlice::from_slice(icicle_points), &stream)
+                .map_err(|_| crate::poly::Error::OpeningError)?;
+            stream.synchronize().map_err(|_| crate::poly::Error::OpeningError)?;
+
+            Ok(PrecomputedBases::new(device_bases, icicle_points.len()))
         })
     }
     
@@ -235,43 +244,42 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Bases are stored in Montgomery form for zero-copy MSM execution.
     #[cfg(feature = "gpu")]
     pub fn get_or_upload_gpu_lagrange_bases(&self) -> &PrecomputedBases {
-        self.g_lagrange_gpu.get_or_init(|| {
-            #[cfg(feature = "trace-msm")]
-            eprintln!("[GPU] Uploading {} Lagrange bases to GPU in Montgomery form (one-time cost)...", self.g_lagrange.len());
-            
-            #[cfg(feature = "trace-msm")]
-            let start = std::time::Instant::now();
-            
+        self.try_get_or_upload_gpu_lagrange_bases()
+            .expect("Failed to upload GPU Lagrange bases")
+    }
+
+    /// Fallible variant of [`Self::get_or_upload_gpu_lagrange_bases`]: returns an error
+    /// (for CPU fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
+    #[cfg(feature = "gpu")]
+    pub fn try_get_or_upload_gpu_lagrange_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        self.g_lagrange_gpu.get_or_try_init(|| {
             // Ensure ICICLE backend is loaded (singleton - only loads once globally)
-            ensure_backend_loaded().expect("Failed to load ICICLE backend");
-            
-            // CRITICAL: Set device before allocating GPU memory
+            ensure_backend_loaded().map_err(|_| crate::poly::Error::OpeningError)?;
+
+            // Set device before allocating GPU memory (may run on any thread context).
             let device = IcicleDevice::new("CUDA", 0);
-            icicle_set_device(&device).expect("Failed to set GPU device");
-            
+            icicle_set_device(&device).map_err(|_| crate::poly::Error::OpeningError)?;
+
             // Convert G1Projective to G1Affine
             let mut bases_affine = vec![E::G1Affine::identity(); self.g_lagrange.len()];
             E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
-            
-            // Zero-copy view as ICICLE points (Montgomery form preserved!)
+
+            // Zero-copy view as ICICLE points (Montgomery form preserved).
             let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
                 std::mem::transmute(bases_affine.as_slice())
             };
             let icicle_points = TypeConverter::g1_slice_as_icicle(bases_midnight);
-            
-            // Upload to GPU (Montgomery form - no conversion needed at MSM time!)
+
+            // Upload to GPU (Montgomery form - no conversion needed at MSM time).
             let stream = IcicleStream::default();
             let mut device_bases = DeviceVec::device_malloc_async(icicle_points.len(), &stream)
-                .expect("Failed to allocate GPU memory for Lagrange bases");
-            device_bases.copy_from_host_async(HostSlice::from_slice(icicle_points), &stream)
-                .expect("Failed to upload Lagrange bases to GPU");
-            stream.synchronize().expect("Failed to synchronize GPU stream");
-            
-            #[cfg(feature = "trace-msm")]
-            eprintln!("✓  [GPU] Lagrange bases uploaded in Montgomery form in {:?} (zero-copy MSM ready)", start.elapsed());
-            
-            // Wrap in PrecomputedBases (no precomputation, just normal upload)
-            PrecomputedBases::new(device_bases, icicle_points.len())
+                .map_err(|_| crate::poly::Error::OpeningError)?;
+            device_bases
+                .copy_from_host_async(HostSlice::from_slice(icicle_points), &stream)
+                .map_err(|_| crate::poly::Error::OpeningError)?;
+            stream.synchronize().map_err(|_| crate::poly::Error::OpeningError)?;
+
+            Ok(PrecomputedBases::new(device_bases, icicle_points.len()))
         })
     }
 
