@@ -219,3 +219,64 @@ fn gpu_ntt_benchmark() {
     }
     println!("\nAll rows correctness-checked: GPU fwd == CPU fwd, GPU roundtrip == identity.");
 }
+
+/// FAIR NTT comparison (ours vs closed): timing + roundtrip only, NO CPU-basis
+/// assert. Run with MIDNIGHT_NTT_ICICLE_ROU=1 so the domain uses ICICLE's own
+/// root — the only root the CLOSED backend accepts — letting both backends be
+/// timed on identical NTT work. The roundtrip inverse(forward(x))==x is
+/// root-agnostic, so it still verifies correctness for whichever backend runs.
+///
+///   MIDNIGHT_NTT_ICICLE_ROU=1 NTT_BENCH_KS=16,18,20,22 \
+///     ICICLE_BACKEND_INSTALL_DIR=<backend> \
+///     cargo test --test gpu_ntt_benchmark --features gpu --release -- \
+///     gpu_ntt_fair_bench --ignored --nocapture
+#[test]
+#[ignore = "fair ours-vs-closed NTT bench; needs MIDNIGHT_NTT_ICICLE_ROU=1"]
+fn gpu_ntt_fair_bench() {
+    if !midnight_bls12_381_cuda::is_gpu_available() {
+        eprintln!("[skip] no GPU");
+        return;
+    }
+    let icicle_rou = std::env::var("MIDNIGHT_NTT_ICICLE_ROU").is_ok();
+    let ks: Vec<u32> = std::env::var("NTT_BENCH_KS")
+        .map(|s| s.split(',').map(|t| t.trim().parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![16, 18, 20, 22]);
+    println!(
+        "\nFAIR NTT bench  backend={}  root={}",
+        std::env::var("ICICLE_BACKEND_INSTALL_DIR").unwrap_or_else(|_| "<default>".into()),
+        if icicle_rou { "ICICLE" } else { "midnight" },
+    );
+    println!("{:>4} {:>12} {:>12} {:>10}", "K", "fwd(ms)", "inv(ms)", "roundtrip");
+    let reps = 5usize;
+    for k in ks {
+        let n = 1usize << k;
+        let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
+        let orig: Vec<Scalar> = (0..n).map(|_| Scalar::random(&mut rng)).collect();
+
+        // warmup (also builds/caches the domain + bases)
+        let mut w = orig.clone();
+        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut w).unwrap();
+        midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(&mut w).unwrap();
+
+        let mut fwd_best = f64::MAX;
+        let mut inv_best = f64::MAX;
+        let mut roundtrip_ok = true;
+        for _ in 0..reps {
+            let mut data = orig.clone();
+            let t = Instant::now();
+            midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut data).unwrap();
+            fwd_best = fwd_best.min(t.elapsed().as_secs_f64() * 1e3);
+            let t = Instant::now();
+            midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(&mut data).unwrap();
+            inv_best = inv_best.min(t.elapsed().as_secs_f64() * 1e3);
+            if data != orig {
+                roundtrip_ok = false;
+            }
+        }
+        println!(
+            "{k:>4} {fwd_best:>12.3} {inv_best:>12.3} {:>10}",
+            if roundtrip_ok { "OK" } else { "FAIL" }
+        );
+        assert!(roundtrip_ok, "NTT roundtrip identity failed at k={k}");
+    }
+}
