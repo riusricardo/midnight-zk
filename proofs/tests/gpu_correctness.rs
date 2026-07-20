@@ -433,4 +433,89 @@ mod e2e {
             println!("{k:>4} {keygen_ms:>12.1} {prove_ms:>12.1} {verify_ms:>12.1}");
         }
     }
+
+    /// Trust boundary: a proof generated with the GPU backend must be accepted by the
+    /// pure-CPU BLST verifier.
+    ///
+    /// - PROVE (GPU): at k=16 the prover runs GPU NTT (threshold 2^12) and GPU MSM
+    ///   (threshold 2^13); `should_use_gpu(2^16)` is asserted so this really is the
+    ///   GPU path, not a silent CPU fallback.
+    /// - VERIFY (CPU/BLST): the KZG verifier's pairing-check accumulator
+    ///   (`DualMSM::eval`) calls `msm_specific` unconditionally — there is no
+    ///   `should_use_gpu` gate on it — so `guard.verify` is a genuine CPU/BLST check
+    ///   of the GPU-produced proof. `is_blst_available::<G1Affine>()` is asserted up
+    ///   front (msm_specific panics without it).
+    ///
+    /// A one-bit tamper of the proof must be rejected, so the positive check is not
+    /// vacuous.
+    #[test]
+    fn gpu_proof_verifies_on_cpu_blst() {
+        use midnight_curves::G1Affine;
+        use midnight_proofs::poly::kzg::msm::is_blst_available;
+
+        if !gpu_present() {
+            return;
+        }
+        assert!(
+            is_blst_available::<G1Affine>(),
+            "BLST must be available for the CPU verifier"
+        );
+
+        let k = 16u32;
+        assert!(
+            midnight_bls12_381_cuda::should_use_gpu(1usize << k),
+            "k={k} must be above the GPU MSM threshold for this test to prove on GPU"
+        );
+
+        let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
+        let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
+        let circuit = DomainFillingCircuit { k, fill_ratio: 0.5 };
+
+        let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)
+            .expect("keygen_vk");
+        let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
+
+        // ---- Generate the proof on GPU (GPU NTT + GPU MSM) ----
+        let mut transcript = CircuitTranscript::<Blake2bState>::init();
+        create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
+            &params,
+            &pk,
+            &[circuit],
+            #[cfg(feature = "committed-instances")]
+            0,
+            &[&[]],
+            &mut rng,
+            &mut transcript,
+        )
+        .expect("create_proof");
+        let proof = transcript.finalize();
+
+        // ---- Verify on CPU/BLST (DualMSM::eval -> msm_specific, no GPU gate) ----
+        let verify = |bytes: &[u8]| -> bool {
+            let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
+            match prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
+                pk.get_vk(),
+                #[cfg(feature = "committed-instances")]
+                &[&[]],
+                &[&[]],
+                &mut vt,
+            ) {
+                Ok(guard) => guard.verify(&params.verifier_params()).is_ok(),
+                Err(_) => false,
+            }
+        };
+
+        assert!(
+            verify(&proof),
+            "GPU-generated proof failed CPU/BLST verification at k={k}"
+        );
+
+        // Negative control: a corrupted proof must be rejected.
+        let mut tampered = proof.clone();
+        tampered[0] ^= 0x01;
+        assert!(
+            !verify(&tampered),
+            "tampered proof was accepted by the CPU/BLST verifier"
+        );
+    }
 }
