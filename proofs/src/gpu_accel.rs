@@ -78,12 +78,11 @@ pub use midnight_bls12_381_cuda::{
     NttBackend,
     
     // Type-safe dispatch helpers (the key abstraction)
-    is_fq, is_g1_affine, is_g1_projective,
-    should_dispatch_to_gpu_field, should_dispatch_to_gpu_curve, should_dispatch_to_gpu_ntt,
-    try_as_fq_slice, try_as_fq_slice_mut, try_as_g1_affine_slice, try_as_g1_projective_slice,
+    is_fq, is_g1_affine,
+    try_as_fq_slice, try_as_fq_slice_mut,
     projective_to_curve,
-    dispatch_msm, dispatch_ntt_inplace, dispatch_batch_msm, DispatchResult,
-    with_fq_slice, with_fq_slice_mut, with_g1_affine_slice,
+    dispatch_ntt_inplace,
+    with_fq_slice_mut,
 };
 
 // Re-export ICICLE runtime types needed by params.rs
