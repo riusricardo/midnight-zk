@@ -113,19 +113,25 @@ pub fn init_gpu_backend() -> Option<std::time::Duration> {
     use tracing::info;
     
     let accel = global_accelerator();
-    
+
     if let Err(e) = accel.initialize() {
-        tracing::warn!("Failed to initialize GPU backend: {}", e);
+        // GPU backend failed to load — the "backend-dir trap" (e.g. a wrong
+        // ICICLE_BACKEND_INSTALL_DIR) that otherwise makes every op run on CPU
+        // silently. Observable + strict-fatal so a misconfigured GPU deploy
+        // fails loudly instead of degrading to CPU unnoticed.
+        midnight_bls12_381_cuda::config::note_gpu_fallback("backend init", &e.to_string());
         return None;
     }
-    
+
     match accel.warmup() {
         Ok(duration) => {
             info!("GPU backend warmed up in {:?}", duration);
             Some(duration)
         }
         Err(e) => {
-            tracing::warn!("GPU warmup failed: {}", e);
+            // Warmup is best-effort (a perf pre-load, not correctness): make it
+            // visible but NOT strict-fatal — it does not imply later ops fail.
+            eprintln!("[GPU-WARN] GPU warmup failed (non-fatal): {}", e);
             None
         }
     }
@@ -231,11 +237,11 @@ pub fn msm_auto(scalars: &[Fq], bases: &[G1Affine]) -> G1Projective {
         match accel.msm(scalars, bases) {
             Ok(result) => return result,
             Err(e) => {
-                tracing::warn!("GPU MSM failed, falling back to CPU: {}", e);
+                midnight_bls12_381_cuda::config::note_gpu_fallback("MSM (msm_auto)", &e.to_string());
             }
         }
     }
-    
+
     // CPU fallback via BLST
     msm_blst(scalars, bases)
 }
@@ -277,11 +283,11 @@ pub fn forward_ntt_auto(data: &mut [Fq]) -> Result<(), String> {
         match accel.forward_ntt_inplace(data) {
             Ok(()) => return Ok(()),
             Err(e) => {
-                tracing::warn!("GPU NTT failed, falling back to CPU: {}", e);
+                midnight_bls12_381_cuda::config::note_gpu_fallback("NTT (forward_ntt_auto)", &e.to_string());
             }
         }
     }
-    
+
     // CPU fallback
     forward_ntt_cpu(data)
 }
@@ -295,11 +301,11 @@ pub fn inverse_ntt_auto(data: &mut [Fq]) -> Result<(), String> {
         match accel.inverse_ntt_inplace(data) {
             Ok(()) => return Ok(()),
             Err(e) => {
-                tracing::warn!("GPU INTT failed, falling back to CPU: {}", e);
+                midnight_bls12_381_cuda::config::note_gpu_fallback("INTT (inverse_ntt_auto)", &e.to_string());
             }
         }
     }
-    
+
     // CPU fallback
     inverse_ntt_cpu(data)
 }

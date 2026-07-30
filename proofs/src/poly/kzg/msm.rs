@@ -399,12 +399,23 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
 
                         return result;
                     }
-                    Err(_e) => {
-                        // GPU failed, fall back to BLST
-                        #[cfg(feature = "trace-msm")]
-                        eprintln!("   [MSM] GPU failed: {:?}, falling back to BLST", _e);
+                    Err(e) => {
+                        // GPU MSM was attempted and FAILED: make it observable +
+                        // strict-fatal (was silent unless the trace-msm feature was
+                        // on), then fall through to the BLST path below.
+                        midnight_bls12_381_cuda::config::note_gpu_fallback(
+                            "MSM (msm_specific)", &format!("{:?}", e));
                     }
                 }
+            } else {
+                // GPU was expected (should_use_gpu true) but the MSM context is
+                // unavailable — e.g. the backend .so failed to load or a wrong
+                // ICICLE_BACKEND_INSTALL_DIR. This was a fully silent BLST
+                // fallback (the backend-dir trap); make it observable +
+                // strict-fatal before falling through to BLST.
+                midnight_bls12_381_cuda::config::note_gpu_fallback(
+                    "MSM (msm_specific): GPU context unavailable",
+                    "try_get_msm_context() returned None");
             }
         }
         

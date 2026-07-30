@@ -99,7 +99,11 @@ where
                     .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
                 {
                     Ok(r) => r,
-                    Err(_e) => msm_specific::<E::G1Affine>(scalars, &params.g[..size]),
+                    Err(e) => {
+                        midnight_bls12_381_cuda::config::note_gpu_fallback(
+                            "MSM (cached bases, commit)", &format!("{:?}", e));
+                        msm_specific::<E::G1Affine>(scalars, &params.g[..size])
+                    }
                 }
             } else {
                 msm_specific::<E::G1Affine>(scalars, &params.g[..size])
@@ -143,7 +147,11 @@ where
                     .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
                 {
                     Ok(r) => r,
-                    Err(_e) => msm_specific::<E::G1Affine>(scalars, &params.g_lagrange[0..size]),
+                    Err(e) => {
+                        midnight_bls12_381_cuda::config::note_gpu_fallback(
+                            "MSM (cached bases, commit_lagrange)", &format!("{:?}", e));
+                        msm_specific::<E::G1Affine>(scalars, &params.g_lagrange[0..size])
+                    }
                 }
             } else {
                 msm_specific::<E::G1Affine>(scalars, &params.g_lagrange[0..size])
