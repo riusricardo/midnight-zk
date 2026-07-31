@@ -70,7 +70,6 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         'a,
         'params: 'a,
         CS: PolynomialCommitmentScheme<F>,
-        R: RngCore,
         T: Transcript,
     >(
         &self,
@@ -82,7 +81,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         fixed_values: &'a [Polynomial<F, LagrangeCoeff>],
         instance_values: &'a [Polynomial<F, LagrangeCoeff>],
         challenges: &'a [F],
-        mut rng: R,
+        rng: &mut impl RngCore,
         transcript: &mut T,
     ) -> Result<Permuted<F>, Error>
     where
@@ -120,7 +119,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         let (permuted_input_expression, permuted_table_expression) = permute_expression_pair(
             pk,
             domain,
-            &mut rng,
+            rng,
             &compressed_input_expression,
             &compressed_table_expression,
         )?;
@@ -168,7 +167,7 @@ impl<F: WithSmallOrderMulGroup<3>> Permuted<F> {
         pk: &ProvingKey<F, CS>,
         beta: F,
         gamma: F,
-        mut rng: impl RngCore + CryptoRng,
+        rng: &mut (impl RngCore + CryptoRng),
     ) -> ProductComputed<F>
     where
         F: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
@@ -207,7 +206,8 @@ impl<F: WithSmallOrderMulGroup<3>> Permuted<F> {
                 Some(*state)
             })
             .take(pk.vk.n() as usize - blinding_factors)
-            .chain((0..blinding_factors).map(|_| F::random(&mut rng)))
+            // Chain random blinding factors.
+            .chain((0..blinding_factors).map(|_| F::random(&mut *rng)))
             .collect::<Vec<_>>();
         assert_eq!(z.len(), pk.vk.n() as usize);
         let z = pk.vk.domain.lagrange_from_vec(z);
@@ -347,10 +347,10 @@ type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCo
 ///   corresponding value in S'.
 ///
 /// This method returns (A', S') if no errors are encountered.
-fn permute_expression_pair<F, CS: PolynomialCommitmentScheme<F>, R: RngCore>(
+fn permute_expression_pair<F, CS: PolynomialCommitmentScheme<F>>(
     pk: &ProvingKey<F, CS>,
     domain: &EvaluationDomain<F>,
-    mut rng: R,
+    rng: &mut impl RngCore,
     input_expression: &Polynomial<F, LagrangeCoeff>,
     table_expression: &Polynomial<F, LagrangeCoeff>,
 ) -> Result<ExpressionPair<F>, Error>
@@ -405,8 +405,8 @@ where
     }
     assert!(repeated_input_rows.is_empty());
 
-    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| F::random(&mut rng)));
-    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| F::random(&mut rng)));
+    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| F::random(&mut *rng)));
+    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| F::random(&mut *rng)));
     assert_eq!(permuted_input_expression.len(), pk.vk.n() as usize);
     assert_eq!(permuted_table_coeffs.len(), pk.vk.n() as usize);
 
