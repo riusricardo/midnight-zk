@@ -7,11 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 ### Added
-* changed `sha256` name in benches to account for the change of naming convention in `circuits` [#135](https://github.com/midnightntwrk/midnight-zk/pull/135)
 
 ### Changed
 
 ### Removed
+
+## [0.7.3]
+### Fixed
+* Reject mismatched per-proof vector lengths in `verify_algebraic_constraints`. [#481](https://github.com/midnightntwrk/midnight-zk/pull/481)
+
+## [0.7.2]
+### Fixed
+* Bug fix in midnight-curves [#433](https://github.com/midnightntwrk/midnight-zk/pull/433)
+
+## [0.7.1]
+### Changed
+* Thread the prover RNG explicitly [#307](https://github.com/midnightntwrk/midnight-zk/pull/307)
+* Add `s_g2()` accessor on `ParamsVerifierKZG` [#307](https://github.com/midnightntwrk/midnight-zk/pull/307)
 
 ## [0.7.0]
 ### Added
