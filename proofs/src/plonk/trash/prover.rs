@@ -69,6 +69,41 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
             trash_poly_lagrange: compressed_expression,
         }
     }
+
+    /// Upstream-compatible single-trashcan commit: [`Self::compute`],
+    /// `CS::commit_lagrange`, then [`TrashComputed::finalize`]. Kept for the
+    /// benchmark prover (`plonk/bench/prover.rs`), which commits each
+    /// trashcan on its own.
+    #[cfg(feature = "bench-internal")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit<'a, 'params: 'a, CS, T>(
+        &self,
+        params: &'params CS::Parameters,
+        domain: &EvaluationDomain<F>,
+        trash_challenge: F,
+        advice_values: &'a [Polynomial<F, LagrangeCoeff>],
+        fixed_values: &'a [Polynomial<F, LagrangeCoeff>],
+        instance_values: &'a [Polynomial<F, LagrangeCoeff>],
+        challenges: &'a [F],
+        transcript: &mut T,
+    ) -> Result<Committed<F>, Error>
+    where
+        F: FromUniformBytes<64>,
+        CS: PolynomialCommitmentScheme<F>,
+        CS::Commitment: Hashable<T::Hash>,
+        T: Transcript,
+    {
+        let trash = self.compute(
+            domain,
+            trash_challenge,
+            advice_values,
+            fixed_values,
+            instance_values,
+            challenges,
+        );
+        let trash_commitment = CS::commit_lagrange(params, &trash.trash_poly_lagrange);
+        trash.finalize::<CS, T>(domain, trash_commitment, transcript)
+    }
 }
 
 impl<F: PrimeField> TrashComputed<F> {

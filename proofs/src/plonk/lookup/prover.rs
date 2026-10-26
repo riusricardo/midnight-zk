@@ -299,6 +299,29 @@ impl<F: WithSmallOrderMulGroup<3>> Permuted<F> {
             product_poly_lagrange: z,
         }
     }
+
+    /// Upstream-compatible single-lookup commit: [`Self::compute_product`],
+    /// `CS::commit_lagrange`, then [`ProductComputed::finalize`]. Kept for
+    /// the benchmark prover (`plonk/bench/prover.rs`), which commits each
+    /// lookup on its own.
+    #[cfg(feature = "bench-internal")]
+    pub(crate) fn commit_product<CS: PolynomialCommitmentScheme<F>, T: Transcript>(
+        self,
+        pk: &ProvingKey<F, CS>,
+        params: &CS::Parameters,
+        beta: F,
+        gamma: F,
+        rng: &mut (impl RngCore + CryptoRng),
+        transcript: &mut T,
+    ) -> Result<Committed<F>, Error>
+    where
+        F: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
+        CS::Commitment: Hashable<T::Hash>,
+    {
+        let product = self.compute_product(pk, beta, gamma, rng);
+        let product_commitment = CS::commit_lagrange(params, &product.product_poly_lagrange);
+        product.finalize::<CS, T>(pk, product_commitment, transcript)
+    }
 }
 
 impl<F: PrimeField> ProductComputed<F> {
