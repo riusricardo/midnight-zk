@@ -225,7 +225,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             // MIDNIGHT_MSM_PRECOMPUTE (the hand-rolled upload this replaces
             // silently ignored the precompute factor). Note: with factor > 1
             // the cached bases only serve full-size (msm_size == n) MSMs;
-            // smaller commits fall back to BLST via the usual error path.
+            // `commit` zero-pads smaller MSMs to n.
             let ctx = crate::poly::kzg::msm::try_get_msm_context()
                 .ok_or(crate::poly::Error::OpeningError)?;
 

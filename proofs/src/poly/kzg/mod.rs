@@ -96,10 +96,20 @@ where
             if is_gpu_engine::<E>() && should_use_gpu(size) {
                 // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
                 // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
-                match params
-                    .try_get_or_upload_gpu_bases()
-                    .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
-                {
+                match params.try_get_or_upload_gpu_bases().and_then(|db| {
+                    // Precomputed bases (MIDNIGHT_MSM_PRECOMPUTE > 1) only serve MSMs of
+                    // the uploaded size n, so a shorter polynomial (e.g. the n-1
+                    // coefficient opening quotient of `multi_open`, on every proof) is
+                    // zero-padded to n. Zero scalars leave the commitment unchanged; this
+                    // expected size mismatch is not a GPU failure.
+                    if db.is_precomputed() && size < db.original_size() {
+                        let mut padded = scalars.to_vec();
+                        padded.resize(db.original_size(), E::Fr::ZERO);
+                        try_msm_with_cached_bases::<E::G1Affine>(&padded, db)
+                    } else {
+                        try_msm_with_cached_bases::<E::G1Affine>(scalars, db)
+                    }
+                }) {
                     Ok(r) => r,
                     Err(e) => {
                         midnight_bls12_381_cuda::config::note_gpu_fallback(
