@@ -283,6 +283,25 @@ where
     }
     let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
 
+    // Precomputed bases (MIDNIGHT_MSM_PRECOMPUTE > 1) only serve MSMs of exactly the
+    // uploaded size, so a shorter MSM (e.g. the n-1 coefficient KZG opening quotient
+    // in `multi_open`) is an expected case, not a GPU failure. Zero-pad it: zero
+    // scalars leave the sum unchanged, so the result is exact.
+    let padded: Vec<Fq>;
+    let fq_coeffs = if device_bases.is_precomputed()
+        && fq_coeffs.len() < device_bases.original_size()
+    {
+        padded = fq_coeffs
+            .iter()
+            .copied()
+            .chain(std::iter::repeat(Fq::ZERO))
+            .take(device_bases.original_size())
+            .collect();
+        &padded[..]
+    } else {
+        fq_coeffs
+    };
+
     let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;
     let handle = ctx
         .msm_with_device_bases_async(fq_coeffs, device_bases)
