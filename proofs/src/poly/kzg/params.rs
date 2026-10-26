@@ -288,7 +288,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// This is the production-ready batch commit that provides optimal performance
     /// for multiple commitments by enabling GPU kernel pipelining.
     /// 
-    /// Falls back to sequential sync commits if async is not beneficial.
+    /// Falls back to sequential sync commits if async is not beneficial. Like
+    /// `commit_lagrange`, any GPU error (base upload, MSM launch or wait) is reported
+    /// through `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the affected
+    /// commitments are computed on the CPU instead.
     #[cfg(feature = "gpu")]
     pub fn commit_lagrange_batch(
         &self,
@@ -297,7 +300,13 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
+        use crate::poly::kzg::msm::{msm_batch_async, msm_specific, try_msm_with_cached_bases};
+        use midnight_bls12_381_cuda::config::note_gpu_fallback;
+
+        // CPU commitment, computed exactly as `commit_lagrange` does.
+        let cpu_commit = |scalars: &[E::Fr]| -> E::G1 {
+            msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
+        };
         
         if polys.is_empty() {
             return vec![];
@@ -307,7 +316,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         // Consider total work, not just individual MSM size
         let individual_size = polys[0].len();
         let batch_count = polys.len();
-        let use_async = batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
+        // Only Bls12 params can use the GPU (see `is_bls12`); other engines take the
+        // CPU path directly, which is not a GPU fallback.
+        let gpu_engine = Self::is_bls12();
+        let use_async =
+            gpu_engine && batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
         
         #[cfg(feature = "trace-kzg")]
         if batch_count > 1 {
@@ -324,36 +337,44 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             // Convert all polynomials to scalar vectors
             let scalars: Vec<Vec<E::Fr>> = polys.iter()
                 .map(|poly| {
+                    assert!(self.g_lagrange.len() >= poly.len());
                     let mut s = Vec::with_capacity(poly.len());
                     s.extend(poly.iter());
                     s
                 })
                 .collect();
-            
-            let device_bases = self.get_or_upload_gpu_lagrange_bases();
             let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
             
             // Launch all MSMs asynchronously
-            match msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases) {
+            match self
+                .try_get_or_upload_gpu_lagrange_bases()
+                .and_then(|device_bases| msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases))
+            {
                 Ok(handles) => {
                     // Wait for all results and transmute to E::G1
                     return handles.into_iter()
-                        .map(|h| {
-                            let result = h.wait().expect("Async commit failed");
-                            // Safe: E::G1 is midnight_curves::G1Projective for all supported curves
-                            unsafe { std::mem::transmute_copy(&result) }
+                        .zip(&scalar_refs)
+                        .map(|(h, scalars)| match h.wait() {
+                            // SAFETY: `use_async` implies E is Bls12, so E::G1 is
+                            // midnight_curves::G1Projective, the type the handle yields.
+                            Ok(result) => unsafe { std::mem::transmute_copy(&result) },
+                            Err(e) => {
+                                note_gpu_fallback(
+                                    "MSM (commit_lagrange_batch)", &format!("{:?}", e));
+                                cpu_commit(scalars)
+                            }
                         })
                         .collect();
                 }
-                Err(_) => {
-                    // Fallback to sync
-                    #[cfg(feature = "trace-kzg")]
-                    eprintln!("[KZG::batch] Async failed, falling back to sync");
+                Err(e) => {
+                    // Base upload or MSM launch failed: commit the whole batch on CPU.
+                    note_gpu_fallback("MSM (commit_lagrange_batch)", &format!("{:?}", e));
+                    return scalar_refs.iter().map(|scalars| cpu_commit(scalars)).collect();
                 }
             }
         }
         
-        // Sync path (fallback or not beneficial)
+        // Sync path (async not beneficial), same routing as `commit_lagrange`
         // Use polynomial directly via Deref - no allocation needed
         polys.iter()
             .map(|poly| {
@@ -361,12 +382,19 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                 let size = scalars.len();
                 assert!(self.g_lagrange.len() >= size);
                 
-                if should_use_gpu(size) {
-                    let device_bases = self.get_or_upload_gpu_lagrange_bases();
-                    msm_with_cached_bases::<E::G1Affine>(scalars, device_bases)
+                if gpu_engine && should_use_gpu(size) {
+                    match self
+                        .try_get_or_upload_gpu_lagrange_bases()
+                        .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            note_gpu_fallback("MSM (commit_lagrange_batch)", &format!("{:?}", e));
+                            cpu_commit(scalars)
+                        }
+                    }
                 } else {
-                    use crate::poly::kzg::msm::msm_specific;
-                    msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..size])
+                    cpu_commit(scalars)
                 }
             })
             .collect()

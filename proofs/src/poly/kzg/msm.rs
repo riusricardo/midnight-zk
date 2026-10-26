@@ -534,7 +534,7 @@ where
     }
     let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
     
-    let ctx = get_msm_context();
+    let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;
     ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
         .map_err(|_| crate::poly::Error::OpeningError)
 }
