@@ -328,7 +328,12 @@ pub fn try_msm_with_cached_bases<C: CurveAffine + 'static>(
 where
     C::Scalar: ff::PrimeField + 'static,
 {
-    // Verify we're using midnight_curves (BLS12-381) and convert coefficients
+    // Verify we're using midnight_curves (BLS12-381) and convert coefficients.
+    // The curve check makes the `projective_to_curve` reinterpretation below
+    // valid for any `C` (it only debug-asserts it).
+    if !is_g1_affine::<C>() {
+        return Err(crate::poly::Error::OpeningError);
+    }
     let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
 
     let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;

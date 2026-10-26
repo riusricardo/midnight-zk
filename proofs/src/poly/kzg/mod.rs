@@ -89,9 +89,11 @@ where
         #[cfg(feature = "gpu")]
         let result = {
             use crate::gpu_accel::should_use_gpu;
-            use crate::poly::kzg::msm::try_msm_with_cached_bases;
+            use crate::poly::kzg::{msm::try_msm_with_cached_bases, params::is_gpu_engine};
 
-            if should_use_gpu(size) {
+            // Engines other than midnight BLS12-381 have no GPU path: CPU is
+            // their intended path, so they skip it without a fallback report.
+            if is_gpu_engine::<E>() && should_use_gpu(size) {
                 // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
                 // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
                 match params
@@ -137,9 +139,10 @@ where
         #[cfg(feature = "gpu")]
         let result = {
             use crate::gpu_accel::should_use_gpu;
-            use crate::poly::kzg::msm::try_msm_with_cached_bases;
+            use crate::poly::kzg::{msm::try_msm_with_cached_bases, params::is_gpu_engine};
 
-            if should_use_gpu(size) {
+            // Engines other than midnight BLS12-381 have no GPU path (see `commit`).
+            if is_gpu_engine::<E>() && should_use_gpu(size) {
                 // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
                 // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
                 match params

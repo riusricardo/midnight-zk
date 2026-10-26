@@ -23,6 +23,21 @@ use crate::{
     },
 };
 
+/// True iff `E` is `midnight_curves::Bls12`, the only engine the GPU backend
+/// supports.
+///
+/// The GPU MSM paths view `E::G1Affine` bases as `midnight_curves::G1Affine`,
+/// `E::Fr` scalars as `midnight_curves::Fq` and the backend's `G1Projective`
+/// results as `E::G1`, which is only valid for this engine. Any other engine
+/// takes the CPU MSM: that is its intended path, not a GPU failure, so it must
+/// not be reported through `note_gpu_fallback`. `pairing::Engine: 'static`, so
+/// this is an exact `TypeId` comparison.
+#[cfg(feature = "gpu")]
+#[inline]
+pub(crate) fn is_gpu_engine<E: Engine>() -> bool {
+    std::any::TypeId::of::<E>() == std::any::TypeId::of::<midnight_curves::Bls12>()
+}
+
 /// These are the public parameters for the polynomial commitment scheme.
 /// 
 /// # GPU Acceleration
@@ -200,6 +215,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
+            return Err(crate::poly::Error::OpeningError);
+        }
         self.g_gpu.get_or_try_init(|| {
             // Route through the backend crate's upload API: it sets the device,
             // does the zero-copy Montgomery-preserving conversion, and applies
@@ -214,12 +233,13 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             let mut bases_affine = vec![E::G1Affine::identity(); self.g.len()];
             E::G1::batch_normalize(&self.g, &mut bases_affine);
 
-            // Zero-copy view as midnight-curves points (Montgomery form
-            // preserved; the upload keeps it — are_bases_montgomery_form=true
-            // at MSM time).
-            let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
-                std::mem::transmute(bases_affine.as_slice())
-            };
+            // View as midnight-curves points (Montgomery form preserved; the
+            // upload keeps it — are_bases_montgomery_form=true at MSM time).
+            // E is Bls12 (checked above), so this checked downcast is the
+            // identity and never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
+                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
+                .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -240,6 +260,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// (for CPU fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_lagrange_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
+            return Err(crate::poly::Error::OpeningError);
+        }
         self.g_lagrange_gpu.get_or_try_init(|| {
             // Same routing as try_get_or_upload_gpu_bases: backend upload API
             // (device setup + zero-copy Montgomery view + MIDNIGHT_MSM_PRECOMPUTE).
@@ -252,10 +276,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             let mut bases_affine = vec![E::G1Affine::identity(); self.g_lagrange.len()];
             E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
 
-            // Zero-copy view as midnight-curves points (Montgomery form preserved).
-            let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
-                std::mem::transmute(bases_affine.as_slice())
-            };
+            // View as midnight-curves points (Montgomery form preserved). E is
+            // Bls12 (checked above), so this checked downcast never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
+                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
+                .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -272,7 +297,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// GPU failures are handled like in `commit_lagrange` (fix C5): any error
     /// (base upload, async launch or wait) is reported through
     /// `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the affected
-    /// polynomials are committed with the CPU MSM `commit_lagrange` uses.
+    /// polynomials are committed with the CPU MSM `commit_lagrange` uses. Engines
+    /// other than `midnight_curves::Bls12` always take that CPU MSM.
     #[cfg(feature = "gpu")]
     pub fn commit_lagrange_batch(
         &self,
@@ -292,11 +318,24 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         let cpu_commit = |scalars: &[E::Fr]| -> E::G1 {
             msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
         };
+        // The GPU result is a midnight `G1Projective`; E is Bls12 on every GPU
+        // path below, so E::G1 is that same type and the checked downcast is
+        // the identity.
+        let to_e_g1 = |p: midnight_curves::G1Projective| -> E::G1 {
+            *(&p as &dyn std::any::Any)
+                .downcast_ref::<E::G1>()
+                .expect("GPU commit path is only taken for E = midnight_curves::Bls12")
+        };
 
         if polys.is_empty() {
             return vec![];
         }
         assert!(polys.iter().all(|poly| self.g_lagrange.len() >= poly.len()));
+
+        // Only midnight BLS12-381 has a GPU path (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
+            return polys.iter().map(|poly| cpu_commit(poly)).collect();
+        }
         
         // Check if async/GPU is beneficial for this batch
         // Consider total work, not just individual MSM size
@@ -350,8 +389,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                         Err(e) => Err(format!("async launch: {:?}", e)),
                     };
                     match result {
-                        // Safe: E::G1 is midnight_curves::G1Projective for all supported curves
-                        Ok(r) => unsafe { std::mem::transmute_copy(&r) },
+                        Ok(r) => to_e_g1(r),
                         Err(detail) => {
                             note_gpu_fallback("MSM (commit_lagrange_batch)", &detail);
                             cpu_commit(s)
