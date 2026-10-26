@@ -268,6 +268,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// for multiple commitments by enabling GPU kernel pipelining.
     /// 
     /// Falls back to sequential sync commits if async is not beneficial.
+    ///
+    /// GPU failures are handled like in `commit_lagrange` (fix C5): any error
+    /// (base upload, async launch or wait) is reported through
+    /// `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the affected
+    /// polynomials are committed with the CPU MSM `commit_lagrange` uses.
     #[cfg(feature = "gpu")]
     pub fn commit_lagrange_batch(
         &self,
@@ -276,11 +281,22 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use crate::poly::kzg::msm::{msm_batch_async, msm_with_cached_bases};
-        
+        use midnight_bls12_381_cuda::config::note_gpu_fallback;
+
+        use crate::poly::kzg::msm::{
+            msm_specific, msm_with_cached_bases_async, try_msm_with_cached_bases,
+        };
+
+        // The CPU MSM of `commit_lagrange` (its sub-threshold path and its
+        // GPU-failure fallback).
+        let cpu_commit = |scalars: &[E::Fr]| -> E::G1 {
+            msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
+        };
+
         if polys.is_empty() {
             return vec![];
         }
+        assert!(polys.iter().all(|poly| self.g_lagrange.len() >= poly.len()));
         
         // Check if async/GPU is beneficial for this batch
         // Consider total work, not just individual MSM size
@@ -309,43 +325,60 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                 })
                 .collect();
             
-            let device_bases = self.get_or_upload_gpu_lagrange_bases();
-            let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
-            
-            // Launch all MSMs asynchronously
-            match msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases) {
-                Ok(handles) => {
-                    // Wait for all results and transmute to E::G1
-                    return handles.into_iter()
-                        .map(|h| {
-                            let result = h.wait().expect("Async commit failed");
-                            // Safe: E::G1 is midnight_curves::G1Projective for all supported curves
-                            unsafe { std::mem::transmute_copy(&result) }
-                        })
-                        .collect();
+            let device_bases = match self.try_get_or_upload_gpu_lagrange_bases() {
+                Ok(device_bases) => device_bases,
+                Err(e) => {
+                    note_gpu_fallback(
+                        "MSM (commit_lagrange_batch)",
+                        &format!("Lagrange base upload: {:?} ({} polys)", e, batch_count),
+                    );
+                    return scalars.iter().map(|s| cpu_commit(s)).collect();
                 }
-                Err(_) => {
-                    // Fallback to sync
-                    #[cfg(feature = "trace-kzg")]
-                    eprintln!("[KZG::batch] Async failed, falling back to sync");
-                }
-            }
+            };
+
+            // Launch all MSMs asynchronously, then wait for them in order. A
+            // polynomial whose launch or wait fails is committed on CPU; the
+            // others keep their GPU result.
+            let launches: Vec<_> = scalars.iter()
+                .map(|s| msm_with_cached_bases_async::<E::G1Affine>(s, device_bases))
+                .collect();
+            return launches.into_iter()
+                .zip(&scalars)
+                .map(|(launch, s)| {
+                    let result = match launch {
+                        Ok(handle) => handle.wait().map_err(|e| format!("async wait: {:?}", e)),
+                        Err(e) => Err(format!("async launch: {:?}", e)),
+                    };
+                    match result {
+                        // Safe: E::G1 is midnight_curves::G1Projective for all supported curves
+                        Ok(r) => unsafe { std::mem::transmute_copy(&r) },
+                        Err(detail) => {
+                            note_gpu_fallback("MSM (commit_lagrange_batch)", &detail);
+                            cpu_commit(s)
+                        }
+                    }
+                })
+                .collect();
         }
         
-        // Sync path (fallback or not beneficial)
+        // Sync path (not beneficial): per polynomial, exactly `commit_lagrange`.
         // Use polynomial directly via Deref - no allocation needed
         polys.iter()
             .map(|poly| {
                 let scalars: &[E::Fr] = &***poly;
-                let size = scalars.len();
-                assert!(self.g_lagrange.len() >= size);
-                
-                if should_use_gpu(size) {
-                    let device_bases = self.get_or_upload_gpu_lagrange_bases();
-                    msm_with_cached_bases::<E::G1Affine>(scalars, device_bases)
+                if should_use_gpu(scalars.len()) {
+                    match self
+                        .try_get_or_upload_gpu_lagrange_bases()
+                        .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            note_gpu_fallback("MSM (commit_lagrange_batch)", &format!("{:?}", e));
+                            cpu_commit(scalars)
+                        }
+                    }
                 } else {
-                    use crate::poly::kzg::msm::msm_specific;
-                    msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..size])
+                    cpu_commit(scalars)
                 }
             })
             .collect()

@@ -608,11 +608,11 @@ where
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-ASYNC] Launching async MSM with {} points", coeffs.len());
     
-    // Use dispatch helper for type-safe conversion
-    let fq_coeffs = try_as_fq_slice(coeffs)
-        .expect("MSM must use midnight_curves::G1Affine (BLS12-381)");
+    // Use dispatch helper for type-safe conversion. Errors (rather than
+    // panics) so callers can fall back to CPU (fix C5).
+    let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
     
-    let ctx = get_msm_context();
+    let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;
     ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
         .map_err(|_| crate::poly::Error::OpeningError)
 }
