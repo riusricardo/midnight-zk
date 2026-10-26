@@ -1,11 +1,12 @@
-use std::fmt::Debug;
+use std::{any::TypeId, fmt::Debug};
 
 #[cfg(feature = "gpu")]
 use std::sync::OnceLock;
 
 use ff::Field;
-use group::Group;
+use group::{Curve, Group};
 use midnight_curves::{
+    msm::msm_best,
     pairing::{Engine, MillerLoopResult, MultiMillerLoop},
     CurveAffine, Fq, G1Projective,
 };
@@ -213,7 +214,7 @@ where
 /// Check if BLST optimization is available for the given curve type
 /// 
 /// This should always return true for midnight_curves::G1Affine (BLS12-381).
-/// If this returns false, the code will panic in msm_specific().
+/// If this returns false, msm_specific() uses the generic `msm_best` path.
 #[inline]
 pub fn is_blst_available<C: CurveAffine + 'static>() -> bool {
     // Use the dispatch helper for cleaner type checking
@@ -287,122 +288,65 @@ where
 }
 
 #[allow(unsafe_code)]
-/// MSM using BLST multi_exp with optional GPU acceleration
-/// 
-/// # Architecture Notes
-/// 
-/// This function is the **fallback path** for MSMs without pre-cached GPU bases.
-/// For SRS-based commitments (the hot path), use `msm_with_cached_bases()` instead,
-/// which uses bases already uploaded to GPU memory.
-/// 
+/// Wrapper over the MSM function to use the blstrs underlying function, with
+/// optional GPU acceleration.
+///
+/// # GPU acceleration (`gpu` feature)
+///
+/// This is the **non-cached** MSM path. SRS commitments (`commit()` /
+/// `commit_lagrange()`) use bases pre-uploaded to GPU memory
+/// (`try_msm_with_cached_bases()`) and only fall back to this function.
+///
 /// **Call sites:**
 /// - `MSMKZG::eval()` - Verification accumulator (small, BLST is fine)
 /// - Fallback when `!should_use_gpu(size)` - Small MSMs use BLST
-/// - Non-SRS MSMs - Rare, converts projective→affine each call
+/// - CPU fallback of the cached-bases commit paths
 ///
-/// # GPU Acceleration
-/// When compiled with `gpu` feature and size >= 16384 (K≥14):
-/// - Uses ICICLE CUDA backend via GPU executor
-/// - Converts projective bases to affine (overhead for non-cached bases)
-/// - For cached SRS bases, prefer `msm_with_cached_bases()`
-///
-/// This function REQUIRES midnight_curves::G1Affine and will panic if used with other curves.
+/// For BLS12-381 MSMs at or above the GPU threshold (`should_use_gpu`), the
+/// projective bases are converted to affine and the MSM runs on the GPU. Any GPU
+/// failure (or an unavailable GPU context) is reported through
+/// `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the MSM is then
+/// computed on the CPU below.
 pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     #[cfg(feature = "trace-msm")]
     let start = std::time::Instant::now();
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM] Starting multi-scalar multiplication with {} points", coeffs.len());
-    
-    // Check if we're using midnight_curves (BLS12-381 with BLST)
-    // If not, fall back to generic implementation using parallelize
-    if !is_blst_available::<C>() {
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using generic fallback MSM for {}", std::any::type_name::<C>());
-        
-        use group::Group;
-        use crate::utils::arithmetic::parallelize;
-        
-        let num_threads = rayon::current_num_threads();
-        let base_chunk_size = coeffs.len() / num_threads;
-        let remainder = coeffs.len() % num_threads;
-        
-        let mut results = vec![C::Curve::identity(); num_threads];
-        
-        parallelize(&mut results, |results_chunk, chunk_idx| {
-            // Calculate the range for this chunk
-            let chunk_size = if chunk_idx < remainder {
-                base_chunk_size + 1
-            } else {
-                base_chunk_size
-            };
-            
-            let start = if chunk_idx < remainder {
-                chunk_idx * (base_chunk_size + 1)
-            } else {
-                remainder * (base_chunk_size + 1) + (chunk_idx - remainder) * base_chunk_size
-            };
-            let end = start + chunk_size;
-            
-            if start >= coeffs.len() {
-                return;
-            }
-            
-            let mut acc = C::Curve::identity();
-            for i in start..end.min(coeffs.len()) {
-                acc = (acc + bases[i] * coeffs[i]).into();
-            }
-            results_chunk[0] = acc;
-        });
-        
-        let result = results.iter().fold(C::Curve::identity(), |acc, r| acc + r);
-        
-        #[cfg(feature = "trace-msm")]
-        {
-            let elapsed = start.elapsed();
-            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
-        }
-        
-        return result;
-    }
-    
-    // Safe: we verified the type is midnight_curves::G1Affine
-    let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
-    let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
-    
+
     #[cfg(feature = "gpu")]
     {
-        let size = bases.len();
-        
+        let size = coeffs.len();
+
         // Check if GPU should be used (respects MIDNIGHT_DEVICE and size threshold)
-        // If false, fall through to BLST path
+        // If false, fall through to the CPU path below.
         // Correctness fix C5: probe the GPU context WITHOUT panicking. On GPU
         // unavailability (`try_get_msm_context` -> None) or any GPU error, fall through to
-        // the BLST (CPU) path below. This makes `msm_specific` a safe fallback target for
+        // the CPU path below. This makes `msm_specific` a safe fallback target for
         // the commit hot path even on a `gpu`-built binary running with no usable GPU.
-        if should_use_gpu(size) {
+        if is_blst_available::<C>() && should_use_gpu(size) {
             if let Some(ctx) = try_get_msm_context() {
                 #[cfg(feature = "trace-msm")]
                 eprintln!("   [MSM] Using GPU backend ({} points)", size);
 
+                // Safe: we verified the type is midnight_curves::G1Affine
+                let fq_coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+                let proj_bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
+
                 // Convert projective bases to affine for GPU MSM
-                let bases_affine: Vec<G1Affine> = bases.iter().map(|p| G1Affine::from(*p)).collect();
+                let bases_affine: Vec<G1Affine> =
+                    proj_bases.iter().map(|p| G1Affine::from(*p)).collect();
 
-                match ctx.msm(coeffs, &bases_affine) {
+                match ctx.msm(fq_coeffs, &bases_affine) {
                     Ok(res) => {
-                        let result = unsafe { std::mem::transmute_copy(&res) };
-
                         #[cfg(feature = "trace-msm")]
-                        {
-                            let elapsed = start.elapsed();
-                            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
-                        }
+                        eprintln!("✓  [MSM] Completed in {:?}", start.elapsed());
 
-                        return result;
+                        return unsafe { std::mem::transmute_copy(&res) };
                     }
                     Err(e) => {
                         // GPU MSM was attempted and FAILED: make it observable +
                         // strict-fatal (was silent unless the trace-msm feature was
-                        // on), then fall through to the BLST path below.
+                        // on), then fall through to the CPU path below.
                         midnight_bls12_381_cuda::config::note_gpu_fallback(
                             "MSM (msm_specific)", &format!("{:?}", e));
                     }
@@ -412,46 +356,37 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
                 // unavailable — e.g. the backend .so failed to load or a wrong
                 // ICICLE_BACKEND_INSTALL_DIR. This was a fully silent BLST
                 // fallback (the backend-dir trap); make it observable +
-                // strict-fatal before falling through to BLST.
+                // strict-fatal before falling through to the CPU path.
                 midnight_bls12_381_cuda::config::note_gpu_fallback(
                     "MSM (msm_specific): GPU context unavailable",
                     "try_get_msm_context() returned None");
             }
         }
-        
-        // Use BLST directly for small MSMs - no conversion overhead
-        #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using BLST multi_exp (size: {} points)", size);
-        
-        let res = G1Projective::multi_exp(bases, coeffs);
-        let result = unsafe { std::mem::transmute_copy(&res) };
-        
-        #[cfg(feature = "trace-msm")]
-        {
-            let elapsed = start.elapsed();
-            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
-        }
-        
-        result
     }
-    
-    #[cfg(not(feature = "gpu"))]
+
+    // We empirically checked that for MSMs larger than 2**18, the blstrs
+    // implementation regresses.
+    let result = if coeffs.len() <= (2 << 18)
+        && TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
     {
-        // CPU-only path using BLST multi_exp
         #[cfg(feature = "trace-msm")]
-        eprintln!("   [MSM] Using BLST multi_exp (BLS12-381 optimized)");
-        
+        eprintln!("   [MSM] Using BLST multi_exp (size: {} points)", coeffs.len());
+
+        // Safe: we just checked type
+        let coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
+        let bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
         let res = G1Projective::multi_exp(bases, coeffs);
-        let result = unsafe { std::mem::transmute_copy(&res) };
-        
-        #[cfg(feature = "trace-msm")]
-        {
-            let elapsed = start.elapsed();
-            eprintln!("✓  [MSM] Completed in {:?}", elapsed);
-        }
-        
-        result
-    }
+        unsafe { std::mem::transmute_copy(&res) }
+    } else {
+        let mut affine_bases = vec![C::identity(); coeffs.len()];
+        C::Curve::batch_normalize(bases, &mut affine_bases);
+        msm_best(coeffs, &affine_bases)
+    };
+
+    #[cfg(feature = "trace-msm")]
+    eprintln!("✓  [MSM] Completed in {:?}", start.elapsed());
+
+    result
 }
 
 /// Two channel MSM accumulator
