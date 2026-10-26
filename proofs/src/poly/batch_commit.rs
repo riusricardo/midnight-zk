@@ -33,7 +33,84 @@ use crate::gpu_accel::should_use_gpu_batch;
 #[cfg(feature = "gpu")]
 use crate::poly::kzg::params::ParamsKZG;
 #[cfg(feature = "gpu")]
-use midnight_curves::{Bls12, Fq};
+use midnight_curves::{Bls12, Fq, G1Projective};
+
+/// Commits `polys` with [`ParamsKZG::commit_lagrange_batch`] (GPU pipelining)
+/// when `CS` is KZG over midnight BLS12-381, the GPU-supported configuration.
+/// Returns `None` for any other configuration; the caller then commits the
+/// polynomials one by one with `CS::commit_lagrange`.
+///
+/// # How `CS` is identified
+///
+/// `PolynomialCommitmentScheme` has no `'static` bound, and neither do its
+/// callers up to the public `create_proof`, so `TypeId` (which needs
+/// `'static`) only applies to `F` (`PrimeField: 'static`). The check is:
+/// - `F == midnight_curves::Fq`, exactly (`TypeId`);
+/// - `CS::Parameters` has the size and alignment of `ParamsKZG<Bls12>`, and
+///   `CS::Commitment` those of `G1Projective`.
+///
+/// This identifies `KZGCommitmentScheme<Bls12>` among every scheme
+/// midnight-proofs defines: its only `PolynomialCommitmentScheme`
+/// implementation is `KZGCommitmentScheme<E>` (`Parameters = ParamsKZG<E>`,
+/// `Commitment = E::G1`), and `F = E::Fr = Fq` singles out `E = Bls12` among
+/// the engines of midnight-curves (`Bn256`, the only other one, has its own
+/// `Fr`). For that scheme `Parameters` is exactly `ParamsKZG<Bls12>` and
+/// `Commitment` exactly `G1Projective`, so the casts below are identities.
+///
+/// It is not a proof of type identity: a third-party scheme over `Fq` (or an
+/// `Engine` with `Fr = Fq`) whose types merely share these layouts would pass
+/// and make the casts unsound. No such implementation exists in midnight-zk or
+/// the Midnight ledger. Making the check exact needs a `'static` bound on `CS`
+/// (a breaking change to `create_proof`) or a batch-commit method on
+/// `PolynomialCommitmentScheme`.
+#[cfg(feature = "gpu")]
+pub(crate) fn commit_lagrange_batch_if_kzg_bls12<F, CS>(
+    params: &CS::Parameters,
+    polys: &[&Polynomial<F, LagrangeCoeff>],
+) -> Option<Vec<CS::Commitment>>
+where
+    F: PrimeField + 'static,
+    CS: PolynomialCommitmentScheme<F>,
+{
+    use std::any::Any;
+
+    let is_kzg_bls12 = crate::gpu_accel::is_fq::<F>()
+        && size_of::<CS::Parameters>() == size_of::<ParamsKZG<Bls12>>()
+        && align_of::<CS::Parameters>() == align_of::<ParamsKZG<Bls12>>()
+        && size_of::<CS::Commitment>() == size_of::<G1Projective>()
+        && align_of::<CS::Commitment>() == align_of::<G1Projective>();
+    if !is_kzg_bls12 {
+        return None;
+    }
+
+    #[cfg(feature = "trace-kzg")]
+    eprintln!("[BATCH_COMMIT] KZG/BLS12-381 batch commit of {} polynomials", polys.len());
+
+    // `F` is `Fq` (TypeId), so this checked downcast is the identity.
+    let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = polys
+        .iter()
+        .map(|p| {
+            (*p as &dyn Any)
+                .downcast_ref::<Polynomial<Fq, LagrangeCoeff>>()
+                .expect("F is Fq (TypeId-checked above)")
+        })
+        .collect();
+
+    // SAFETY: `CS` is `KZGCommitmentScheme<Bls12>` (see "How `CS` is
+    // identified"), so `CS::Parameters` is `ParamsKZG<Bls12>` and
+    // `CS::Commitment` is `<Bls12 as Engine>::G1 = G1Projective`, the element
+    // type `commit_lagrange_batch` returns: both casts are identities.
+    unsafe {
+        let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
+        let commitments: Vec<G1Projective> = kzg_params.commit_lagrange_batch(&poly_refs);
+        Some(
+            commitments
+                .iter()
+                .map(|c| std::mem::transmute_copy::<G1Projective, CS::Commitment>(c))
+                .collect(),
+        )
+    }
+}
 
 /// Batch commit multiple Lagrange polynomials with GPU pipelining when available.
 ///
@@ -67,8 +144,6 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use crate::gpu_accel::is_fq;
-    
     if polys.is_empty() {
         return vec![];
     }
@@ -78,51 +153,23 @@ where
         return vec![CS::commit_lagrange(params, &polys[0])];
     }
     
-    // Check if we're using KZG with BLS12-381 (midnight_curves) - the GPU-supported configuration
-    // AND if GPU batching would be beneficial for this size
+    // Use the KZG/BLS12-381 batch (GPU pipelining) only if GPU batching
+    // would be beneficial for this size
     let individual_size = polys[0].len();
     let batch_count = polys.len();
     let gpu_beneficial = should_use_gpu_batch(individual_size, batch_count);
     
-    // Use size_of/align_of checks for Parameters (to avoid 'static bound requirement)
-    // and is_fq helper for F (cleaner than manual TypeId)
-    let params_match = size_of::<CS::Parameters>() == size_of::<ParamsKZG<Bls12>>()
-        && align_of::<CS::Parameters>() == align_of::<ParamsKZG<Bls12>>();
-    let field_match = is_fq::<F>();
-    
-    if gpu_beneficial && params_match && field_match {
-        #[cfg(feature = "trace-kzg")]
-        eprintln!("[BATCH_COMMIT] GPU pipelining {} polynomials", polys.len());
-        
-        // SAFETY: We just verified both types match at runtime via TypeId checks.
-        // This is safe because:
-        // 1. size_of/align_of check guarantees CS::Parameters is ParamsKZG<Bls12>
-        // 2. is_fq check guarantees F is midnight_curves::Fq
-        // 3. Polynomial<F, L> and Polynomial<Fq, L> have identical memory layout
-        //    (both are Vec<F> where F has same size and alignment)
-        unsafe {
-            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
-            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
-                polys.iter()
-                    .map(|p| &*(p as *const Polynomial<F, LagrangeCoeff> 
-                               as *const Polynomial<Fq, LagrangeCoeff>))
-                    .collect();
-            
-            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
-            
-            // Transmute back to CS::Commitment
-            // SAFETY: For KZG Bls12, CS::Commitment is midnight_curves::G1Affine,
-            // which is the same type returned by commit_lagrange_batch
-            batch_commits.into_iter()
-                .map(|c| std::mem::transmute_copy(&c))
-                .collect()
+    if gpu_beneficial {
+        let poly_refs: Vec<&Polynomial<F, LagrangeCoeff>> = polys.iter().collect();
+        if let Some(commitments) = commit_lagrange_batch_if_kzg_bls12::<F, CS>(params, &poly_refs) {
+            return commitments;
         }
-    } else {
-        // For CPU path, just call commit_lagrange directly - no batching overhead
-        polys.iter()
-            .map(|poly| CS::commit_lagrange(params, poly))
-            .collect()
     }
+
+    // For CPU path, just call commit_lagrange directly - no batching overhead
+    polys.iter()
+        .map(|poly| CS::commit_lagrange(params, poly))
+        .collect()
 }
 
 /// Non-GPU version that just does sequential commits
@@ -153,8 +200,6 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use crate::gpu_accel::is_fq;
-    
     if polys.is_empty() {
         return vec![];
     }
@@ -164,41 +209,22 @@ where
         return vec![CS::commit_lagrange(params, polys[0])];
     }
     
-    // Check if we're using KZG with BLS12-381 (midnight_curves)
-    // AND if GPU batching would be beneficial
+    // Use the KZG/BLS12-381 batch (GPU pipelining) only if GPU batching
+    // would be beneficial
     let individual_size = polys[0].len();
     let batch_count = polys.len();
     let gpu_beneficial = should_use_gpu_batch(individual_size, batch_count);
     
-    // Use size_of/align_of checks for Parameters and is_fq for field
-    let params_match = size_of::<CS::Parameters>() == size_of::<ParamsKZG<Bls12>>()
-        && align_of::<CS::Parameters>() == align_of::<ParamsKZG<Bls12>>();
-    let field_match = is_fq::<F>();
-    
-    if gpu_beneficial && params_match && field_match {
-        #[cfg(feature = "trace-kzg")]
-        eprintln!("[BATCH_COMMIT] GPU pipelining {} polynomials (refs)", polys.len());
-        
-        unsafe {
-            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
-            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
-                polys.iter()
-                    .map(|p| &*(*p as *const Polynomial<F, LagrangeCoeff> 
-                               as *const Polynomial<Fq, LagrangeCoeff>))
-                    .collect();
-            
-            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
-            
-            batch_commits.into_iter()
-                .map(|c| std::mem::transmute_copy(&c))
-                .collect()
+    if gpu_beneficial {
+        if let Some(commitments) = commit_lagrange_batch_if_kzg_bls12::<F, CS>(params, polys) {
+            return commitments;
         }
-    } else {
-        // For CPU path, just call commit_lagrange directly - no batching overhead
-        polys.iter()
-            .map(|poly| CS::commit_lagrange(params, *poly))
-            .collect()
     }
+
+    // For CPU path, just call commit_lagrange directly - no batching overhead
+    polys.iter()
+        .map(|poly| CS::commit_lagrange(params, *poly))
+        .collect()
 }
 
 /// Non-GPU version
