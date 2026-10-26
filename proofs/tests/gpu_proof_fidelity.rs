@@ -49,9 +49,9 @@ use midnight_curves::{
 use midnight_proofs::{
     circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
     plonk::{
-        commit_to_instances, create_proof, keygen_pk, keygen_vk_with_k, prepare, Advice,
-        Challenge, Circuit, Column, ConstraintSystem, Constraints, Error, FirstPhase, Instance,
-        SecondPhase, Selector, TableColumn,
+        commit_to_instances, create_proof, keygen_pk, keygen_vk_with_k, prepare, Advice, Challenge,
+        Circuit, Column, ConstraintSystem, Constraints, Error, FirstPhase, Instance, SecondPhase,
+        Selector, TableColumn,
     },
     poly::{
         commitment::Guard,
@@ -233,14 +233,21 @@ impl Circuit<Fq> for FidelityCircuit {
         }
     }
 
-    fn synthesize(&self, config: Self::Config, mut layouter: impl Layouter<Fq>) -> Result<(), Error> {
+    fn synthesize(
+        &self,
+        config: Self::Config,
+        mut layouter: impl Layouter<Fq>,
+    ) -> Result<(), Error> {
         layouter.assign_table(
             || "range table",
             |mut table| {
                 for v in 0..TABLE_SIZE {
-                    table.assign_cell(|| "table", config.table, v as usize, || {
-                        Value::known(Fq::from(v))
-                    })?;
+                    table.assign_cell(
+                        || "table",
+                        config.table,
+                        v as usize,
+                        || Value::known(Fq::from(v)),
+                    )?;
                 }
                 Ok(())
             },
@@ -333,10 +340,16 @@ fn gpu_proof_bytes_match_cpu() {
     let gpu_msm = {
         let gpu_msm = midnight_bls12_381_cuda::should_use_gpu(1 << K);
         if device.eq_ignore_ascii_case("gpu") {
-            assert!(midnight_bls12_381_cuda::is_gpu_available(), "MIDNIGHT_DEVICE=gpu but no GPU");
+            assert!(
+                midnight_bls12_381_cuda::is_gpu_available(),
+                "MIDNIGHT_DEVICE=gpu but no GPU"
+            );
         }
         if device.eq_ignore_ascii_case("cpu") {
-            assert!(!gpu_msm, "MIDNIGHT_DEVICE=cpu must keep every MSM on the CPU");
+            assert!(
+                !gpu_msm,
+                "MIDNIGHT_DEVICE=cpu must keep every MSM on the CPU"
+            );
         }
         midnight_bls12_381_cuda::config::reset_gpu_fallback_count();
         gpu_msm
@@ -408,8 +421,14 @@ fn gpu_proof_bytes_match_cpu() {
     };
 
     let guard = prepare_guard(&proof).expect("prepare");
-    assert!(verify_on_cpu(&params, &guard), "proof failed the CPU (BLST) pairing check");
-    assert!(guard.verify(&params.verifier_params()).is_ok(), "proof failed verification");
+    assert!(
+        verify_on_cpu(&params, &guard),
+        "proof failed the CPU (BLST) pairing check"
+    );
+    assert!(
+        guard.verify(&params.verifier_params()).is_ok(),
+        "proof failed verification"
+    );
 
     // Negative control: a corrupted proof must be rejected by the CPU check.
     let mut tampered = proof.clone();
