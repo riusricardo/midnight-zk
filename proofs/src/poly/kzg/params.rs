@@ -181,6 +181,16 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         }
     }
 
+    /// Whether `E` is midnight-curves' BLS12-381, the only engine the GPU backend
+    /// supports. The GPU paths reinterpret `E`'s points and scalars as the midnight
+    /// BLS12-381 types, which is only sound for that engine: parameters over any other
+    /// engine take the CPU path, which is their intended route (not a GPU fallback).
+    #[cfg(feature = "gpu")]
+    pub(crate) fn is_bls12() -> bool {
+        // `pairing::Engine: 'static`, so the engine can be identified by `TypeId`.
+        std::any::TypeId::of::<E>() == std::any::TypeId::of::<midnight_curves::Bls12>()
+    }
+
     /// Get or upload GPU bases for coefficient form (lazy initialization)
     /// 
     /// Following ingonyama-zk pattern: bases are uploaded ONCE and cached in GPU memory,
@@ -201,6 +211,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        // The upload views `E::G1Affine` as `midnight_curves::G1Affine`: Bls12 only.
+        if !Self::is_bls12() {
+            return Err(crate::poly::Error::OpeningError);
+        }
         self.g_gpu.get_or_try_init(|| {
             // Route through the backend crate's upload API: it sets the device,
             // does the zero-copy Montgomery-preserving conversion, and applies
@@ -217,7 +231,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
 
             // Zero-copy view as midnight-curves points (Montgomery form
             // preserved; the upload keeps it — are_bases_montgomery_form=true
-            // at MSM time).
+            // at MSM time). Sound because E is Bls12 (checked above), so
+            // E::G1Affine is midnight_curves::G1Affine.
             let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
                 std::mem::transmute(bases_affine.as_slice())
             };
@@ -241,6 +256,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// (for CPU fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_lagrange_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
+        // The upload views `E::G1Affine` as `midnight_curves::G1Affine`: Bls12 only.
+        if !Self::is_bls12() {
+            return Err(crate::poly::Error::OpeningError);
+        }
         self.g_lagrange_gpu.get_or_try_init(|| {
             // Same routing as try_get_or_upload_gpu_bases: backend upload API
             // (device setup + zero-copy Montgomery view + MIDNIGHT_MSM_PRECOMPUTE).
@@ -254,6 +273,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
 
             // Zero-copy view as midnight-curves points (Montgomery form preserved).
+            // Sound because E is Bls12 (checked above).
             let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
                 std::mem::transmute(bases_affine.as_slice())
             };

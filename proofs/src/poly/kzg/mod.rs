@@ -91,7 +91,9 @@ where
             use crate::gpu_accel::should_use_gpu;
             use crate::poly::kzg::msm::try_msm_with_cached_bases;
 
-            if should_use_gpu(size) {
+            // Only Bls12 params can use the GPU (`ParamsKZG::is_bls12`); other engines
+            // take the CPU path directly, which is not a GPU fallback.
+            if ParamsKZG::<E>::is_bls12() && should_use_gpu(size) {
                 // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
                 // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
                 match params
@@ -139,7 +141,9 @@ where
             use crate::gpu_accel::should_use_gpu;
             use crate::poly::kzg::msm::try_msm_with_cached_bases;
 
-            if should_use_gpu(size) {
+            // Only Bls12 params can use the GPU (`ParamsKZG::is_bls12`); other engines
+            // take the CPU path directly, which is not a GPU fallback.
+            if ParamsKZG::<E>::is_bls12() && should_use_gpu(size) {
                 // Correctness fix C5: try the cached-bases GPU MSM; on GPU unavailability or
                 // any GPU error, fall back to the (GPU-safe) BLST path instead of panicking.
                 match params
@@ -440,7 +444,9 @@ where
     assert!(params.g_lagrange.len() >= size);
     
     if should_use_gpu(size) {
-        let device_bases = params.get_or_upload_gpu_lagrange_bases();
+        // Fallible upload: errors (instead of panicking) for non-Bls12 engines or
+        // when the GPU is unavailable.
+        let device_bases = params.try_get_or_upload_gpu_lagrange_bases()?;
         msm_with_cached_bases_async::<E::G1Affine>(&scalars, device_bases)
     } else {
         Err(Error::OpeningError)
@@ -483,7 +489,9 @@ where
     assert!(params.g_lagrange.len() >= size);
     
     if should_use_gpu(size) {
-        let device_bases = params.get_or_upload_gpu_lagrange_bases();
+        // Fallible upload: errors (instead of panicking) for non-Bls12 engines or
+        // when the GPU is unavailable.
+        let device_bases = params.try_get_or_upload_gpu_lagrange_bases()?;
         let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
         msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases)
     } else {

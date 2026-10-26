@@ -276,7 +276,11 @@ pub fn try_msm_with_cached_bases<C: CurveAffine + 'static>(
 where
     C::Scalar: ff::PrimeField + 'static,
 {
-    // Verify we're using midnight_curves (BLS12-381) and convert coefficients
+    // Verify we're using midnight_curves (BLS12-381) and convert coefficients. The
+    // curve check also makes the `projective_to_curve` reinterpretation below sound.
+    if !is_g1_affine::<C>() {
+        return Err(crate::poly::Error::OpeningError);
+    }
     let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
 
     let ctx = try_get_msm_context().ok_or(crate::poly::Error::OpeningError)?;
@@ -523,9 +527,12 @@ where
     #[cfg(feature = "trace-msm")]
     eprintln!("[MSM-ASYNC] Launching async MSM with {} points", coeffs.len());
     
-    // Use dispatch helper for type-safe conversion
-    let fq_coeffs = try_as_fq_slice(coeffs)
-        .expect("MSM must use midnight_curves::G1Affine (BLS12-381)");
+    // Use dispatch helper for type-safe conversion; the handle resolves to a
+    // midnight_curves::G1Projective, so the curve must be BLS12-381 G1 as well.
+    if !is_g1_affine::<C>() {
+        return Err(crate::poly::Error::OpeningError);
+    }
+    let fq_coeffs = try_as_fq_slice(coeffs).ok_or(crate::poly::Error::OpeningError)?;
     
     let ctx = get_msm_context();
     ctx.msm_with_device_bases_async(fq_coeffs, device_bases)
