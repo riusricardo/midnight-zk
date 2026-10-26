@@ -18,6 +18,8 @@ use super::{
 };
 #[cfg(feature = "committed-instances")]
 use crate::poly::EvaluationDomain;
+#[cfg(feature = "gpu")]
+use crate::poly::batch_commit::commit_lagrange_batch_if_kzg_bls12;
 use crate::{
     circuit::Value,
     plonk::{traces::ProverTrace, trash},
@@ -29,10 +31,8 @@ use crate::{
     utils::{arithmetic::eval_polynomial, rational::Rational},
 };
 
-/// Helper to batch commit polynomial references when using KZG with BLS12-381 (midnight_curves).
-/// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
-/// 
-/// Helper to batch commit polynomial references when using KZG with BLS12-381 (midnight_curves).
+/// Batch commits polynomial references when using KZG with BLS12-381 (midnight_curves),
+/// via [`commit_lagrange_batch_if_kzg_bls12`] (see there for how `CS` is identified).
 /// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
 /// 
 /// This enables GPU pipelining for multiple MSM operations
@@ -46,49 +46,15 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use crate::poly::{batch_commit::is_kzg_bls12, kzg::params::ParamsKZG};
-    use midnight_curves::{Bls12, Fq};
-    
     // Only batch if we have multiple polynomials (pipelining benefit requires >1)
     if polys.len() <= 1 {
         return None;
     }
-    
-    // Check if we're using KZG with BLS12-381 (midnight_curves) - the GPU-supported
-    // configuration (see `is_kzg_bls12` for why this identification is sufficient)
-    if is_kzg_bls12::<F, CS>() {
-        #[cfg(feature = "trace-kzg")]
-        eprintln!("[PROVER] Batch committing {} polynomials (refs) with GPU pipelining", polys.len());
-        
-        // SAFETY: `is_kzg_bls12` holds, so CS is `KZGCommitmentScheme<Bls12>`:
-        // CS::Parameters is ParamsKZG<Bls12>, F is midnight_curves::Fq (so
-        // Polynomial<F, L> is Polynomial<Fq, L>), and CS::Commitment is Bls12's
-        // G1 = G1Projective, the type returned by commit_lagrange_batch.
-        unsafe {
-            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
-            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
-                polys.iter()
-                    .map(|p| &*(*p as *const Polynomial<F, LagrangeCoeff> 
-                               as *const Polynomial<Fq, LagrangeCoeff>))
-                    .collect();
-            
-            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
-            
-            // Transmute back to CS::Commitment
-            Some(batch_commits.into_iter()
-                .map(|c| std::mem::transmute_copy(&c))
-                .collect())
-        }
-    } else {
-        None
-    }
+    commit_lagrange_batch_if_kzg_bls12::<F, CS>(params, polys)
 }
 
-/// Helper to batch commit advice columns when using KZG with BLS12-381 (midnight_curves).
-/// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
-/// 
-/// This enables GPU pipelining for multiple MSM operations
-/// when committing multiple polynomials by overlapping GPU computation with memory transfers.
+/// Batch commits advice columns when using KZG with BLS12-381 (midnight_curves); see
+/// [`batch_commit_refs_if_kzg_bls12`].
 #[cfg(feature = "gpu")]
 fn batch_commit_if_kzg_bls12<F, CS>(
     params: &CS::Parameters,
@@ -98,43 +64,8 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    use crate::poly::{batch_commit::is_kzg_bls12, kzg::params::ParamsKZG};
-    use midnight_curves::{Bls12, Fq};
-    
-    // Only batch if we have multiple polynomials (pipelining benefit requires >1)
-    if polys.len() <= 1 {
-        return None;
-    }
-    
-    // Check if we're using KZG with BLS12-381 (midnight_curves) - the GPU-supported
-    // configuration (see `is_kzg_bls12` for why this identification is sufficient)
-    if is_kzg_bls12::<F, CS>() {
-        #[cfg(feature = "trace-kzg")]
-        eprintln!("[PROVER] Batch committing {} advice columns with GPU pipelining", polys.len());
-        
-        // SAFETY: `is_kzg_bls12` holds, so CS is `KZGCommitmentScheme<Bls12>`:
-        // 1. CS::Parameters is ParamsKZG<Bls12>
-        // 2. F is midnight_curves::Fq, so Polynomial<F, L> is Polynomial<Fq, L>
-        // 3. CS::Commitment is Bls12's G1 = G1Projective, the type returned by
-        //    commit_lagrange_batch
-        unsafe {
-            let kzg_params = &*(params as *const CS::Parameters as *const ParamsKZG<Bls12>);
-            let poly_refs: Vec<&Polynomial<Fq, LagrangeCoeff>> = 
-                polys.iter()
-                    .map(|p| &*(p as *const Polynomial<F, LagrangeCoeff> 
-                               as *const Polynomial<Fq, LagrangeCoeff>))
-                    .collect();
-            
-            let batch_commits = kzg_params.commit_lagrange_batch(&poly_refs);
-            
-            // Transmute back to CS::Commitment (G1Projective, see SAFETY above)
-            Some(batch_commits.into_iter()
-                .map(|c| std::mem::transmute_copy(&c))
-                .collect())
-        }
-    } else {
-        None
-    }
+    let poly_refs: Vec<&Polynomial<F, LagrangeCoeff>> = polys.iter().collect();
+    batch_commit_refs_if_kzg_bls12::<F, CS>(params, &poly_refs)
 }
 
 #[cfg(feature = "committed-instances")]

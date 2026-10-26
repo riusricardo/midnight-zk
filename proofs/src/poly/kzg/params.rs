@@ -23,6 +23,21 @@ use crate::{
     },
 };
 
+/// True iff `E` is `midnight_curves::Bls12`, the only engine the GPU backend
+/// supports.
+///
+/// The GPU MSM paths view `E::G1Affine` bases as `midnight_curves::G1Affine`,
+/// `E::Fr` scalars as `midnight_curves::Fq` and the backend's `G1Projective`
+/// results as `E::G1`, which is only valid for this engine. Any other engine
+/// takes the CPU MSM: that is its intended path, not a GPU failure, so it must
+/// not be reported through `note_gpu_fallback`. `pairing::Engine: 'static`, so
+/// this is an exact `TypeId` comparison.
+#[cfg(feature = "gpu")]
+#[inline]
+pub(crate) fn is_gpu_engine<E: Engine>() -> bool {
+    std::any::TypeId::of::<E>() == std::any::TypeId::of::<midnight_curves::Bls12>()
+}
+
 /// These are the public parameters for the polynomial commitment scheme.
 /// 
 /// # GPU Acceleration
@@ -180,16 +195,6 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         }
     }
 
-    /// Whether `E` is midnight-curves' BLS12-381, the only engine the GPU backend
-    /// supports. The GPU paths reinterpret `E`'s points and scalars as the midnight
-    /// BLS12-381 types, which is only sound for that engine: parameters over any other
-    /// engine take the CPU path, which is their intended route (not a GPU fallback).
-    #[cfg(feature = "gpu")]
-    pub(crate) fn is_bls12() -> bool {
-        // `pairing::Engine: 'static`, so the engine can be identified by `TypeId`.
-        std::any::TypeId::of::<E>() == std::any::TypeId::of::<midnight_curves::Bls12>()
-    }
-
     /// Get or upload GPU bases for coefficient form (lazy initialization)
     /// 
     /// Following ingonyama-zk pattern: bases are uploaded ONCE and cached in GPU memory,
@@ -210,8 +215,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
-        // The upload views `E::G1Affine` as `midnight_curves::G1Affine`: Bls12 only.
-        if !Self::is_bls12() {
+        // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
             return Err(crate::poly::Error::OpeningError);
         }
         self.g_gpu.get_or_try_init(|| {
@@ -220,7 +225,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             // MIDNIGHT_MSM_PRECOMPUTE (the hand-rolled upload this replaces
             // silently ignored the precompute factor). Note: with factor > 1
             // the cached bases only serve full-size (msm_size == n) MSMs;
-            // try_msm_with_cached_bases zero-pads smaller commits to n.
+            // `commit` zero-pads smaller MSMs to n.
             let ctx = crate::poly::kzg::msm::try_get_msm_context()
                 .ok_or(crate::poly::Error::OpeningError)?;
 
@@ -228,13 +233,13 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             let mut bases_affine = vec![E::G1Affine::identity(); self.g.len()];
             E::G1::batch_normalize(&self.g, &mut bases_affine);
 
-            // Zero-copy view as midnight-curves points (Montgomery form
-            // preserved; the upload keeps it — are_bases_montgomery_form=true
-            // at MSM time). Sound because E is Bls12 (checked above), so
-            // E::G1Affine is midnight_curves::G1Affine.
-            let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
-                std::mem::transmute(bases_affine.as_slice())
-            };
+            // View as midnight-curves points (Montgomery form preserved; the
+            // upload keeps it — are_bases_montgomery_form=true at MSM time).
+            // E is Bls12 (checked above), so this checked downcast is the
+            // identity and never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
+                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
+                .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -255,8 +260,8 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// (for CPU fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_lagrange_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
-        // The upload views `E::G1Affine` as `midnight_curves::G1Affine`: Bls12 only.
-        if !Self::is_bls12() {
+        // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
             return Err(crate::poly::Error::OpeningError);
         }
         self.g_lagrange_gpu.get_or_try_init(|| {
@@ -271,11 +276,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             let mut bases_affine = vec![E::G1Affine::identity(); self.g_lagrange.len()];
             E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
 
-            // Zero-copy view as midnight-curves points (Montgomery form preserved).
-            // Sound because E is Bls12 (checked above).
-            let bases_midnight: &[midnight_curves::G1Affine] = unsafe {
-                std::mem::transmute(bases_affine.as_slice())
-            };
+            // View as midnight-curves points (Montgomery form preserved). E is
+            // Bls12 (checked above), so this checked downcast never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
+                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
+                .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -287,10 +292,13 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// This is the production-ready batch commit that provides optimal performance
     /// for multiple commitments by enabling GPU kernel pipelining.
     /// 
-    /// Falls back to sequential sync commits if async is not beneficial. Like
-    /// `commit_lagrange`, any GPU error (base upload, MSM launch or wait) is reported
-    /// through `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the affected
-    /// commitments are computed on the CPU instead.
+    /// Falls back to sequential sync commits if async is not beneficial.
+    ///
+    /// GPU failures are handled like in `commit_lagrange` (fix C5): any error
+    /// (base upload, async launch or wait) is reported through
+    /// `note_gpu_fallback` (fatal under `MIDNIGHT_GPU_STRICT`) and the affected
+    /// polynomials are committed with the CPU MSM `commit_lagrange` uses. Engines
+    /// other than `midnight_curves::Bls12` always take that CPU MSM.
     #[cfg(feature = "gpu")]
     pub fn commit_lagrange_batch(
         &self,
@@ -299,27 +307,41 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     where
         E::G1Affine: crate::utils::arithmetic::CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
     {
-        use crate::poly::kzg::msm::{msm_batch_async, msm_specific, try_msm_with_cached_bases};
         use midnight_bls12_381_cuda::config::note_gpu_fallback;
 
-        // CPU commitment, computed exactly as `commit_lagrange` does.
+        use crate::poly::kzg::msm::{
+            msm_specific, msm_with_cached_bases_async, try_msm_with_cached_bases,
+        };
+
+        // The CPU MSM of `commit_lagrange` (its sub-threshold path and its
+        // GPU-failure fallback).
         let cpu_commit = |scalars: &[E::Fr]| -> E::G1 {
             msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
         };
-        
+        // The GPU result is a midnight `G1Projective`; E is Bls12 on every GPU
+        // path below, so E::G1 is that same type and the checked downcast is
+        // the identity.
+        let to_e_g1 = |p: midnight_curves::G1Projective| -> E::G1 {
+            *(&p as &dyn std::any::Any)
+                .downcast_ref::<E::G1>()
+                .expect("GPU commit path is only taken for E = midnight_curves::Bls12")
+        };
+
         if polys.is_empty() {
             return vec![];
+        }
+        assert!(polys.iter().all(|poly| self.g_lagrange.len() >= poly.len()));
+
+        // Only midnight BLS12-381 has a GPU path (see `is_gpu_engine`).
+        if !is_gpu_engine::<E>() {
+            return polys.iter().map(|poly| cpu_commit(poly)).collect();
         }
         
         // Check if async/GPU is beneficial for this batch
         // Consider total work, not just individual MSM size
         let individual_size = polys[0].len();
         let batch_count = polys.len();
-        // Only Bls12 params can use the GPU (see `is_bls12`); other engines take the
-        // CPU path directly, which is not a GPU fallback.
-        let gpu_engine = Self::is_bls12();
-        let use_async =
-            gpu_engine && batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
+        let use_async = batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
         
         #[cfg(feature = "trace-kzg")]
         if batch_count > 1 {
@@ -336,52 +358,53 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             // Convert all polynomials to scalar vectors
             let scalars: Vec<Vec<E::Fr>> = polys.iter()
                 .map(|poly| {
-                    assert!(self.g_lagrange.len() >= poly.len());
                     let mut s = Vec::with_capacity(poly.len());
                     s.extend(poly.iter());
                     s
                 })
                 .collect();
-            let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
             
-            // Launch all MSMs asynchronously
-            match self
-                .try_get_or_upload_gpu_lagrange_bases()
-                .and_then(|device_bases| msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases))
-            {
-                Ok(handles) => {
-                    // Wait for all results and transmute to E::G1
-                    return handles.into_iter()
-                        .zip(&scalar_refs)
-                        .map(|(h, scalars)| match h.wait() {
-                            // SAFETY: `use_async` implies E is Bls12, so E::G1 is
-                            // midnight_curves::G1Projective, the type the handle yields.
-                            Ok(result) => unsafe { std::mem::transmute_copy(&result) },
-                            Err(e) => {
-                                note_gpu_fallback(
-                                    "MSM (commit_lagrange_batch)", &format!("{:?}", e));
-                                cpu_commit(scalars)
-                            }
-                        })
-                        .collect();
-                }
+            let device_bases = match self.try_get_or_upload_gpu_lagrange_bases() {
+                Ok(device_bases) => device_bases,
                 Err(e) => {
-                    // Base upload or MSM launch failed: commit the whole batch on CPU.
-                    note_gpu_fallback("MSM (commit_lagrange_batch)", &format!("{:?}", e));
-                    return scalar_refs.iter().map(|scalars| cpu_commit(scalars)).collect();
+                    note_gpu_fallback(
+                        "MSM (commit_lagrange_batch)",
+                        &format!("Lagrange base upload: {:?} ({} polys)", e, batch_count),
+                    );
+                    return scalars.iter().map(|s| cpu_commit(s)).collect();
                 }
-            }
+            };
+
+            // Launch all MSMs asynchronously, then wait for them in order. A
+            // polynomial whose launch or wait fails is committed on CPU; the
+            // others keep their GPU result.
+            let launches: Vec<_> = scalars.iter()
+                .map(|s| msm_with_cached_bases_async::<E::G1Affine>(s, device_bases))
+                .collect();
+            return launches.into_iter()
+                .zip(&scalars)
+                .map(|(launch, s)| {
+                    let result = match launch {
+                        Ok(handle) => handle.wait().map_err(|e| format!("async wait: {:?}", e)),
+                        Err(e) => Err(format!("async launch: {:?}", e)),
+                    };
+                    match result {
+                        Ok(r) => to_e_g1(r),
+                        Err(detail) => {
+                            note_gpu_fallback("MSM (commit_lagrange_batch)", &detail);
+                            cpu_commit(s)
+                        }
+                    }
+                })
+                .collect();
         }
         
-        // Sync path (async not beneficial), same routing as `commit_lagrange`
+        // Sync path (not beneficial): per polynomial, exactly `commit_lagrange`.
         // Use polynomial directly via Deref - no allocation needed
         polys.iter()
             .map(|poly| {
                 let scalars: &[E::Fr] = &***poly;
-                let size = scalars.len();
-                assert!(self.g_lagrange.len() >= size);
-                
-                if gpu_engine && should_use_gpu(size) {
+                if should_use_gpu(scalars.len()) {
                     match self
                         .try_get_or_upload_gpu_lagrange_bases()
                         .and_then(|db| try_msm_with_cached_bases::<E::G1Affine>(scalars, db))
