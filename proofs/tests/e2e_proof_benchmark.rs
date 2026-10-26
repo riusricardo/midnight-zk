@@ -154,8 +154,8 @@ fn benchmark_domain_filling(k: u32, num_cols: usize, fill_ratio: f64) -> Result<
         #[cfg(feature = "committed-instances")]
         0,
         &[&[]], // No instance columns
-        &mut rng,
         &mut transcript,
+        &mut rng,
     )?;
     let prove_time = start.elapsed().as_secs_f64() * 1000.0;
     println!("{:>8.2}ms", prove_time);

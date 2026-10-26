@@ -314,8 +314,8 @@ mod e2e {
             #[cfg(feature = "committed-instances")]
             0,
             &[&[]],
-            &mut rng,
             &mut transcript,
+            &mut rng,
         )
         .expect("create_proof");
         let proof = transcript.finalize();
@@ -407,8 +407,8 @@ mod e2e {
                 #[cfg(feature = "committed-instances")]
                 0,
                 &[&[]],
-                &mut rng,
                 &mut transcript,
+                &mut rng,
             )
             .expect("create_proof");
             let proof = transcript.finalize();
@@ -484,8 +484,8 @@ mod e2e {
             #[cfg(feature = "committed-instances")]
             0,
             &[&[]],
-            &mut rng,
             &mut transcript,
+            &mut rng,
         )
         .expect("create_proof");
         let proof = transcript.finalize();
