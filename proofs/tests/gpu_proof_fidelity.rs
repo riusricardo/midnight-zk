@@ -23,9 +23,14 @@
 //! kinds does not verify. That is upstream behaviour, unrelated to the GPU.
 //!
 //! The prover rng is a seeded ChaCha and the lookups leave a single leftover table value
-//! (see `row_values`), so a proof is a deterministic function of the code path. The
-//! device is fixed per process (`MIDNIGHT_DEVICE` is read once), so CPU and GPU are
-//! compared across two processes:
+//! (see `row_values`), so a proof is a deterministic function of the code path. Every
+//! run, whatever the device, asserts that the proof's blake2b-128 is `EXPECTED_DIGEST`:
+//! the bytes upstream's CPU prover (midnight-proofs 0.8.2) emits for this circuit and
+//! these seeds. If an upstream prover change legitimately changes them, regenerate the
+//! constant from a `MIDNIGHT_DEVICE=cpu` run, which prints it.
+//!
+//! To locate a difference, compare CPU and GPU byte by byte across two processes (the
+//! device is fixed per process: `MIDNIGHT_DEVICE` is read once):
 //!
 //!   MIDNIGHT_DEVICE=cpu FIDELITY_DUMP=/tmp/cpu.bin \
 //!     cargo test --release --features gpu --test gpu_proof_fidelity -- --nocapture
@@ -70,6 +75,11 @@ const K: u32 = 14;
 const ROWS: usize = 1 << (K - 1);
 /// Lookup table: 0..TABLE_SIZE.
 const TABLE_SIZE: u64 = 256;
+
+/// blake2b-128 of the proof as upstream's CPU prover emits it (see the module docs).
+/// `truncated-challenges` changes every challenge, so it does not apply to it.
+#[cfg(not(feature = "truncated-challenges"))]
+const EXPECTED_DIGEST: &str = "52c7d4f224322dd8b31f9c49c301524f";
 
 #[derive(Clone, Debug)]
 struct FidelityConfig {
@@ -456,6 +466,13 @@ fn gpu_proof_bytes_match_cpu() {
         }
         println!("proof bytes identical to {path}");
     }
+    #[cfg(not(feature = "truncated-challenges"))]
+    assert_eq!(
+        digest.to_hex().as_str(),
+        EXPECTED_DIGEST,
+        "the proof is not the upstream CPU prover's; if the upstream prover changed, update \
+         EXPECTED_DIGEST"
+    );
 
     // A forced-GPU run must really have run on the GPU. (Under MIDNIGHT_GPU_STRICT a
     // fallback already panicked; without it, the bytes above must still match.)
