@@ -495,7 +495,9 @@ where
     assert!(params.g_lagrange.len() >= size);
     
     if should_use_gpu(size) {
-        let device_bases = params.get_or_upload_gpu_lagrange_bases();
+        // Fallible upload: errors (instead of panicking) for engines without a GPU
+        // path (see `is_gpu_engine`) or when the GPU is unavailable.
+        let device_bases = params.try_get_or_upload_gpu_lagrange_bases()?;
         msm_with_cached_bases_async::<E::G1Affine>(&scalars, device_bases)
     } else {
         Err(Error::OpeningError)
@@ -538,7 +540,9 @@ where
     assert!(params.g_lagrange.len() >= size);
     
     if should_use_gpu(size) {
-        let device_bases = params.get_or_upload_gpu_lagrange_bases();
+        // Fallible upload: errors (instead of panicking) for engines without a GPU
+        // path (see `is_gpu_engine`) or when the GPU is unavailable.
+        let device_bases = params.try_get_or_upload_gpu_lagrange_bases()?;
         let scalar_refs: Vec<&[E::Fr]> = scalars.iter().map(|s| s.as_slice()).collect();
         msm_batch_async::<E::G1Affine>(&scalar_refs, device_bases)
     } else {
