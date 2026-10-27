@@ -69,7 +69,22 @@ pub use midnight_bls12_381_cuda::{
     // Threshold functions (re-exported as-is for GPU code paths)
     should_use_gpu as backend_should_use_gpu,
     should_use_gpu_batch,
+    min_gpu_size,
+    min_ntt_gpu_size,
     
+    // Autotune calibration (GPU/CPU crossovers + MSM window, measured once per
+    // machine and persisted). A server that reaches the backend only through
+    // this crate mounts `autotune_cli` as a subcommand and reads the effective
+    // values with `calibration_report`. `min_gpu_size` / `min_ntt_gpu_size`
+    // return the crossovers this crate's prover routes by; unless pinned by
+    // its env override, the first call to either loads the persisted
+    // calibration into this backend instance (measuring if there is none).
+    autotune_cli,
+    run_calibration,
+    calibration_report,
+    CalibrationReport,
+    Provenance,
+
     // Trait-based API
     global_accelerator,
     GpuAccelerator, 
