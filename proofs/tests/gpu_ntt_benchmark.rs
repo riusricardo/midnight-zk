@@ -48,7 +48,7 @@ fn bench_size(k: u32, reps: usize) -> (f64, f64, f64) {
         // GPU forward
         let mut g = original.clone();
         let t = Instant::now();
-        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut g).expect("GPU NTT failed");
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut g).expect("GPU NTT failed");
         gpu_fwd.push(t.elapsed().as_secs_f64() * 1000.0);
 
         // CPU forward (reference + timing)
@@ -61,7 +61,7 @@ fn bench_size(k: u32, reps: usize) -> (f64, f64, f64) {
 
         // GPU inverse (includes 1/n): roundtrip must give back the input
         let t = Instant::now();
-        midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(&mut g).expect("GPU iNTT failed");
+        midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_inplace_auto(&mut g).expect("GPU iNTT failed");
         gpu_inv.push(t.elapsed().as_secs_f64() * 1000.0);
         assert_eq!(g, original, "GPU NTT roundtrip != identity at K={}", k);
 
@@ -94,7 +94,7 @@ fn gpu_ntt_impulse_response() {
         for j in [0usize, 1, 7, n - 1] {
             let mut data = vec![Scalar::ZERO; n];
             data[j] = Scalar::ONE;
-            midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut data)
+            midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut data)
                 .expect("GPU NTT failed");
 
             let wj = omega.pow_vartime([j as u64]);
@@ -105,7 +105,7 @@ fn gpu_ntt_impulse_response() {
             }
 
             // and back: inverse must recover e_j exactly
-            midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(&mut data)
+            midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_inplace_auto(&mut data)
                 .expect("GPU iNTT failed");
             for (i, v) in data.iter().enumerate() {
                 let want = if i == j { Scalar::ONE } else { Scalar::ZERO };
@@ -125,18 +125,18 @@ fn gpu_ntt_batch_matches_singles() {
     let mut rng = ChaCha8Rng::seed_from_u64(0xBA7C4);
     let data: Vec<Scalar> = (0..n * b).map(|_| Scalar::random(&mut rng)).collect();
 
-    let batched = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n)
+    let batched = midnight_proofs::gpu_accel::backend::ntt::forward_ntt_batch_auto(&data, n)
         .expect("batched NTT failed");
     assert_eq!(batched.len(), n * b);
 
     for i in 0..b {
         let mut single = data[i * n..(i + 1) * n].to_vec();
-        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut single)
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut single)
             .expect("single NTT failed");
         assert_eq!(&batched[i * n..(i + 1) * n], &single[..], "batch element {} differs", i);
     }
 
-    let inv = midnight_bls12_381_cuda::ntt::inverse_ntt_batch_auto(&batched, n)
+    let inv = midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_batch_auto(&batched, n)
         .expect("batched iNTT failed");
     assert_eq!(inv, data, "batched roundtrip != identity");
 
@@ -156,28 +156,28 @@ fn gpu_ntt_batch_benchmark() {
 
     // Full-size warmup for BOTH arms: domain init, mem-pool growth to the
     // batch working set, and host page-faults must land outside the timings.
-    let _ = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n).unwrap();
+    let _ = midnight_proofs::gpu_accel::backend::ntt::forward_ntt_batch_auto(&data, n).unwrap();
     let mut warm = data.clone();
     for i in 0..b {
-        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut warm[i * n..(i + 1) * n])
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut warm[i * n..(i + 1) * n])
             .unwrap();
     }
 
     let t = Instant::now();
-    let batched = midnight_bls12_381_cuda::ntt::forward_ntt_batch_auto(&data, n).unwrap();
+    let batched = midnight_proofs::gpu_accel::backend::ntt::forward_ntt_batch_auto(&data, n).unwrap();
     let batched_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     let mut loop_out = data.clone();
     let t = Instant::now();
     for i in 0..b {
-        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut loop_out[i * n..(i + 1) * n])
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut loop_out[i * n..(i + 1) * n])
             .unwrap();
     }
     let loop_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // In-place batched: no output Vec allocation / zeroing / copy-back —
     // the API the prover integration should use.
-    let ctx = midnight_bls12_381_cuda::ntt::GpuNttContext::new(24).unwrap();
+    let ctx = midnight_proofs::gpu_accel::backend::ntt::GpuNttContext::new(24).unwrap();
     let mut inplace_out = data.clone();
     ctx.forward_ntt_batch_inplace(&mut inplace_out, n).unwrap(); // warm
     inplace_out.copy_from_slice(&data);
@@ -199,7 +199,7 @@ fn gpu_ntt_benchmark() {
     // Domain init + CUDA context warmup (paid once, outside timings)
     {
         let mut warm: Vec<Scalar> = (0..4096).map(|i| Scalar::from(i as u64)).collect();
-        midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(&mut warm).expect("warmup failed");
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut warm).expect("warmup failed");
     }
 
     println!("\nGPU NTT Benchmark (host->host in-place, prover dispatch path; median of 3):");

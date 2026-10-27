@@ -5,7 +5,13 @@
 
 #![cfg(feature = "gpu")]
 
-use midnight_bls12_381_cuda::GpuMsmContext;
+use midnight_proofs::gpu_accel::{
+    backend::{
+        self,
+        diag::{gpu_op_count, OpKind},
+    },
+    GpuMsmContext,
+};
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
 use ff::Field;
 use group::{Group, Curve, prime::PrimeCurveAffine};
@@ -44,7 +50,19 @@ fn test_msm_with_size(size: usize) {
     let ctx = GpuMsmContext::new().expect("Failed to create MSM context");
 
     // Execute MSM
+    let line = backend::line_id();
+    let msm_launches_before = gpu_op_count(line, OpKind::Msm);
     let result = ctx.msm(&scalars, &points).expect("MSM should succeed");
+
+    // The launch is counted on this fork's backend line (k >= 14: the sizes the
+    // prover routes to the GPU), so a fork wired to the other line's counters
+    // is caught at runtime as well as at compile time.
+    if size >= 1 << 14 {
+        assert!(
+            gpu_op_count(line, OpKind::Msm) > msm_launches_before,
+            "MSM of {size} points was not counted as a GPU launch on backend line {line}"
+        );
+    }
 
     // Verify result is not identity (with random inputs, extremely unlikely)
     assert!(!bool::from(result.is_identity()));
@@ -53,6 +71,27 @@ fn test_msm_with_size(size: usize) {
     let points_proj: Vec<G1Projective> = points.iter().map(|p| G1Projective::from(*p)).collect();
     let cpu_result = G1Projective::multi_exp(&points_proj, &scalars);
     assert_eq!(result, cpu_result, "GPU and CPU results should match");
+}
+
+/// The prover's NTT entry point (`forward_ntt_inplace_auto`, which
+/// `utils::fft::best_fft` routes to) launches on this fork's backend line: its
+/// NTT counter moves for a k = 14 transform whenever the device routing sends
+/// that size to the GPU (`MIDNIGHT_DEVICE=cpu` keeps it on the CPU arm).
+#[test]
+fn test_gpu_ntt_counted_on_this_forks_line() {
+    let line = backend::line_id();
+    let n = 1usize << 14;
+    let mut data: Vec<Scalar> = (0..n).map(|i| Scalar::from(i as u64 + 1)).collect();
+    let ntt_launches_before = gpu_op_count(line, OpKind::Ntt);
+    backend::ntt::forward_ntt_inplace_auto(&mut data).expect("NTT should succeed");
+    if backend::should_use_gpu_ntt(n) {
+        assert!(
+            gpu_op_count(line, OpKind::Ntt) > ntt_launches_before,
+            "NTT of {n} elements was not counted as a GPU launch on backend line {line}"
+        );
+    } else {
+        println!("[skip] NTT of {n} elements is routed to the CPU; no GPU launch expected");
+    }
 }
 
 #[test]

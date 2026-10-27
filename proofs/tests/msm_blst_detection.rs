@@ -31,6 +31,20 @@ fn test_blst_detection() {
     println!("{}", "=".repeat(80));
 }
 
+/// Under `gpu`, `is_blst_available` is the backend line's `is_g1_affine`: it
+/// is true only if that line's `G1Affine` is this fork's, so this pins the
+/// line wiring at runtime (the compile-time guard lives in `gpu_accel`).
+#[cfg(feature = "gpu")]
+#[test]
+fn test_blst_detection_is_this_forks_backend_line() {
+    use midnight_curves::Fq;
+    use midnight_proofs::gpu_accel::{is_fq, is_g1_affine};
+
+    assert!(is_blst_available::<G1Affine>());
+    assert!(is_g1_affine::<G1Affine>());
+    assert!(is_fq::<Fq>());
+}
+
 /// This test demonstrates BLST performance across different MSM sizes.
 /// Note: msm_specific() now REQUIRES midnight_curves - other curves will panic.
 #[test]
