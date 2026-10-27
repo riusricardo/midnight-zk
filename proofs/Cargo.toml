@@ -94,6 +94,11 @@ truncated-challenges = []
 # This feature is very powerful for proving statements on committed data.
 committed-instances = []
 
+# Fill the spare rows of each permuted lookup table in value order instead of
+# HashMap order, which is random per process. Proofs are equally valid; with a
+# seeded rng the proof bytes become reproducible across runs and devices.
+deterministic-lookups = []
+
 # Feature to expose internal prover types and benchmarking utilities.
 bench-internal = ["criterion"]
 
