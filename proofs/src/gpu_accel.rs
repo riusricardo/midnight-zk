@@ -52,26 +52,36 @@
 // Re-exports from midnight-bls12-381-cuda
 // =============================================================================
 
+/// The backend line this fork is built on: the typed surface of
+/// `midnight-bls12-381-cuda` instantiated for this fork's `midnight_curves`
+/// package. The line name below is the ONLY line-specific token in this crate;
+/// everything typed is reached through `backend::…`, and the curves-free core
+/// (`config`, `diag`, `is_gpu_available`, …) is the same through this path or
+/// the crate root. `_backend_line_is_this_forks_curves` fails the build if the
+/// line's curves types are not this fork's.
 #[cfg(feature = "gpu")]
-pub use midnight_bls12_381_cuda::{
+pub use midnight_bls12_381_cuda::v03 as backend;
+
+#[cfg(feature = "gpu")]
+pub use backend::{
     // Core types
     GpuMsmContext,
     PrecomputedBases,
     TypeConverter,
-    
+
     // MSM handles
     msm::MsmHandle,
     BatchMsmHandle,
-    
+
     // Backend initialization
     ensure_backend_loaded,
-    
+
     // Threshold functions (re-exported as-is for GPU code paths)
     should_use_gpu as backend_should_use_gpu,
     should_use_gpu_batch,
     min_gpu_size,
     min_ntt_gpu_size,
-    
+
     // Autotune calibration (GPU/CPU crossovers + MSM window, measured once per
     // machine and persisted). A server that reaches the backend only through
     // this crate mounts `autotune_cli` as a subcommand and reads the effective
@@ -87,11 +97,11 @@ pub use midnight_bls12_381_cuda::{
 
     // Trait-based API
     global_accelerator,
-    GpuAccelerator, 
+    GpuAccelerator,
     GpuCachedBases,
     MsmBackend,
     NttBackend,
-    
+
     // Type-safe dispatch helpers (the key abstraction)
     is_fq, is_g1_affine,
     try_as_fq_slice, try_as_fq_slice_mut,
@@ -99,6 +109,36 @@ pub use midnight_bls12_381_cuda::{
     dispatch_ntt_inplace,
     with_fq_slice_mut,
 };
+
+/// Compile-time wiring guard: this crate builds only if the backend line named
+/// above takes this fork's `midnight_curves` types, i.e. the line's curves
+/// package and this fork's are one package (the workspace `[patch.crates-io]`
+/// redirect). A fork wired to the other line fails here with a type mismatch.
+#[cfg(feature = "gpu")]
+#[allow(dead_code)]
+fn _backend_line_is_this_forks_curves(
+    f: midnight_curves::Fq,
+    a: midnight_curves::G1Affine,
+    p: midnight_curves::G1Projective,
+) -> (backend::curves::Fq, backend::curves::G1Affine, backend::curves::G1Projective) {
+    (f, a, p)
+}
+
+/// View a generic `&[C]` as this fork's `&[midnight_curves::G1Affine]` iff `C`
+/// is that type (an exact `TypeId` check through the backend line's
+/// `is_g1_affine`, so a wrong-line type is reported, not reinterpreted).
+#[cfg(feature = "gpu")]
+#[inline]
+pub fn try_as_g1_affine_slice<C: group::prime::PrimeCurveAffine + 'static>(
+    slice: &[C],
+) -> Option<&[G1Affine]> {
+    if is_g1_affine::<C>() {
+        // SAFETY: the TypeId check guarantees C == G1Affine, the same type.
+        Some(unsafe { &*(slice as *const [C] as *const [G1Affine]) })
+    } else {
+        None
+    }
+}
 
 // Re-export ICICLE runtime types needed by params.rs
 #[cfg(feature = "gpu")]
@@ -385,8 +425,18 @@ mod tests {
     fn test_should_use_gpu_thresholds() {
         // Small sizes should not use GPU
         assert!(!should_use_gpu(100));
-        
+
         // Check NTT threshold
         assert!(!should_use_gpu_ntt(100));
+    }
+
+    /// Runtime twin of `_backend_line_is_this_forks_curves`: the backend
+    /// line's dispatch recognises this fork's curves types by `TypeId`.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_backend_line_is_this_forks_curves() {
+        assert!(is_fq::<midnight_curves::Fq>());
+        assert!(is_g1_affine::<midnight_curves::G1Affine>());
+        assert!(try_as_g1_affine_slice::<midnight_curves::G1Affine>(&[]).is_some());
     }
 }
