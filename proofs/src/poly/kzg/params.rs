@@ -53,6 +53,7 @@ pub(crate) fn is_gpu_engine<E: Engine>() -> bool {
 /// The caches use `Arc<OnceCell<...>>` for thread-safe lazy initialization
 /// that survives `Clone` operations.
 #[derive(Clone)]
+#[cfg_attr(not(feature = "gpu"), derive(Debug))]
 pub struct ParamsKZG<E: Engine> {
     pub(crate) g: Vec<E::G1>,
     pub(crate) g_lagrange: Vec<E::G1>,
@@ -71,6 +72,9 @@ pub struct ParamsKZG<E: Engine> {
     pub(crate) g_lagrange_gpu: Arc<OnceCell<PrecomputedBases>>,
 }
 
+// GPU builds: the device base caches have no `Debug`, so print the host fields
+// (the SRS vectors by length). Other builds keep upstream's derived `Debug`.
+#[cfg(feature = "gpu")]
 impl<E: Engine> Debug for ParamsKZG<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParamsKZG")
