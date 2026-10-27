@@ -1,4 +1,6 @@
-use std::{collections::HashMap, hash::Hash, iter};
+#[cfg(not(feature = "deterministic-lookups"))]
+use std::collections::HashMap;
+use std::{hash::Hash, iter};
 
 use ff::{FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
 use group::ff::BatchInvert;
@@ -451,8 +453,15 @@ where
     // Sort input lookup expression values
     permuted_input_expression.sort();
 
-    // A HashMap of each unique element in the table expression and its count
+    // A map of each unique element in the table expression and its count. Its
+    // iteration order decides which leftover values fill the repeated input rows;
+    // any order yields a valid proof. HashMap order is random per process, so
+    // `deterministic-lookups` iterates in value order to make proof bytes
+    // reproducible for a seeded rng.
+    #[cfg(not(feature = "deterministic-lookups"))]
     let mut leftover_table_map = HashMap::<F, u32>::with_capacity(table_expression.len());
+    #[cfg(feature = "deterministic-lookups")]
+    let mut leftover_table_map = std::collections::BTreeMap::<F, u32>::new();
     table_expression.iter().take(usable_rows).for_each(|coeff| {
         *leftover_table_map.entry(*coeff).or_insert(0) += 1;
     });
