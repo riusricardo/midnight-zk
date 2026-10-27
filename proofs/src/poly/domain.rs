@@ -239,7 +239,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// with a single (GPU grid-batched, when beneficial) inverse NTT instead of
     /// one launch+sync round-trip per polynomial.
     ///
-    /// MEASURED (2026-07-18, RTX 5060): at the proof level this is a WASH vs the
+    /// MEASURED (2026-07-18): at the proof level this is a WASH vs the
     /// per-polynomial loop — the polynomials live in separate allocations, so
     /// batching pays a host gather + split-out that cancels the launch-overhead
     /// savings. Not used by the prover until buffers are device-resident/pinned.
@@ -306,7 +306,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
     /// the coset and runs ONE (GPU grid-batched, when beneficial) forward NTT at
     /// the extended size instead of one launch+sync round-trip per polynomial.
     ///
-    /// MEASURED (2026-07-18, RTX 5060): at the proof level this REGRESSES vs the
+    /// MEASURED (2026-07-18): at the proof level this REGRESSES vs the
     /// per-polynomial loop (K16 proof ~185→~225 ms) — the extended-size gather
     /// buffer (zero-init + gather + split-out, e.g. 8×2^18×32B = 64 MB) costs
     /// more host traffic than the batched kernels save. Not used by the prover
