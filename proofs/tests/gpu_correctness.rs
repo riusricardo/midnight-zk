@@ -347,7 +347,7 @@ mod e2e {
         }
     }
 
-    /// K=18 is memory/time heavy (8 GB dev GPU); run explicitly with `-- --ignored`.
+    /// K=18 is memory/time heavy; run explicitly with `-- --ignored`.
     #[test]
     #[ignore = "heavy (K=18); run with --ignored on a machine with enough VRAM"]
     fn gpu_full_proof_verifies_large() {
