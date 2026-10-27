@@ -16,7 +16,8 @@ use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use std::time::Instant;
 
-use midnight_bls12_381_cuda::{GpuMsmContext, should_use_gpu, device_type};
+use midnight_bls12_381_cuda::{should_use_gpu, device_type};
+use midnight_proofs::gpu_accel::GpuMsmContext;
 
 /// Benchmark MSM at a given size, comparing GPU vs CPU
 /// 

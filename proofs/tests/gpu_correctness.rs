@@ -466,6 +466,10 @@ mod e2e {
             midnight_bls12_381_cuda::should_use_gpu(1usize << k),
             "k={k} must be above the GPU MSM threshold for this test to prove on GPU"
         );
+        assert!(
+            midnight_bls12_381_cuda::should_use_gpu_ntt(1usize << k),
+            "k={k} must be above the GPU NTT threshold for this test to prove on GPU"
+        );
 
         let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
         let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
@@ -474,6 +478,16 @@ mod e2e {
         let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)
             .expect("keygen_vk");
         let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
+
+        // The proof's GPU work must be launched on this fork's backend line
+        // (the line `gpu_accel` names): its per-line MSM and NTT counters move.
+        use midnight_proofs::gpu_accel::backend::{
+            self,
+            diag::{gpu_op_count, OpKind},
+        };
+        let line = backend::line_id();
+        let msm_launches_before = gpu_op_count(line, OpKind::Msm);
+        let ntt_launches_before = gpu_op_count(line, OpKind::Ntt);
 
         // ---- Generate the proof on GPU (GPU NTT + GPU MSM) ----
         let mut transcript = CircuitTranscript::<Blake2bState>::init();
@@ -489,6 +503,15 @@ mod e2e {
         )
         .expect("create_proof");
         let proof = transcript.finalize();
+
+        assert!(
+            gpu_op_count(line, OpKind::Msm) > msm_launches_before,
+            "the k={k} proof launched no GPU MSM on backend line {line}"
+        );
+        assert!(
+            gpu_op_count(line, OpKind::Ntt) > ntt_launches_before,
+            "the k={k} proof launched no GPU NTT on backend line {line}"
+        );
 
         // ---- Verify on CPU/BLST (DualMSM::eval -> msm_specific, no GPU gate) ----
         let verify = |bytes: &[u8]| -> bool {
