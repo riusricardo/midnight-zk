@@ -506,8 +506,7 @@ fn gpu_proof_fidelity() {
 
     #[cfg(not(feature = "truncated-challenges"))]
     {
-        for ((name, proof), (expected_name, expected)) in proofs.iter().zip(EXPECTED_FINGERPRINTS)
-        {
+        for ((name, proof), (expected_name, expected)) in proofs.iter().zip(EXPECTED_FINGERPRINTS) {
             assert_eq!(*name, expected_name);
             assert_eq!(
                 fingerprint(proof),
