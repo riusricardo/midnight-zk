@@ -239,11 +239,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
 
             // View as midnight-curves points (Montgomery form preserved; the
             // upload keeps it — are_bases_montgomery_form=true at MSM time).
-            // E is Bls12 (checked above), so this checked downcast is the
-            // identity and never fails.
-            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
-                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
-                .ok_or(crate::poly::Error::OpeningError)?;
+            // E is Bls12 (checked above), so this TypeId-checked view through
+            // the backend line's dispatch is the identity and never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] =
+                crate::gpu_accel::try_as_g1_affine_slice::<E::G1Affine>(&bases_affine)
+                    .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -281,10 +281,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             E::G1::batch_normalize(&self.g_lagrange, &mut bases_affine);
 
             // View as midnight-curves points (Montgomery form preserved). E is
-            // Bls12 (checked above), so this checked downcast never fails.
-            let bases_midnight: &[midnight_curves::G1Affine] = (&bases_affine as &dyn std::any::Any)
-                .downcast_ref::<Vec<midnight_curves::G1Affine>>()
-                .ok_or(crate::poly::Error::OpeningError)?;
+            // Bls12 (checked above), so this TypeId-checked view never fails.
+            let bases_midnight: &[midnight_curves::G1Affine] =
+                crate::gpu_accel::try_as_g1_affine_slice::<E::G1Affine>(&bases_affine)
+                    .ok_or(crate::poly::Error::OpeningError)?;
 
             ctx.upload_g1_bases(bases_midnight)
                 .map_err(|_| crate::poly::Error::OpeningError)
@@ -323,12 +323,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
         };
         // The GPU result is a midnight `G1Projective`; E is Bls12 on every GPU
-        // path below, so E::G1 is that same type and the checked downcast is
-        // the identity.
+        // path below, so E::G1 is that same type and the backend line's
+        // TypeId-asserting conversion is the identity.
         let to_e_g1 = |p: midnight_curves::G1Projective| -> E::G1 {
-            *(&p as &dyn std::any::Any)
-                .downcast_ref::<E::G1>()
-                .expect("GPU commit path is only taken for E = midnight_curves::Bls12")
+            crate::gpu_accel::projective_to_curve::<E::G1Affine>(p)
         };
 
         if polys.is_empty() {

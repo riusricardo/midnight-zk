@@ -49,7 +49,7 @@ pub fn best_fft<F: PrimeField + 'static>(a: &mut [F], omega: F, log_n: u32) {
         let used_gpu = dispatch_ntt_inplace(
             a,
             |fq_slice| {
-                midnight_bls12_381_cuda::ntt::forward_ntt_inplace_auto(fq_slice)
+                crate::gpu_accel::backend::ntt::forward_ntt_inplace_auto(fq_slice)
                     .map_err(|e| e.to_string())
             },
             |data| midnight_curves::fft::best_fft(data, omega, log_n),
@@ -85,7 +85,7 @@ pub fn ifft<F: PrimeField + 'static>(a: &mut [F], omega_inv: F, log_n: u32, divi
         let used_gpu = dispatch_ntt_inplace(
             a,
             |fq_slice| {
-                midnight_bls12_381_cuda::ntt::inverse_ntt_inplace_auto(fq_slice)
+                crate::gpu_accel::backend::ntt::inverse_ntt_inplace_auto(fq_slice)
                     .map_err(|e| e.to_string())
             },
             |data| {
@@ -138,8 +138,8 @@ pub fn best_fft_batch<F: PrimeField + 'static>(
     #[cfg(feature = "gpu")]
     {
         // The `_auto` handles GPU/CPU routing (threshold, MIDNIGHT_DEVICE) itself.
-        match midnight_bls12_381_cuda::with_fq_slice_mut(batch, |fq| {
-            midnight_bls12_381_cuda::ntt::forward_ntt_batch_inplace_auto(fq, poly_size)
+        match crate::gpu_accel::with_fq_slice_mut(batch, |fq| {
+            crate::gpu_accel::backend::ntt::forward_ntt_batch_inplace_auto(fq, poly_size)
         }) {
             Some(Ok(())) => return,
             Some(Err(e)) => {
@@ -168,8 +168,8 @@ pub fn ifft_batch<F: PrimeField + 'static>(
     debug_assert_eq!(batch.len() % poly_size, 0);
     #[cfg(feature = "gpu")]
     {
-        match midnight_bls12_381_cuda::with_fq_slice_mut(batch, |fq| {
-            midnight_bls12_381_cuda::ntt::inverse_ntt_batch_inplace_auto(fq, poly_size)
+        match crate::gpu_accel::with_fq_slice_mut(batch, |fq| {
+            crate::gpu_accel::backend::ntt::inverse_ntt_batch_inplace_auto(fq, poly_size)
         }) {
             Some(Ok(())) => return,
             Some(Err(e)) => {
