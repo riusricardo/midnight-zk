@@ -48,7 +48,10 @@ num-bigint = { workspace = true }
 
 # GPU acceleration via external crate (all GPU code flows through this)
 # ICICLE dependencies come transitively through midnight-bls12-381-cuda
-midnight-bls12-381-cuda = { path = "../bls12-381-cuda-backend", optional = true }
+# A sibling checkout of the backend repository: `version` rejects a stale
+# checkout, the line feature selects the typed surface for this fork's
+# midnight-curves (the workspace `[patch.crates-io]` makes them one package).
+midnight-bls12-381-cuda = { path = "../../midnight-bls12-381-cuda-unified", version = "0.3", optional = true, features = ["curves-v03"] }
 
 # Direct ICICLE dependencies for params.rs base uploads
 # These are needed because we re-export ICICLE types through gpu_bridge
