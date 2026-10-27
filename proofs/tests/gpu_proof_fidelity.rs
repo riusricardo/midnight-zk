@@ -20,10 +20,17 @@
 //! Each proof is verified with the final MSMs evaluated by BLST directly (never through
 //! the GPU dispatch), so a GPU-produced proof is always checked on the CPU.
 //!
-//! The device is fixed per process (`MIDNIGHT_DEVICE` is read once), so the comparison
-//! takes two runs:
+//! Every run, on any device and with or without `gpu`, asserts that each proof's
+//! blake2b-128 fingerprint is `EXPECTED_FINGERPRINTS`: the bytes upstream's CPU prover
+//! (midnight-proofs 0.7.3) emits for this circuit and these seeds. If an upstream prover
+//! change legitimately changes them, regenerate the constants from a build without `gpu`
+//! (or a `MIDNIGHT_DEVICE=cpu` run), which prints them.
+//!
+//! To locate a difference, compare two runs byte by byte (the device is fixed per
+//! process: `MIDNIGHT_DEVICE` is read once):
 //!   1. `FIDELITY_DUMP=<file>` writes the proof bytes;
-//!   2. `FIDELITY_EXPECT=<file>` asserts the proof bytes equal that file.
+//!   2. `FIDELITY_EXPECT=<file>` asserts the proof bytes equal that file, reporting the
+//!      first differing byte.
 //!
 //! ```text
 //! MIDNIGHT_DEVICE=cpu FIDELITY_DUMP=/tmp/cpu.bin \
@@ -69,6 +76,14 @@ const TABLE_SIZE: u64 = 256;
 
 const SETUP_SEED: u64 = 0x5eed_0001;
 const PROVER_SEED: u64 = 0x5eed_0002;
+
+/// blake2b-128 of each proof as upstream's CPU prover emits it (see the module docs).
+/// `truncated-challenges` changes every challenge, so these do not apply to it.
+#[cfg(not(feature = "truncated-challenges"))]
+const EXPECTED_FINGERPRINTS: [(&str, &str); 2] = [
+    ("single", "941b4ce58bcda2bfb60abaaa22b6aa86"),
+    ("multi", "e3921e7b567869421a9fa0e8baa9327e"),
+];
 
 #[derive(Clone, Debug)]
 struct FidelityConfig {
@@ -487,5 +502,20 @@ fn gpu_proof_fidelity() {
             }
         }
         eprintln!("[fidelity] proof bytes identical to {path}");
+    }
+
+    #[cfg(not(feature = "truncated-challenges"))]
+    {
+        for ((name, proof), (expected_name, expected)) in proofs.iter().zip(EXPECTED_FINGERPRINTS)
+        {
+            assert_eq!(*name, expected_name);
+            assert_eq!(
+                fingerprint(proof),
+                expected,
+                "proof {name} is not the upstream CPU prover's (blake2b-128 {expected}); if the \
+                 upstream prover changed, update EXPECTED_FINGERPRINTS"
+            );
+        }
+        eprintln!("[fidelity] proof fingerprints match the pinned upstream CPU bytes");
     }
 }
