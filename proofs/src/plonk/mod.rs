@@ -26,6 +26,8 @@ use crate::{
 mod circuit;
 mod error;
 pub(crate) mod evaluation;
+#[cfg(feature = "gpu")]
+mod gpu_eval;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod phase_trace;
