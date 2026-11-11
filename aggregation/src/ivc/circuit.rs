@@ -19,9 +19,9 @@ use midnight_proofs::{
     plonk::{ConstraintSystem, VerifyingKey},
     poly::EvaluationDomain,
 };
-use midnight_zk_stdlib::{DefaultPCS, Relation, ZkStdLib, ZkStdLibArch};
+use midnight_zk_stdlib::{Relation, ZkStdLib, ZkStdLibArch};
 
-use super::{F, Ivc, IvcError, S};
+use super::{F, Ivc, IvcError, PCS, S};
 
 /// The public instance (statement) of an IVC proof.
 ///
@@ -56,14 +56,14 @@ impl<T: Ivc> IvcInstance<T> {
 /// to be checked against the IVC instance.
 #[derive(Clone, Debug)]
 pub struct IvcExtendedInstance<T: Ivc> {
-    pub(crate) vk: VerifyingKey<F, DefaultPCS>,
+    pub(crate) vk: VerifyingKey<F, PCS>,
     pub(crate) state: T::State,
     pub(crate) acc: Accumulator<S>,
 }
 
 impl<T: Ivc> IvcExtendedInstance<T> {
     /// Extends the given instance with `vk`.
-    pub(crate) fn new(vk: &VerifyingKey<F, DefaultPCS>, instance: IvcInstance<T>) -> Self {
+    pub(crate) fn new(vk: &VerifyingKey<F, PCS>, instance: IvcInstance<T>) -> Self {
         IvcExtendedInstance {
             vk: vk.clone(),
             state: instance.state,
@@ -160,7 +160,7 @@ impl<T: Ivc> Relation for IvcCircuit<T> {
         instance: Value<Self::Instance>,
         witness: Value<Self::Witness>,
     ) -> Result<(), IvcError> {
-        let verifier_gadget = std_lib.verifier::<DefaultPCS>();
+        let verifier_gadget = std_lib.verifier::<PCS>();
         let ivc_gadget = T::new(std_lib.clone(), &self.ctx);
 
         let assigned_self_vk: AssignedVk<S> = verifier_gadget.assign_vk_as_public_input(

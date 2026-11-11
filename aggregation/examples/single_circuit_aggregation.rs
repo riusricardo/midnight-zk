@@ -26,9 +26,7 @@ use midnight_circuits::{
     hash::poseidon::{PoseidonChip, PoseidonState},
     instructions::{hash::HashCPU, *},
     types::{AssignedNative, Instantiable},
-    verifier::{
-        self, Accumulator, AssignedAccumulator, AssignedVk, BlstrsEmulation, SelfEmulation,
-    },
+    verifier::{self, Accumulator, AssignedAccumulator, AssignedVk, SelfEmulation},
 };
 use midnight_proofs::{
     circuit::{Layouter, Value},
@@ -37,13 +35,15 @@ use midnight_proofs::{
     transcript::{CircuitTranscript, Transcript},
 };
 use midnight_zk_stdlib::{
-    DefaultPCS, MidnightVK, Relation, ZkStdLib, ZkStdLibArch, prove, setup_pk, setup_vk,
+    FflonkKZG, MidnightPCS, MidnightVK, Relation, ZkStdLib, ZkStdLibArch, prove, setup_pk,
+    setup_vk,
     utils::plonk_api::{SrsSource, load_srs},
 };
 use rand::rngs::OsRng;
 use sha_preimage::ShaPreimageCircuit;
 
-type S = BlstrsEmulation;
+type PCS = FflonkKZG<3>;
+type S = <PCS as MidnightPCS>::Emulation;
 type F = <S as SelfEmulation>::F;
 type C = <S as SelfEmulation>::C;
 type E = <S as SelfEmulation>::Engine;
@@ -56,7 +56,7 @@ pub struct InnerCircuitContext {
     /// Evaluation domain for the inner circuit.
     domain: EvaluationDomain<F>,
     /// Verifying key.
-    vk: MidnightVK<DefaultPCS>,
+    vk: MidnightVK<PCS>,
     /// SRS verifier parameters (for off-circuit proof preparation).
     params_verifier: ParamsVerifierKZG<E>,
 }
@@ -163,7 +163,7 @@ impl IvcIO for ProofAggregation {
         let statements_hash =
             self.std_lib.assign(layouter, value.as_ref().map(|s| s.statements_hash))?;
 
-        let inner_acc = self.std_lib.verifier::<DefaultPCS>().assign_collapsed_accumulator(
+        let inner_acc = self.std_lib.verifier::<PCS>().assign_collapsed_accumulator(
             layouter,
             &self.inner_ctx.fixed_bases().keys().cloned().collect::<Vec<_>>(),
             value.as_ref().map(|s| s.inner_acc.clone()),
@@ -182,7 +182,7 @@ impl IvcIO for ProofAggregation {
     ) -> Result<(), Error> {
         self.std_lib.constrain_as_public_input(layouter, &state.statements_hash)?;
         self.std_lib
-            .verifier::<DefaultPCS>()
+            .verifier::<PCS>()
             .constrain_as_public_input(layouter, &state.inner_acc)
     }
 
@@ -193,9 +193,7 @@ impl IvcIO for ProofAggregation {
     ) -> Result<Vec<AssignedNative<F>>, Error> {
         Ok([
             self.std_lib.as_public_input(layouter, &state.statements_hash)?,
-            self.std_lib
-                .verifier::<DefaultPCS>()
-                .as_public_input(layouter, &state.inner_acc)?,
+            self.std_lib.verifier::<PCS>().as_public_input(layouter, &state.inner_acc)?,
         ]
         .concat())
     }
@@ -233,7 +231,7 @@ impl IvcTransition for ProofAggregation {
         let inner_proof_acc = {
             let mut transcript =
                 CircuitTranscript::<PoseidonState<F>>::init_from_bytes(&witness.inner_proof);
-            let dual_msm = plonk::prepare::<F, DefaultPCS, CircuitTranscript<PoseidonState<F>>>(
+            let dual_msm = plonk::prepare::<F, PCS, CircuitTranscript<PoseidonState<F>>>(
                 ctx.vk.vk(),
                 &[],
                 &[&[], &statement_pis],
@@ -280,7 +278,7 @@ impl IvcTransition for ProofAggregation {
         witness: Value<Self::Witness>,
     ) -> Result<Self::AssignedState, Error> {
         // Assign inner VK as a hard-coded constant.
-        let inner_vk: AssignedVk<S> = self.std_lib.verifier::<DefaultPCS>().assign_fixed_vk(
+        let inner_vk: AssignedVk<S> = self.std_lib.verifier::<PCS>().assign_fixed_vk(
             layouter,
             &self.inner_ctx.domain,
             self.inner_ctx.vk.vk().cs(),
@@ -298,7 +296,7 @@ impl IvcTransition for ProofAggregation {
 
         // Verify the inner proof in-circuit.
 
-        let inner_proof_acc = self.std_lib.verifier::<DefaultPCS>().prepare(
+        let inner_proof_acc = self.std_lib.verifier::<PCS>().prepare(
             layouter,
             &inner_vk,
             &[],
@@ -310,7 +308,7 @@ impl IvcTransition for ProofAggregation {
         let inner_acc = {
             let mut acc = self
                 .std_lib
-                .verifier::<DefaultPCS>()
+                .verifier::<PCS>()
                 .accumulate(layouter, &[inner_proof_acc, state.inner_acc.clone()])?;
 
             acc.collapse(
@@ -342,7 +340,7 @@ fn main() {
     let inner_arch = ShaPreimageCircuit.used_chips();
 
     // The inner circuit can use a different SRS than the IVC circuit.
-    let inner_srs = load_srs::<DefaultPCS>(SrsSource::Filecoin, sha_preimage::K);
+    let inner_srs = load_srs::<PCS>(SrsSource::Filecoin, sha_preimage::K);
     let inner_vk = setup_vk(&inner_srs, &ShaPreimageCircuit);
     let inner_pk = setup_pk(&ShaPreimageCircuit, &inner_vk);
     let inner_ctx = {
@@ -378,7 +376,7 @@ fn main() {
     println!("{STEPS} inner proofs generated in {:.2?}", start.elapsed());
 
     // IVC setup.
-    let ivc_srs = load_srs::<DefaultPCS>(SrsSource::Midnight, IVC_K);
+    let ivc_srs = load_srs::<PCS>(SrsSource::Midnight, IVC_K);
     let start = Instant::now();
     let (mut prover, verifier) = ivc::setup::<ProofAggregation>(ivc_srs, IVC_K, inner_ctx);
     println!("IVC setup completed in {:.2?}", start.elapsed());

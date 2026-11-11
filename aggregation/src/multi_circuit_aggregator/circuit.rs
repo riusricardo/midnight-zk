@@ -30,11 +30,11 @@ use midnight_proofs::{
     transcript::{CircuitTranscript, Transcript},
     utils::SerdeFormat,
 };
-use midnight_zk_stdlib::{DefaultPCS, ZkStdLib, ZkStdLibArch};
+use midnight_zk_stdlib::{ZkStdLib, ZkStdLibArch};
 
 use super::aggregator::AggregationWitness;
 use crate::{
-    ivc::{C, E, F, IvcContext, IvcIO, IvcState, IvcTransition, S},
+    ivc::{C, E, F, IvcContext, IvcIO, IvcState, IvcTransition, PCS, S},
     multi_circuit_aggregator::Claim,
 };
 
@@ -187,7 +187,7 @@ impl IvcIO for ProofAggregation {
     ) -> Result<AssignedState, Error> {
         let claims_hash = self.std_lib.assign(layouter, value.as_ref().map(|s| s.claims_hash))?;
 
-        let inner_acc = self.std_lib.verifier::<DefaultPCS>().assign_collapsed_accumulator(
+        let inner_acc = self.std_lib.verifier::<PCS>().assign_collapsed_accumulator(
             layouter,
             &[],
             value.as_ref().map(|s| s.inner_acc.clone()),
@@ -206,7 +206,7 @@ impl IvcIO for ProofAggregation {
     ) -> Result<(), Error> {
         self.std_lib.constrain_as_public_input(layouter, &state.claims_hash)?;
         self.std_lib
-            .verifier::<DefaultPCS>()
+            .verifier::<PCS>()
             .constrain_as_public_input(layouter, &state.inner_acc)
     }
 
@@ -217,9 +217,7 @@ impl IvcIO for ProofAggregation {
     ) -> Result<Vec<AssignedNative<F>>, Error> {
         Ok([
             self.std_lib.as_public_input(layouter, &state.claims_hash)?,
-            self.std_lib
-                .verifier::<DefaultPCS>()
-                .as_public_input(layouter, &state.inner_acc)?,
+            self.std_lib.verifier::<PCS>().as_public_input(layouter, &state.inner_acc)?,
         ]
         .concat())
     }
@@ -256,7 +254,7 @@ impl IvcTransition for ProofAggregation {
         let inner_proof_acc = {
             let mut transcript =
                 CircuitTranscript::<PoseidonState<F>>::init_from_bytes(&witness.inner_proof);
-            let dual_msm = plonk::prepare::<F, DefaultPCS, CircuitTranscript<PoseidonState<F>>>(
+            let dual_msm = plonk::prepare::<F, PCS, CircuitTranscript<PoseidonState<F>>>(
                 witness.claim.vk.vk(),
                 &[],
                 &[&[], &[statement]],
@@ -310,7 +308,7 @@ impl IvcTransition for ProofAggregation {
         state: &Self::AssignedState,
         witness: Value<Self::Witness>,
     ) -> Result<Self::AssignedState, Error> {
-        let verifier = self.std_lib.verifier::<DefaultPCS>();
+        let verifier = self.std_lib.verifier::<PCS>();
 
         // 1. Witness the VK and the statement, bind the VK to its witnessed hash, and
         //    add both to the hash chain (checked by the decider).
@@ -339,7 +337,7 @@ impl IvcTransition for ProofAggregation {
 
         // 2. Verify the inner proof in-circuit against the witnessed VK and statement.
         let inner_proof_acc = {
-            let mut acc = self.std_lib.verifier::<DefaultPCS>().prepare(
+            let mut acc = self.std_lib.verifier::<PCS>().prepare(
                 layouter,
                 &assigned_vk,
                 &[],

@@ -24,18 +24,21 @@ pub use error::IvcError;
 use midnight_circuits::{
     instructions::{BinaryInstructions, EqualityInstructions},
     types::{AssignedBit, AssignedNative},
-    verifier::{BlstrsEmulation, SelfEmulation},
+    verifier::SelfEmulation,
 };
 use midnight_proofs::{
     circuit::{Layouter, Value},
     plonk::Error,
 };
-use midnight_zk_stdlib::{ZkStdLib, ZkStdLibArch};
+use midnight_zk_stdlib::{FflonkKZG, MidnightPCS, ZkStdLib, ZkStdLibArch};
 pub use prover::IvcProver;
 pub use setup::setup;
 pub use verifier::IvcVerifier;
 
-pub(crate) type S = BlstrsEmulation;
+/// The commitment scheme of the IVC proofs, which the IVC circuit also
+/// verifies in-circuit.
+pub(crate) type PCS = FflonkKZG<3>;
+pub(crate) type S = <PCS as MidnightPCS>::Emulation;
 pub(crate) type F = <S as SelfEmulation>::F;
 pub(crate) type C = <S as SelfEmulation>::C;
 pub(crate) type E = <S as SelfEmulation>::Engine;

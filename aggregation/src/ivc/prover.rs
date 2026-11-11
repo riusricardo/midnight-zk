@@ -17,11 +17,11 @@ use midnight_proofs::{
     poly::kzg::params::ParamsKZG,
     transcript::{CircuitTranscript, Transcript},
 };
-use midnight_zk_stdlib::{DefaultPCS, MidnightPK};
+use midnight_zk_stdlib::MidnightPK;
 use rand::rngs::OsRng;
 
 use super::{
-    E, F, Ivc, IvcCircuit, IvcError, IvcInstance, IvcWitness, S, circuit::IvcExtendedInstance,
+    E, F, Ivc, IvcCircuit, IvcError, IvcInstance, IvcWitness, PCS, S, circuit::IvcExtendedInstance,
 };
 
 /// Stateful IVC prover holding:
@@ -36,7 +36,7 @@ use super::{
 pub struct IvcProver<T: Ivc> {
     pub(crate) params: ParamsKZG<E>,
     pub(crate) relation: IvcCircuit<T>,
-    pub(crate) pk: MidnightPK<IvcCircuit<T>, DefaultPCS>,
+    pub(crate) pk: MidnightPK<IvcCircuit<T>, PCS>,
     pub(crate) state: T::State,
     pub(crate) proof: Vec<u8>,
     pub(crate) acc: Accumulator<S>,
@@ -94,7 +94,7 @@ impl<T: Ivc> IvcProver<T> {
 
             let mut transcript =
                 CircuitTranscript::<PoseidonState<F>>::init_from_bytes(&self.proof);
-            let dual_msm = plonk::prepare::<F, DefaultPCS, CircuitTranscript<PoseidonState<F>>>(
+            let dual_msm = plonk::prepare::<F, PCS, CircuitTranscript<PoseidonState<F>>>(
                 vk,
                 &[],
                 &[&[], &prev_pi],
