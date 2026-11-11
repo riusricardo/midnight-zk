@@ -322,7 +322,22 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
             .zip(trashcans.iter())
             .zip(permutations.iter())
         {
-            // Custom gates
+            // Custom gates: on the GPU when that applies (bit-identical rows),
+            // else on CPU threads.
+            #[cfg(feature = "gpu")]
+            let gates_on_gpu = super::gpu_eval::try_custom_gates(
+                &self.custom_gates,
+                fixed,
+                advice,
+                instance,
+                challenges,
+                [&beta, &gamma, &theta, &trash_challenge, &y],
+                rot_scale,
+                &mut values[..],
+            );
+            #[cfg(not(feature = "gpu"))]
+            let gates_on_gpu = false;
+            if !gates_on_gpu {
             rayon::scope(|scope| {
                 let chunk_size = size.div_ceil(num_threads);
                 for (thread_idx, values) in values.chunks_mut(chunk_size).enumerate() {
@@ -351,6 +366,7 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
                     });
                 }
             });
+            }
             crate::plonk::phase_trace::mark("h_gates");
 
             // Permutations
