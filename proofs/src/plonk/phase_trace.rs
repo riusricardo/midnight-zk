@@ -11,7 +11,9 @@
 //! Each phase is the time since the previous mark, so the phases add up to the
 //! total; a phase marked more than once (inside the per-circuit loops) is the
 //! sum of its intervals. `advice_*` split witness synthesis, the batch
-//! inversion and the commitments; `h_*` split the quotient computation into
+//! inversion and the commitments; `lookup_*` split the lookup permutation into
+//! compressing the expressions, sorting / filling and the two commitments;
+//! `h_*` split the quotient computation into
 //! the extended-domain cosets and the gate, permutation, lookup and trash
 //! evaluations. GPU work inside a phase (MSM, NTT) is included in that phase: the
 //! split shows where a proof's time goes, CPU and GPU together. The timer is
