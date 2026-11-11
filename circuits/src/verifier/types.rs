@@ -42,7 +42,7 @@ use crate::{
         SpongeInstructions, ecc::EccInstructions, public_input::CommittedInstanceInstructions,
     },
     types::{AssignedForeignPoint, InnerValue, Instantiable},
-    verifier::{InCircuitKZG, InCircuitPCS},
+    verifier::{InCircuitFflonk, InCircuitKZG, InCircuitPCS},
 };
 
 /// A trait for parametrizing the VerifierGadget.
@@ -173,6 +173,57 @@ impl SelfEmulation for BlstrsEmulation {
         base: Value<Self::C>,
     ) -> Result<Self::AssignedPoint, Error> {
         curve_chip.assign_without_subgroup_check(layouter, base)
+    }
+}
+
+/// [`BlstrsEmulation`] for proofs committed with fflonk over KZG, combining up
+/// to `2^LOG2_T_MAX` polynomials per commitment.
+#[derive(Clone, Debug)]
+pub struct BlstrsFflonkEmulation<const LOG2_T_MAX: u32> {}
+
+impl<const LOG2_T_MAX: u32> SelfEmulation for BlstrsFflonkEmulation<LOG2_T_MAX> {
+    type F = <BlstrsEmulation as SelfEmulation>::F;
+    type C = <BlstrsEmulation as SelfEmulation>::C;
+    type AssignedPoint = <BlstrsEmulation as SelfEmulation>::AssignedPoint;
+    type Hash = <BlstrsEmulation as SelfEmulation>::Hash;
+
+    type ScalarChip = <BlstrsEmulation as SelfEmulation>::ScalarChip;
+    type CurveChip = <BlstrsEmulation as SelfEmulation>::CurveChip;
+    type SpongeChip = <BlstrsEmulation as SelfEmulation>::SpongeChip;
+
+    type G1Affine = <BlstrsEmulation as SelfEmulation>::G1Affine;
+    type G2Affine = <BlstrsEmulation as SelfEmulation>::G2Affine;
+    type Engine = <BlstrsEmulation as SelfEmulation>::Engine;
+
+    type PCS = InCircuitFflonk<InCircuitKZG<Self>, LOG2_T_MAX>;
+
+    fn msm(
+        layouter: &mut impl Layouter<Self::F>,
+        curve_chip: &Self::CurveChip,
+        scalars: &[(AssignedNative<Self::F>, usize)],
+        bases: &[Self::AssignedPoint],
+    ) -> Result<Self::AssignedPoint, Error> {
+        BlstrsEmulation::msm(layouter, curve_chip, scalars, bases)
+    }
+
+    fn constrain_scalar_as_committed_public_input(
+        layouter: &mut impl Layouter<Self::F>,
+        scalar_chip: &Self::ScalarChip,
+        assigned_scalar: &AssignedNative<Self::F>,
+    ) -> Result<(), Error> {
+        BlstrsEmulation::constrain_scalar_as_committed_public_input(
+            layouter,
+            scalar_chip,
+            assigned_scalar,
+        )
+    }
+
+    fn assign_without_subgroup_check(
+        layouter: &mut impl Layouter<Self::F>,
+        curve_chip: &Self::CurveChip,
+        base: Value<Self::C>,
+    ) -> Result<Self::AssignedPoint, Error> {
+        BlstrsEmulation::assign_without_subgroup_check(layouter, curve_chip, base)
     }
 }
 

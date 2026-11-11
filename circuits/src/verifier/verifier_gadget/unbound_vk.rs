@@ -195,7 +195,7 @@ mod tests {
     }
 
     impl Circuit<F> for UnboundVkCircuit {
-        type Config = <TestCircuit as Circuit<F>>::Config;
+        type Config = <TestCircuit<S> as Circuit<F>>::Config;
         type FloorPlanner = SimpleFloorPlanner;
         type Params = ();
 
@@ -204,7 +204,7 @@ mod tests {
         }
 
         fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-            TestCircuit::configure(meta)
+            TestCircuit::<S>::configure(meta)
         }
 
         fn synthesize(
