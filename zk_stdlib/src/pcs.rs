@@ -14,6 +14,7 @@
 //! The polynomial commitment schemes of zk_stdlib.
 
 pub use midnight_circuits::verifier::DefaultPCS;
+use midnight_circuits::verifier::{BlstrsEmulation, BlstrsFflonkEmulation, SelfEmulation};
 use midnight_curves::{Bls12, Fq};
 use midnight_proofs::poly::{
     commitment::PolynomialCommitmentScheme,
@@ -59,6 +60,14 @@ pub trait MidnightPCS:
     /// such that the SRS has `2^j` points. It is the inverse of
     /// [`PolynomialCommitmentScheme::max_k`].
     fn srs_k(k: u32) -> u32;
+
+    /// The emulation of BLS12-381 for verifying proofs committed with this
+    /// scheme in-circuit. It shares the chips of [`BlstrsEmulation`].
+    type Emulation: SelfEmulation<
+            CurveChip = <BlstrsEmulation as SelfEmulation>::CurveChip,
+            ScalarChip = <BlstrsEmulation as SelfEmulation>::ScalarChip,
+            SpongeChip = <BlstrsEmulation as SelfEmulation>::SpongeChip,
+        >;
 }
 
 impl sealed::Sealed for KZG {}
@@ -70,6 +79,8 @@ impl sealed::Sealed for FflonkKZG<4> {}
 impl MidnightPCS for KZG {
     const ID: u8 = 0;
 
+    type Emulation = BlstrsEmulation;
+
     fn srs_k(k: u32) -> u32 {
         k
     }
@@ -80,6 +91,8 @@ where
     Self: sealed::Sealed,
 {
     const ID: u8 = LOG2_T_MAX as u8;
+
+    type Emulation = BlstrsFflonkEmulation<LOG2_T_MAX>;
 
     fn srs_k(k: u32) -> u32 {
         k + LOG2_T_MAX
