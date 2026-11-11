@@ -350,6 +350,7 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
                     });
                 }
             });
+            crate::plonk::phase_trace::mark("h_gates");
 
             // Permutations
             let sets = &permutation.sets;
@@ -438,6 +439,7 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
                     }
                 });
             }
+            crate::plonk::phase_trace::mark("h_permutation");
 
             // Lookups
             for (n, lookup) in lookups.iter().enumerate() {
@@ -511,6 +513,7 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
                     }
                 });
             }
+            crate::plonk::phase_trace::mark("h_lookups");
 
             // Trashcans
             for (n, trash) in trashcans.iter().enumerate() {
@@ -554,6 +557,7 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
                     }
                 });
             }
+            crate::plonk::phase_trace::mark("h_trash");
         }
         values
     }

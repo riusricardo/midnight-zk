@@ -5,11 +5,15 @@
 //! one line per proof to stderr:
 //!
 //! ```text
-//! [PHASES] k=15 total=1890.2ms instances=0.4ms advice=310.5ms ...
+//! [PHASES] k=15 total=1890.2ms instances=0.4ms advice_synthesize=180.2ms ...
 //! ```
 //!
 //! Each phase is the time since the previous mark, so the phases add up to the
-//! total. GPU work inside a phase (MSM, NTT) is included in that phase: the
+//! total; a phase marked more than once (inside the per-circuit loops) is the
+//! sum of its intervals. `advice_*` split witness synthesis, the batch
+//! inversion and the commitments; `h_*` split the quotient computation into
+//! the extended-domain cosets and the gate, permutation, lookup and trash
+//! evaluations. GPU work inside a phase (MSM, NTT) is included in that phase: the
 //! split shows where a proof's time goes, CPU and GPU together. The timer is
 //! thread-local, so proofs on parallel threads (the proof server's workers)
 //! each report their own phases. Without the feature every function is an
@@ -47,7 +51,13 @@ mod imp {
         let now = Instant::now();
         TIMER.with(|t| {
             if let Some(timer) = t.borrow_mut().as_mut() {
-                timer.phases.push((phase, now - timer.last));
+                let elapsed = now - timer.last;
+                // A phase marked more than once (once per circuit or per proof
+                // phase) accumulates under its first position.
+                match timer.phases.iter_mut().find(|(name, _)| *name == phase) {
+                    Some((_, total)) => *total += elapsed,
+                    None => timer.phases.push((phase, elapsed)),
+                }
                 timer.last = now;
             }
         });
