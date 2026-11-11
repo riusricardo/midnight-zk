@@ -47,8 +47,7 @@ pub(crate) fn is_gpu_engine<E: Engine>() -> bool {
 /// - `g_lagrange_gpu`: Lagrange form bases for `commit_lagrange()`
 /// 
 /// Bases are uploaded lazily on first use via `get_or_upload_gpu_bases()`.
-/// This one-time upload eliminates per-MSM conversion and transfer overhead,
-/// providing ~40% speedup for large MSMs.
+/// This one-time upload removes the per-MSM conversion and host-to-device transfer.
 /// 
 /// The caches use `Arc<OnceCell<...>>` for thread-safe lazy initialization
 /// that survives `Clone` operations.
