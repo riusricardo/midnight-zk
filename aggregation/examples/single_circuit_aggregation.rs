@@ -21,7 +21,7 @@ mod sha_preimage;
 use std::{collections::BTreeMap, time::Instant};
 
 use ff::Field;
-use midnight_aggregation::ivc::{self, IvcContext, IvcIO, IvcState, IvcTransition};
+use midnight_aggregation::ivc::{self, IvcContext, IvcIO, IvcState, IvcTransition, PCS};
 use midnight_circuits::{
     hash::poseidon::{PoseidonChip, PoseidonState},
     instructions::{hash::HashCPU, *},
@@ -35,14 +35,12 @@ use midnight_proofs::{
     transcript::{CircuitTranscript, Transcript},
 };
 use midnight_zk_stdlib::{
-    FflonkKZG, MidnightPCS, MidnightVK, Relation, ZkStdLib, ZkStdLibArch, prove, setup_pk,
-    setup_vk,
+    MidnightPCS, MidnightVK, Relation, ZkStdLib, ZkStdLibArch, prove, setup_pk, setup_vk,
     utils::plonk_api::{SrsSource, load_srs},
 };
 use rand::rngs::OsRng;
 use sha_preimage::ShaPreimageCircuit;
 
-type PCS = FflonkKZG<3>;
 type S = <PCS as MidnightPCS>::Emulation;
 type F = <S as SelfEmulation>::F;
 type C = <S as SelfEmulation>::C;

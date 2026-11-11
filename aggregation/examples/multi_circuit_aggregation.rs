@@ -31,17 +31,17 @@ use std::time::Instant;
 
 use aggregatable_poseidon_preimage::PoseidonPreimageCircuit as PoseidonCircuit;
 use aggregatable_sha_preimage::AggregatableShaPreimageCircuit as ShaCircuit;
-use midnight_aggregation::multi_circuit_aggregator::{
-    AggregationWitness, InnerCircuitsContext, ProofAggregation,
+use midnight_aggregation::{
+    ivc::PCS,
+    multi_circuit_aggregator::{AggregationWitness, InnerCircuitsContext, ProofAggregation},
 };
 use midnight_circuits::{hash::poseidon::PoseidonState, verifier::SelfEmulation};
 use midnight_zk_stdlib::{
-    FflonkKZG, MidnightPCS, ZkStdLibArch, prove, setup_pk, setup_vk,
+    MidnightPCS, ZkStdLibArch, prove, setup_pk, setup_vk,
     utils::plonk_api::{SrsSource, load_srs},
 };
 use rand::rngs::OsRng;
 
-type PCS = FflonkKZG<3>;
 type S = <PCS as MidnightPCS>::Emulation;
 type F = <S as SelfEmulation>::F;
 

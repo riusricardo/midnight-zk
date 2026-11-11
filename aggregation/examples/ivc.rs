@@ -8,7 +8,7 @@
 use std::time::Instant;
 
 use ff::Field;
-use midnight_aggregation::ivc::{self, IvcContext, IvcIO, IvcState, IvcTransition};
+use midnight_aggregation::ivc::{self, IvcContext, IvcIO, IvcState, IvcTransition, PCS};
 use midnight_circuits::{
     hash::poseidon::PoseidonChip,
     instructions::{hash::HashCPU, *},
@@ -20,11 +20,10 @@ use midnight_proofs::{
     plonk::Error,
 };
 use midnight_zk_stdlib::{
-    FflonkKZG, MidnightPCS, ZkStdLib, ZkStdLibArch,
+    MidnightPCS, ZkStdLib, ZkStdLibArch,
     utils::plonk_api::{SrsSource, load_srs},
 };
 
-type PCS = FflonkKZG<3>;
 type S = <PCS as MidnightPCS>::Emulation;
 type F = <S as SelfEmulation>::F;
 

@@ -37,7 +37,7 @@ pub use verifier::IvcVerifier;
 
 /// The commitment scheme of the IVC proofs, which the IVC circuit also
 /// verifies in-circuit.
-pub(crate) type PCS = FflonkKZG<3>;
+pub type PCS = FflonkKZG<3>;
 pub(crate) type S = <PCS as MidnightPCS>::Emulation;
 pub(crate) type F = <S as SelfEmulation>::F;
 pub(crate) type C = <S as SelfEmulation>::C;
