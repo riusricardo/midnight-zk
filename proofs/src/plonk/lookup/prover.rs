@@ -430,6 +430,30 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluated<F> {
 
 type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCoeff>);
 
+/// Sorts lookup values in their `Ord` order, exactly as `values.sort()` does.
+///
+/// The `Ord` of midnight's BLS12-381 scalar field compares the canonical
+/// big-endian encodings, so every comparison converts both operands out of
+/// Montgomery form. For that field the encoding of each value is computed once
+/// and the (encoding, value) pairs are sorted in parallel by encoding, with the
+/// same byte comparison `Ord` performs. Equal values are identical, so the
+/// result is the same sequence `sort` produces (stable or not). Other fields
+/// keep `sort`.
+fn sort_lookup_values<F: Ord + Send + Sync + 'static>(values: &mut Vec<F>) {
+    use std::any::Any;
+
+    use midnight_curves::Fq;
+    use rayon::prelude::*;
+
+    let Some(values) = (values as &mut dyn Any).downcast_mut::<Vec<Fq>>() else {
+        values.sort();
+        return;
+    };
+    let mut keyed: Vec<([u8; 32], Fq)> = values.par_iter().map(|v| (v.to_bytes_be(), *v)).collect();
+    keyed.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    values.par_iter_mut().zip(keyed.into_par_iter()).for_each(|(dst, (_, v))| *dst = v);
+}
+
 /// Given a vector of input values A and a vector of table values S,
 /// this method permutes A and S to produce A' and S', such that:
 /// - like values in A' are vertically adjacent to each other; and
@@ -454,7 +478,7 @@ where
     permuted_input_expression.truncate(usable_rows);
 
     // Sort input lookup expression values
-    permuted_input_expression.sort();
+    sort_lookup_values(&mut permuted_input_expression);
 
     // A map of each unique element in the table expression and its count. Its
     // iteration order decides which leftover values fill the repeated input rows;
@@ -526,4 +550,36 @@ where
         domain.lagrange_from_vec(permuted_input_expression),
         domain.lagrange_from_vec(permuted_table_coeffs),
     ))
+}
+
+#[cfg(test)]
+mod sort_tests {
+    use ff::Field;
+    use midnight_curves::Fq;
+    use rand_core::{OsRng, RngCore};
+
+    use super::sort_lookup_values;
+
+    /// The keyed parallel sort yields exactly the sequence `sort` yields: values
+    /// drawn from a small pool (many duplicates, as in lookup inputs), small
+    /// integers, and values next to the modulus, in random order.
+    #[test]
+    fn keyed_sort_matches_ord_sort() {
+        let pool: Vec<Fq> = (0..257).map(|_| Fq::random(OsRng)).collect();
+        for n in [0usize, 1, 2, 3, 1000, 1 << 15] {
+            let values: Vec<Fq> = (0..n)
+                .map(|i| match i % 4 {
+                    0 => pool[(OsRng.next_u32() as usize) % pool.len()],
+                    1 => Fq::from(OsRng.next_u64() % 64),
+                    2 => -Fq::from(OsRng.next_u64() % 64),
+                    _ => Fq::random(OsRng),
+                })
+                .collect();
+            let mut expected = values.clone();
+            expected.sort();
+            let mut got = values;
+            sort_lookup_values(&mut got);
+            assert_eq!(got, expected, "n = {n}");
+        }
+    }
 }
