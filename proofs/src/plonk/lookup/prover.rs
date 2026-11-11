@@ -116,6 +116,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
 
         // Get values of table expressions involved in the lookup and compress them
         let compressed_table_expression = compress_expressions(&self.table_expressions);
+        crate::plonk::phase_trace::mark("lookup_compress");
 
         // Permute compressed (InputExpression, TableExpression) pair
         let (permuted_input_expression, permuted_table_expression) = permute_expression_pair(
@@ -125,6 +126,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
             &compressed_input_expression,
             &compressed_table_expression,
         )?;
+        crate::plonk::phase_trace::mark("lookup_sort");
 
         // Closure to construct commitment to vector of values
         let commit_values = |values: &Polynomial<F, LagrangeCoeff>| {
@@ -140,6 +142,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         // Commit to permuted table expression
         let (permuted_table_poly, permuted_table_commitment) =
             commit_values(&permuted_table_expression);
+        crate::plonk::phase_trace::mark("lookup_commit");
 
         // Hash permuted input commitment
         transcript.write(&permuted_input_commitment)?;
