@@ -143,7 +143,7 @@ where
     super::phase_trace::mark("instances");
 
     let (advice, challenges) = parse_advices(params, pk, circuits, instances, transcript, rng)?;
-    super::phase_trace::mark("advice");
+    super::phase_trace::mark("advice_rest");
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: F = transcript.squeeze_challenge();
@@ -411,7 +411,6 @@ where
     let domain = pk.get_vk().get_domain();
 
     let nu_poly = compute_nu_poly(pk, &trace);
-    super::phase_trace::mark("h_poly");
 
     let ProverTrace {
         advice_polys,
@@ -692,6 +691,7 @@ where
                 config.clone(),
                 meta.constants.clone(),
             )?;
+            super::phase_trace::mark("advice_synthesize");
 
             let mut advice_values = batch_invert_rational::<F>(
                 witness
@@ -720,6 +720,7 @@ where
                     }
                 }
             }
+            super::phase_trace::mark("advice_invert");
 
             // Batch commit to advice columns with GPU pipelining when beneficial
             let advice_commitments: Vec<_> = {
@@ -743,6 +744,7 @@ where
             for commitment in &advice_commitments {
                 transcript.write(commitment)?;
             }
+            super::phase_trace::mark("advice_commit");
             for (column_index, advice_values) in column_indices.iter().zip(advice_values) {
                 advice.advice_polys[*column_index] = advice_values;
             }
@@ -801,6 +803,7 @@ pub(super) fn compute_nu_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommit
                 .collect()
         })
         .collect();
+    super::phase_trace::mark("h_cosets");
 
     // Evaluate the numerator polynomial nu(X) of the quotient polynomial
     // h(X) = nu(X) / (X^n-1): nu(X) is a random linear combination of all
