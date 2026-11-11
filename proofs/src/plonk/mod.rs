@@ -28,6 +28,7 @@ mod error;
 pub(crate) mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
+pub(crate) mod phase_trace;
 pub mod permutation;
 pub(crate) mod traces;
 pub(crate) mod trash;

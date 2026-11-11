@@ -140,8 +140,10 @@ where
     let domain = &pk.vk.domain;
 
     let instance = compute_instances(params, pk, instances, nb_committed_instances, transcript)?;
+    super::phase_trace::mark("instances");
 
     let (advice, challenges) = parse_advices(params, pk, circuits, instances, transcript, rng)?;
+    super::phase_trace::mark("advice");
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: F = transcript.squeeze_challenge();
@@ -172,6 +174,7 @@ where
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
+    super::phase_trace::mark("lookup_permute");
 
     // Sample beta challenge
     let beta: F = transcript.squeeze_challenge();
@@ -198,6 +201,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
+    super::phase_trace::mark("permutation");
 
     // Compute lookup product polynomials (without committing yet)
     let lookup_products: Vec<Vec<lookup::prover::ProductComputed<F>>> = lookups
@@ -258,6 +262,8 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    super::phase_trace::mark("lookup_product");
 
     // Trash argument
     let trash_challenge: F = transcript.squeeze_challenge();
@@ -334,8 +340,11 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    super::phase_trace::mark("trash");
+
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::<F, CS>::commit(params, domain, rng, transcript)?;
+    super::phase_trace::mark("vanishing_commit");
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: F = transcript.squeeze_challenge();
@@ -352,6 +361,7 @@ where
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    super::phase_trace::mark("advice_to_coeff");
 
     Ok(ProverTrace {
         advice_polys,
@@ -401,6 +411,7 @@ where
     let domain = pk.get_vk().get_domain();
 
     let h_poly = compute_h_poly(pk, &trace);
+    super::phase_trace::mark("h_poly");
 
     let ProverTrace {
         advice_polys,
@@ -414,6 +425,7 @@ where
 
     // Construct the vanishing argument's h(X) commitments
     let vanishing = vanishing.construct::<CS, T>(params, domain, h_poly, rng, transcript)?;
+    super::phase_trace::mark("h_commit");
 
     let x: F = transcript.squeeze_challenge();
 
@@ -459,6 +471,8 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    super::phase_trace::mark("evaluate");
+
     let queries = compute_queries(
         pk,
         nb_committed_instances,
@@ -471,7 +485,10 @@ where
         x,
     );
 
-    CS::multi_open(params, &queries, transcript).map_err(|_| Error::ConstraintSystemFailure)
+    let opened =
+        CS::multi_open(params, &queries, transcript).map_err(|_| Error::ConstraintSystemFailure);
+    super::phase_trace::mark("multi_open");
+    opened
 }
 
 /// This creates a proof for the provided `circuit` when given the public
@@ -505,6 +522,7 @@ where
         + FromUniformBytes<64>,
 {
     let mut rng = rng;
+    super::phase_trace::begin();
     let trace = compute_trace(
         params,
         pk,
@@ -515,7 +533,7 @@ where
         &mut rng,
         transcript,
     )?;
-    finalise_proof(
+    let proof = finalise_proof(
         params,
         pk,
         #[cfg(feature = "committed-instances")]
@@ -523,7 +541,9 @@ where
         trace,
         &mut rng,
         transcript,
-    )
+    );
+    super::phase_trace::end(pk.vk.domain.k());
+    proof
 }
 
 pub(super) fn compute_instances<F, CS, T>(
