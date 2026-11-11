@@ -133,8 +133,8 @@ where
 /// # Performance Notes
 ///
 /// - For single polynomials, this is equivalent to calling `CS::commit_lagrange` directly
-/// - For multiple polynomials, GPU pipelining provides 15-40% speedup
-/// - The GPU threshold (K≥15, 32768 points) is checked internally
+/// - For multiple polynomials, the GPU path pipelines the uploads and MSMs
+/// - The GPU/CPU size threshold (the calibrated MSM crossover) is checked internally
 #[cfg(feature = "gpu")]
 pub fn batch_commit<F, CS>(
     params: &CS::Parameters,
