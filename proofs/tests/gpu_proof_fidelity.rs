@@ -22,9 +22,12 @@
 //!
 //! Every run, on any device and with or without `gpu`, asserts that each proof's
 //! blake2b-128 fingerprint is `EXPECTED_FINGERPRINTS`: the bytes upstream's CPU prover
-//! (midnight-proofs 0.7.3) emits for this circuit and these seeds. If an upstream prover
-//! change legitimately changes them, regenerate the constants from a build without `gpu`
-//! (or a `MIDNIGHT_DEVICE=cpu` run), which prints them.
+//! (midnight-proofs 0.7.3) emits for this circuit and these seeds. The bytes also depend
+//! on the versions of the dependencies (this workspace does not pin them in git): after a
+//! dependency update, or if an upstream prover change legitimately changes them, check
+//! that pristine upstream 0.7.3 built with the same `Cargo.lock` prints the same values,
+//! then regenerate the constants from a build without `gpu` (or a `MIDNIGHT_DEVICE=cpu`
+//! run), which prints them.
 //!
 //! To locate a difference, compare two runs byte by byte (the device is fixed per
 //! process: `MIDNIGHT_DEVICE` is read once):
@@ -81,8 +84,8 @@ const PROVER_SEED: u64 = 0x5eed_0002;
 /// `truncated-challenges` changes every challenge, so these do not apply to it.
 #[cfg(not(feature = "truncated-challenges"))]
 const EXPECTED_FINGERPRINTS: [(&str, &str); 2] = [
-    ("single", "941b4ce58bcda2bfb60abaaa22b6aa86"),
-    ("multi", "e3921e7b567869421a9fa0e8baa9327e"),
+    ("single", "b2ba1194a0f0c76c53293b715237e23d"),
+    ("multi", "004638a151665e60f2943ea1e6f11bcd"),
 ];
 
 #[derive(Clone, Debug)]
