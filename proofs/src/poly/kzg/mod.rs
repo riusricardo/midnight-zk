@@ -15,6 +15,8 @@ use midnight_curves::pairing::Engine;
 pub mod msm;
 /// KZG commitment scheme
 pub mod params;
+#[cfg(feature = "gpu")]
+mod split;
 mod utils;
 
 use std::{fmt::Debug, hash::Hash};
