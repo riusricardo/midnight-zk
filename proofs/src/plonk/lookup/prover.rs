@@ -68,6 +68,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
     /// The `Permuted<C>` struct is used to update the Lookup, and is then
     /// returned.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(feature = "gpu", allow(dead_code))]
     pub(crate) fn commit_permuted<
         'a,
         'params: 'a,
@@ -89,6 +90,42 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
     where
         F: FromUniformBytes<64>,
         CS::Commitment: Hashable<T::Hash>,
+    {
+        let permuted = self.permute(
+            pk,
+            domain,
+            theta,
+            advice_values,
+            fixed_values,
+            instance_values,
+            challenges,
+            rng,
+        )?;
+        let [input, table] = permuted.permuted_values();
+        let permuted_input_commitment = CS::commit_lagrange(params, input);
+        let permuted_table_commitment = CS::commit_lagrange(params, table);
+        crate::plonk::phase_trace::mark("lookup_commit");
+        permuted.write_commitments(permuted_input_commitment, permuted_table_commitment, transcript)
+    }
+
+    /// [`Self::commit_permuted`] up to the commitments: the compressed and
+    /// permuted input and table columns (Lagrange and coefficient form), so
+    /// that several lookups' columns can be committed in one batch before
+    /// [`Permuted::write_commitments`] hashes them in order.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn permute<'a, CS: PolynomialCommitmentScheme<F>>(
+        &self,
+        pk: &ProvingKey<F, CS>,
+        domain: &EvaluationDomain<F>,
+        theta: F,
+        advice_values: &'a [Polynomial<F, LagrangeCoeff>],
+        fixed_values: &'a [Polynomial<F, LagrangeCoeff>],
+        instance_values: &'a [Polynomial<F, LagrangeCoeff>],
+        challenges: &'a [F],
+        rng: &mut impl RngCore,
+    ) -> Result<Permuted<F>, Error>
+    where
+        F: FromUniformBytes<64>,
     {
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<F>]| {
@@ -128,27 +165,9 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
         )?;
         crate::plonk::phase_trace::mark("lookup_sort");
 
-        // Closure to construct commitment to vector of values
-        let commit_values = |values: &Polynomial<F, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
-            let commitment = CS::commit_lagrange(params, values);
-            (poly, commitment)
-        };
-
-        // Commit to permuted input expression
-        let (permuted_input_poly, permuted_input_commitment) =
-            commit_values(&permuted_input_expression);
-
-        // Commit to permuted table expression
-        let (permuted_table_poly, permuted_table_commitment) =
-            commit_values(&permuted_table_expression);
-        crate::plonk::phase_trace::mark("lookup_commit");
-
-        // Hash permuted input commitment
-        transcript.write(&permuted_input_commitment)?;
-
-        // Hash permuted table commitment
-        transcript.write(&permuted_table_commitment)?;
+        // The permuted columns in coefficient form.
+        let permuted_input_poly = pk.vk.domain.lagrange_to_coeff(permuted_input_expression.clone());
+        let permuted_table_poly = pk.vk.domain.lagrange_to_coeff(permuted_table_expression.clone());
 
         Ok(Permuted {
             compressed_input_expression,
@@ -158,6 +177,31 @@ impl<F: WithSmallOrderMulGroup<3> + Ord + Hash> Argument<F> {
             permuted_table_expression,
             permuted_table_poly,
         })
+    }
+}
+
+impl<F: PrimeField> Permuted<F> {
+    /// The permuted input and table columns in Lagrange form: what
+    /// [`Argument::commit_permuted`] commits to.
+    pub(crate) fn permuted_values(&self) -> [&Polynomial<F, LagrangeCoeff>; 2] {
+        [&self.permuted_input_expression, &self.permuted_table_expression]
+    }
+
+    /// Hashes the commitments to the permuted input and table columns, in
+    /// that order, as [`Argument::commit_permuted`] does.
+    pub(crate) fn write_commitments<C: Hashable<T::Hash>, T: Transcript>(
+        self,
+        permuted_input_commitment: C,
+        permuted_table_commitment: C,
+        transcript: &mut T,
+    ) -> Result<Self, Error> {
+        // Hash permuted input commitment
+        transcript.write(&permuted_input_commitment)?;
+
+        // Hash permuted table commitment
+        transcript.write(&permuted_table_commitment)?;
+
+        Ok(self)
     }
 }
 

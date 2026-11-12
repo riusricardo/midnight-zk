@@ -152,8 +152,45 @@ where
         .iter()
         .zip(advice.iter())
         .map(|(instance, advice)| -> Result<Vec<_>, Error> {
+            // GPU builds permute every lookup first (drawing from the rng in the
+            // same order), commit all permuted columns in one batch (which the
+            // CPU and the GPU share) and hash the commitments in the order
+            // `commit_permuted` would, lookup by lookup.
+            #[cfg(feature = "gpu")]
+            let permuted = {
+                let permuted = pk
+                    .vk
+                    .cs
+                    .lookups
+                    .iter()
+                    .map(|lookup| {
+                        lookup.permute(
+                            pk,
+                            domain,
+                            theta,
+                            &advice.advice_polys,
+                            &pk.fixed_values,
+                            &instance.instance_values,
+                            &challenges,
+                            rng,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let values: Vec<&Polynomial<F, LagrangeCoeff>> =
+                    permuted.iter().flat_map(|p| p.permuted_values()).collect();
+                let commitments = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &values)
+                    .unwrap_or_else(|| values.iter().map(|v| CS::commit_lagrange(params, v)).collect());
+                super::phase_trace::mark("lookup_commit");
+                permuted
+                    .into_iter()
+                    .zip(commitments.chunks_exact(2))
+                    .map(|(p, c)| p.write_commitments(c[0].clone(), c[1].clone(), transcript))
+                    .collect()
+            };
             // Construct and commit to permuted values for each lookup
-            pk.vk
+            #[cfg(not(feature = "gpu"))]
+            let permuted = pk
+                .vk
                 .cs
                 .lookups
                 .iter()
@@ -171,7 +208,8 @@ where
                         transcript,
                     )
                 })
-                .collect()
+                .collect();
+            permuted
         })
         .collect::<Result<Vec<_>, _>>()?;
     super::phase_trace::mark("lookup_permute");
