@@ -26,8 +26,12 @@
 //! (see `row_values`), so a proof is a deterministic function of the code path. Every
 //! run, whatever the device, asserts that the proof's blake2b-128 is `EXPECTED_DIGEST`:
 //! the bytes upstream's CPU prover (midnight-proofs 0.8.2) emits for this circuit and
-//! these seeds. If an upstream prover change legitimately changes them, regenerate the
-//! constant from a `MIDNIGHT_DEVICE=cpu` run, which prints it.
+//! these seeds. The bytes also depend on the versions of the dependencies (this workspace
+//! does not pin them in git): after a dependency update, or if an upstream prover change
+//! legitimately changes them, check that pristine upstream 0.8.2 built with the same
+//! `Cargo.lock` prints the same value (this file runs there once its `gpu` gate is
+//! dropped), then regenerate the constant from a `MIDNIGHT_DEVICE=cpu` run, which prints
+//! it.
 //!
 //! To locate a difference, compare CPU and GPU byte by byte across two processes (the
 //! device is fixed per process: `MIDNIGHT_DEVICE` is read once):
@@ -79,7 +83,7 @@ const TABLE_SIZE: u64 = 256;
 /// blake2b-128 of the proof as upstream's CPU prover emits it (see the module docs).
 /// `truncated-challenges` changes every challenge, so it does not apply to it.
 #[cfg(not(feature = "truncated-challenges"))]
-const EXPECTED_DIGEST: &str = "52c7d4f224322dd8b31f9c49c301524f";
+const EXPECTED_DIGEST: &str = "36bb0fcf18a23ef26c73e47141635f2d";
 
 #[derive(Clone, Debug)]
 struct FidelityConfig {
