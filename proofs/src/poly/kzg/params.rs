@@ -312,14 +312,15 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     {
         use midnight_bls12_381_cuda::config::note_gpu_fallback;
 
-        use crate::poly::kzg::msm::{
-            msm_specific, msm_with_cached_bases_async, try_msm_with_cached_bases,
+        use crate::poly::kzg::{
+            msm::{msm_cpu, msm_with_cached_bases_async, try_msm_with_cached_bases},
+            split,
         };
 
-        // The CPU MSM of `commit_lagrange` (its sub-threshold path and its
-        // GPU-failure fallback).
+        // The CPU MSM of `commit_lagrange` (its sub-threshold path, its
+        // GPU-failure fallback and the CPU's share of a split batch).
         let cpu_commit = |scalars: &[E::Fr]| -> E::G1 {
-            msm_specific::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
+            msm_cpu::<E::G1Affine>(scalars, &self.g_lagrange[0..scalars.len()])
         };
         // The GPU result is a midnight `G1Projective`; E is Bls12 on every GPU
         // path below, so E::G1 is that same type and the backend line's
@@ -376,28 +377,82 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                 }
             };
 
-            // Launch all MSMs asynchronously, then wait for them in order. A
-            // polynomial whose launch or wait fails is committed on CPU; the
-            // others keep their GPU result.
-            let launches: Vec<_> = scalars.iter()
-                .map(|s| msm_with_cached_bases_async::<E::G1Affine>(s, device_bases))
+            // In Auto mode the CPU takes the share of the batch the split plans
+            // for it (see `split`), in a thread of its own; forced GPU mode
+            // keeps every MSM on the GPU. The commitments do not depend on
+            // which device computes them.
+            let classes: Vec<split::MsmClass> = scalars
+                .iter()
+                .map(|s| split::MsmClass::of(crate::gpu_accel::try_as_fq_slice(s).expect("E is Bls12")))
                 .collect();
-            return launches.into_iter()
-                .zip(&scalars)
-                .map(|(launch, s)| {
+            let on_cpu = if midnight_bls12_381_cuda::config::device_type()
+                == midnight_bls12_381_cuda::config::DeviceType::Auto
+            {
+                split::plan(&classes)
+            } else {
+                vec![false; scalars.len()]
+            };
+            #[cfg(feature = "trace-kzg")]
+            eprintln!(
+                "[KZG::batch] split: {} of {} MSMs on the CPU",
+                on_cpu.iter().filter(|c| **c).count(),
+                scalars.len()
+            );
+            let (results, cpu_times, gpu_time) = std::thread::scope(|scope| {
+                let cpu_share = on_cpu.contains(&true).then(|| {
+                    scope.spawn(|| {
+                        on_cpu
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, c)| **c)
+                            .map(|(i, _)| {
+                                let start = std::time::Instant::now();
+                                let r = cpu_commit(&scalars[i]);
+                                (i, r, start.elapsed())
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                });
+                // Launch the GPU's MSMs asynchronously, then wait for them in
+                // order. A polynomial whose launch or wait fails is committed
+                // on CPU; the others keep their GPU result.
+                let start = std::time::Instant::now();
+                let launches: Vec<_> = (0..scalars.len())
+                    .filter(|&i| !on_cpu[i])
+                    .map(|i| (i, msm_with_cached_bases_async::<E::G1Affine>(&scalars[i], device_bases)))
+                    .collect();
+                let mut results: Vec<Option<E::G1>> = vec![None; scalars.len()];
+                let mut gpu_failed = false;
+                for (i, launch) in launches {
                     let result = match launch {
                         Ok(handle) => handle.wait().map_err(|e| format!("async wait: {:?}", e)),
                         Err(e) => Err(format!("async launch: {:?}", e)),
                     };
-                    match result {
+                    results[i] = Some(match result {
                         Ok(r) => to_e_g1(r),
                         Err(detail) => {
                             note_gpu_fallback("MSM (commit_lagrange_batch)", &detail);
-                            cpu_commit(s)
+                            gpu_failed = true;
+                            cpu_commit(&scalars[i])
                         }
-                    }
-                })
-                .collect();
+                    });
+                }
+                let gpu_time = (!gpu_failed).then(|| start.elapsed());
+                let cpu_done = match cpu_share {
+                    Some(worker) => worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                    None => Vec::new(),
+                };
+                let mut cpu_times = Vec::with_capacity(cpu_done.len());
+                for (i, r, t) in cpu_done {
+                    results[i] = Some(r);
+                    cpu_times.push((classes[i], t));
+                }
+                (results, cpu_times, gpu_time)
+            });
+            let gpu_classes: Vec<split::MsmClass> =
+                (0..scalars.len()).filter(|&i| !on_cpu[i]).map(|i| classes[i]).collect();
+            split::record(&cpu_times, gpu_time.map(|t| (gpu_classes.as_slice(), t)));
+            return results.into_iter().map(|r| r.expect("every MSM of the batch was computed")).collect();
         }
         
         // Sync path (not beneficial): per polynomial, exactly `commit_lagrange`.

@@ -369,11 +369,21 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         }
     }
 
+    let result = msm_cpu::<C>(coeffs, bases);
+
+    #[cfg(feature = "trace-msm")]
+    eprintln!("✓  [MSM] Completed in {:?}", start.elapsed());
+
+    result
+}
+
+/// The CPU multi-scalar multiplication of [`msm_specific`], which never uses
+/// the GPU: BLST's multi-exponentiation for midnight's G1, `msm_best`
+/// otherwise and above 2^19 points.
+pub(crate) fn msm_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     // We empirically checked that for MSMs larger than 2**18, the blstrs
     // implementation regresses.
-    let result = if coeffs.len() <= (2 << 18)
-        && TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
-    {
+    if coeffs.len() <= (2 << 18) && TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>() {
         #[cfg(feature = "trace-msm")]
         eprintln!("   [MSM] Using BLST multi_exp (size: {} points)", coeffs.len());
 
@@ -386,12 +396,7 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         let mut affine_bases = vec![C::identity(); coeffs.len()];
         C::Curve::batch_normalize(bases, &mut affine_bases);
         msm_best(coeffs, &affine_bases)
-    };
-
-    #[cfg(feature = "trace-msm")]
-    eprintln!("✓  [MSM] Completed in {:?}", start.elapsed());
-
-    result
+    }
 }
 
 /// Two channel MSM accumulator
