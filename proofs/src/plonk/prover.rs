@@ -252,6 +252,7 @@ where
         })
         .collect::<Vec<_>>();
 
+    super::phase_trace::mark("product_compute");
     // Batch commit all lookup product polynomials
     #[cfg(feature = "gpu")]
     let lookups: Vec<Vec<lookup::prover::Committed<F>>> = {
@@ -329,6 +330,7 @@ where
         })
         .collect::<Vec<_>>();
 
+    super::phase_trace::mark("trash_compute");
     // Batch commit all trash polynomials
     #[cfg(feature = "gpu")]
     let trashcans: Vec<Vec<trash::prover::Committed<F>>> = {
