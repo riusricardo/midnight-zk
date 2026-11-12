@@ -97,9 +97,11 @@ impl<F: WithSmallOrderMulGroup<3>> Committed<F> {
     {
         // Divide by t(X) = X^{params.n} - 1.
         let h_poly = domain.divide_by_vanishing_poly(h_poly);
+        crate::plonk::phase_trace::mark("h_divide");
 
         // Obtain final h(X) polynomial
         let mut h_poly = domain.extended_to_coeff(h_poly);
+        crate::plonk::phase_trace::mark("h_to_coeff");
 
         // Let n := size of evaluation domain
         // Let d := degree of constraint system
@@ -119,6 +121,7 @@ impl<F: WithSmallOrderMulGroup<3>> Committed<F> {
         let h_pieces: Vec<_> =
             h_pieces.into_iter().map(|h_piece| domain.coeff_from_vec(h_piece)).collect();
 
+        crate::plonk::phase_trace::mark("h_pieces");
         // Compute commitments to each h(X) piece
         let h_commitments: Vec<_> =
             h_pieces.iter().map(|h_piece| CS::commit(params, h_piece)).collect();

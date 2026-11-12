@@ -232,6 +232,8 @@ where
             (q_polys, point_sets)
         };
 
+        crate::plonk::phase_trace::mark("open_q");
+
         let f_poly = {
             let f_polys = point_sets
                 .iter()
@@ -250,7 +252,9 @@ where
             inner_product(&f_polys, powers(x2))
         };
 
+        crate::plonk::phase_trace::mark("open_f");
         let f_com = Self::commit(params, &f_poly);
+        crate::plonk::phase_trace::mark("open_f_commit");
         transcript.write(&f_com).map_err(|_| Error::OpeningError)?;
 
         let x3: E::Fr = transcript.squeeze_challenge();
@@ -263,6 +267,7 @@ where
                 .map_err(|_| Error::OpeningError)?;
         }
 
+        crate::plonk::phase_trace::mark("open_evals");
         let x4: E::Fr = transcript.squeeze_challenge();
 
         let final_poly = {
@@ -277,12 +282,14 @@ where
             inner_product(&polys, powers)
         };
         let v = eval_polynomial(&final_poly, x3);
+        crate::plonk::phase_trace::mark("open_final");
 
         let pi = {
             let pi_poly = Polynomial {
                 values: kate_division(&(&final_poly - v).values, x3),
                 _marker: PhantomData,
             };
+            crate::plonk::phase_trace::mark("open_pi_div");
             Self::commit(params, &pi_poly)
         };
 
