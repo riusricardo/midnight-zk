@@ -272,6 +272,30 @@ pub(crate) fn inner_product<F: PrimeField, T: Mul<F, Output = T> + Add<T, Output
         .unwrap()
 }
 
+/// [`inner_product`] of polynomials taken by reference: `sum_j s_j * p_j` in
+/// one parallel pass, without cloning a polynomial or allocating an
+/// intermediate one. Exactly the polynomial `inner_product` returns through
+/// `Polynomial`'s `*` and `+`: it has the first polynomial's length, and a later
+/// polynomial contributes where it has coefficients.
+pub(crate) fn inner_product_refs<F: ff::Field, B: Sync>(
+    polys: &[&crate::poly::Polynomial<F, B>],
+    scalars: impl Iterator<Item = F>,
+) -> crate::poly::Polynomial<F, B> {
+    let scalars: Vec<F> = scalars.take(polys.len()).collect();
+    let mut values = vec![F::ZERO; polys[0].values.len()];
+    parallelize(&mut values, |out, start| {
+        for (poly, scalar) in polys.iter().zip(&scalars) {
+            let end = (start + out.len()).min(poly.values.len());
+            if start < end {
+                for (o, c) in out.iter_mut().zip(&poly.values[start..end]) {
+                    *o += *c * scalar;
+                }
+            }
+        }
+    });
+    crate::poly::Polynomial { values, _marker: std::marker::PhantomData }
+}
+
 pub(crate) fn msm_inner_product<E>(mut msms: Vec<MSMKZG<E>>, scalars: &[E::Fr]) -> MSMKZG<E>
 where
     E: MultiMillerLoop + Debug,
