@@ -380,6 +380,7 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
 /// The CPU multi-scalar multiplication of [`msm_specific`], which never uses
 /// the GPU: BLST's multi-exponentiation for midnight's G1, `msm_best`
 /// otherwise and above 2^19 points.
+#[allow(unsafe_code)]
 pub(crate) fn msm_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     // We empirically checked that for MSMs larger than 2**18, the blstrs
     // implementation regresses.
