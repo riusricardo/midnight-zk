@@ -322,29 +322,6 @@ impl<F: WithSmallOrderMulGroup<3>> Evaluator<F> {
             .zip(trashcans.iter())
             .zip(permutations.iter())
         {
-            // The whole iteration (gates, permutation, lookups, trash) on the
-            // GPU when that applies: bit-identical rows. Otherwise the CPU loops.
-            #[cfg(feature = "gpu")]
-            if super::gpu_eval::try_quotient_iteration(
-                self,
-                domain,
-                cs,
-                advice,
-                instance,
-                fixed,
-                challenges,
-                [y, beta, gamma, theta, trash_challenge],
-                lookups,
-                trashcans,
-                permutation,
-                [l0, l_last, l_active_row],
-                permutation_pk_cosets,
-                &mut values[..],
-            ) {
-                crate::plonk::phase_trace::mark("h_eval_gpu");
-                continue;
-            }
-
             // Custom gates
             rayon::scope(|scope| {
                 let chunk_size = size.div_ceil(num_threads);

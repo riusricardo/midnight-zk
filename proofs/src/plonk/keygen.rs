@@ -353,6 +353,8 @@ where
         fixed_cosets,
         permutation: permutation_pk,
         ev,
+        #[cfg(feature = "gpu")]
+        gpu_columns: Default::default(),
     })
 }
 

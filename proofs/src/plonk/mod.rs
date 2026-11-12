@@ -348,6 +348,10 @@ pub struct ProvingKey<F: PrimeField, CS: PolynomialCommitmentScheme<F>> {
     pub(crate) fixed_cosets: Vec<Polynomial<F, ExtendedLagrangeCoeff>>,
     pub(crate) permutation: permutation::ProvingKey<F>,
     pub(crate) ev: Evaluator<F>,
+    /// The extended-domain columns on the device, reused by every proof with
+    /// this key.
+    #[cfg(feature = "gpu")]
+    pub(crate) gpu_columns: gpu_eval::KeyColumns,
 }
 
 impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> ProvingKey<F, CS>
@@ -439,6 +443,8 @@ where
             fixed_cosets,
             permutation,
             ev,
+            #[cfg(feature = "gpu")]
+            gpu_columns: Default::default(),
         })
     }
 

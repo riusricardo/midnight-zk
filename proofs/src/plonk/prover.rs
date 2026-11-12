@@ -784,6 +784,22 @@ pub(super) fn compute_nu_poly<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommit
         y,
         ..
     } = &trace;
+    // The whole numerator on the GPU when that applies (bit-identical values,
+    // the cosets built on the device); otherwise the CPU path below.
+    #[cfg(feature = "gpu")]
+    if let Some(nu) = super::gpu_eval::try_compute_h_poly(
+        pk,
+        advice_polys,
+        instance_polys,
+        lookups,
+        trashcans,
+        permutations,
+        challenges,
+        [*y, *beta, *gamma, *theta, *trash_challenge],
+    ) {
+        super::phase_trace::mark("h_eval_gpu");
+        return nu;
+    }
     // Calculate the advice and instance cosets
     let advice_cosets: Vec<Vec<Polynomial<F, ExtendedLagrangeCoeff>>> = advice_polys
         .iter()
