@@ -445,6 +445,7 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
 /// The CPU multi-scalar multiplication of [`msm_specific`], which never uses
 /// the GPU: zero scalars dropped, then BLST's multi-exponentiation for
 /// midnight's G1, `msm_best` otherwise and above 2^19 points.
+#[cfg(feature = "gpu")]
 pub(crate) fn msm_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     let (coeffs, bases): (Vec<C::Scalar>, Vec<C::Curve>) = coeffs
         .iter()
@@ -458,7 +459,8 @@ pub(crate) fn msm_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) 
     msm_cpu_nonzero::<C>(&coeffs, &bases)
 }
 
-/// [`msm_cpu`] on scalars that are all non-zero.
+/// The CPU tail of [`msm_specific`], on scalars that are all non-zero.
+#[allow(unsafe_code)]
 fn msm_cpu_nonzero<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) -> C::Curve {
     // We empirically checked that for MSMs larger than 2**18, the blstrs
     // implementation regresses.
