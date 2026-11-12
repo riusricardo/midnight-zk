@@ -290,8 +290,10 @@ where
                                 .cs
                                 .trashcans
                                 .iter()
-                                .map(|trash| {
+                                .zip(pk.ev.trashcans.iter())
+                                .map(|(trash, graph)| {
                                     trash.commit::<CS, _>(
+                                        graph,
                                         params,
                                         domain,
                                         trash_challenge,
@@ -317,8 +319,10 @@ where
                     .cs
                     .trashcans
                     .iter()
-                    .map(|trash| {
+                    .zip(pk.ev.trashcans.iter())
+                    .map(|(trash, graph)| {
                         trash.commit::<CS, _>(
+                            graph,
                             params,
                             domain,
                             trash_challenge,

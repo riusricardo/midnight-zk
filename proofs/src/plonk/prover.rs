@@ -316,8 +316,10 @@ where
                 .cs
                 .trashcans
                 .iter()
-                .map(|trash| {
+                .zip(pk.ev.trashcans.iter())
+                .map(|(trash, graph)| {
                     trash.compute(
+                        graph,
                         domain,
                         trash_challenge,
                         &advice.advice_polys,

@@ -2,13 +2,13 @@ use ff::{FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
 
 use super::{super::Error, Argument};
 use crate::{
-    plonk::evaluation::evaluate,
+    plonk::evaluation::GraphEvaluator,
     poly::{
         commitment::PolynomialCommitmentScheme, Coeff, EvaluationDomain, LagrangeCoeff, Polynomial,
         ProverQuery,
     },
     transcript::{Hashable, Transcript},
-    utils::arithmetic::eval_polynomial,
+    utils::arithmetic::{eval_polynomial, parallelize},
 };
 
 #[cfg_attr(feature = "bench-internal", derive(Clone))]
@@ -31,12 +31,21 @@ pub(crate) struct Evaluated<F: PrimeField>(Committed<F>);
 impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     /// Compute the trash polynomial without committing.
     /// This enables batch committing multiple trash arguments together.
-    /// 
+    ///
+    /// At every row the constraint expressions are folded with the trash
+    /// challenge in Horner form, `((e_0 * c + e_1) * c + ...)`, which is what
+    /// `graph` computes: this argument's graph in the proving key's
+    /// `Evaluator` (the quotient evaluates the same graph on the extended
+    /// domain). One pass over the rows evaluates every expression, with the
+    /// graph's shared subexpressions, instead of one pass and one polynomial
+    /// per expression; field arithmetic is exact, so the values are the same.
+    ///
     /// Returns `TrashComputed` which contains the trash polynomial in Lagrange form.
     /// Call `TrashComputed::finalize` with a commitment to complete the process.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn compute<'a>(
         &self,
+        graph: &GraphEvaluator<F>,
         domain: &EvaluationDomain<F>,
         trash_challenge: F,
         advice_values: &'a [Polynomial<F, LagrangeCoeff>],
@@ -47,26 +56,32 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     where
         F: FromUniformBytes<64>,
     {
-        let compressed_expression = self
-            .constraint_expressions
-            .iter()
-            .map(|expression| {
-                domain.lagrange_from_vec(evaluate(
-                    expression,
-                    domain.n as usize,
-                    1,
+        let isize = domain.n as i32;
+        let mut values = domain.empty_lagrange();
+        parallelize(&mut values, |values, start| {
+            let mut data = graph.instance();
+            for (i, value) in values.iter_mut().enumerate() {
+                *value = graph.evaluate(
+                    &mut data,
                     fixed_values,
                     advice_values,
                     instance_values,
                     challenges,
-                ))
-            })
-            .fold(domain.empty_lagrange(), |acc, expression| {
-                acc * trash_challenge + &expression
-            });
+                    &F::ZERO,
+                    &F::ZERO,
+                    &F::ZERO,
+                    &trash_challenge,
+                    &F::ZERO,
+                    &F::ZERO,
+                    start + i,
+                    1,
+                    isize,
+                );
+            }
+        });
 
         TrashComputed {
-            trash_poly_lagrange: compressed_expression,
+            trash_poly_lagrange: values,
         }
     }
 
@@ -78,6 +93,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit<'a, 'params: 'a, CS, T>(
         &self,
+        graph: &GraphEvaluator<F>,
         params: &'params CS::Parameters,
         domain: &EvaluationDomain<F>,
         trash_challenge: F,
@@ -94,6 +110,7 @@ impl<F: WithSmallOrderMulGroup<3> + Ord> Argument<F> {
         T: Transcript,
     {
         let trash = self.compute(
+            graph,
             domain,
             trash_challenge,
             advice_values,
