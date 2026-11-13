@@ -24,13 +24,14 @@
 //!
 //! The prover rng is a seeded ChaCha and the lookups leave a single leftover table value
 //! (see `row_values`), so a proof is a deterministic function of the code path. Every
-//! run, whatever the device, asserts that the proof's blake2b-128 is `EXPECTED_DIGEST`:
+//! run, on any device and with or without `gpu`, asserts that the proof's blake2b-128 is
+//! `EXPECTED_DIGEST`:
 //! the bytes upstream's CPU prover (midnight-proofs 0.8.2) emits for this circuit and
 //! these seeds. The bytes also depend on the versions of the dependencies (this workspace
 //! does not pin them in git): after a dependency update, or if an upstream prover change
 //! legitimately changes them, check that pristine upstream 0.8.2 built with the same
-//! `Cargo.lock` prints the same value (this file runs there once its `gpu` gate is
-//! dropped), then regenerate the constant from a `MIDNIGHT_DEVICE=cpu` run, which prints
+//! `Cargo.lock` prints the same value (this file runs there as it is), then regenerate
+//! the constant from a build without `gpu` (or a `MIDNIGHT_DEVICE=cpu` run), which prints
 //! it.
 //!
 //! To locate a difference, compare CPU and GPU byte by byte across two processes (the
@@ -46,7 +47,7 @@
 //! Byte equality also covers the verifying key: the transcript starts with the vk hash,
 //! so different fixed commitments would change every challenge.
 
-#![cfg(all(feature = "gpu", feature = "committed-instances"))]
+#![cfg(feature = "committed-instances")]
 
 use blake2b_simd::State as Blake2bState;
 use ff::Field;
