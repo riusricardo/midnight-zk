@@ -152,9 +152,6 @@ pub use icicle_runtime::{
 #[cfg(feature = "gpu")]
 use midnight_curves::{Fq, G1Affine, G1Projective};
 
-#[cfg(feature = "gpu")]
-use ff::Field;
-
 // =============================================================================
 // Public API (thin wrappers with alternate names to avoid collision)
 // =============================================================================
@@ -323,91 +320,6 @@ pub fn upload_bases(bases: &[G1Affine]) -> Result<GpuBasesHandle, String> {
         .upload_bases(bases)
         .map(|cached| GpuBasesHandle::new(cached))
         .map_err(|e| e.to_string())
-}
-
-// =============================================================================
-// NTT Operations
-// =============================================================================
-
-/// Perform forward NTT with GPU acceleration (if available and beneficial).
-#[cfg(feature = "gpu")]
-pub fn forward_ntt_auto(data: &mut [Fq]) -> Result<(), String> {
-    let accel = global_accelerator();
-    
-    if NttBackend::should_use_gpu(accel, data.len()) {
-        match accel.forward_ntt_inplace(data) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                midnight_bls12_381_cuda::config::note_gpu_fallback("NTT (forward_ntt_auto)", &e.to_string());
-            }
-        }
-    }
-
-    // CPU fallback
-    forward_ntt_cpu(data)
-}
-
-/// Perform inverse NTT with GPU acceleration (if available and beneficial).
-#[cfg(feature = "gpu")]
-pub fn inverse_ntt_auto(data: &mut [Fq]) -> Result<(), String> {
-    let accel = global_accelerator();
-    
-    if NttBackend::should_use_gpu(accel, data.len()) {
-        match accel.inverse_ntt_inplace(data) {
-            Ok(()) => return Ok(()),
-            Err(e) => {
-                midnight_bls12_381_cuda::config::note_gpu_fallback("INTT (inverse_ntt_auto)", &e.to_string());
-            }
-        }
-    }
-
-    // CPU fallback
-    inverse_ntt_cpu(data)
-}
-
-#[cfg(feature = "gpu")]
-fn forward_ntt_cpu(data: &mut [Fq]) -> Result<(), String> {
-    use ff::PrimeField;
-    
-    let n = data.len();
-    if !n.is_power_of_two() {
-        return Err("NTT size must be power of two".to_string());
-    }
-    
-    let k = n.ilog2();
-    let mut omega = Fq::ROOT_OF_UNITY;
-    for _ in k..Fq::S {
-        omega = omega.square();
-    }
-    
-    midnight_curves::fft::best_fft(data, omega, k);
-    Ok(())
-}
-
-#[cfg(feature = "gpu")]
-fn inverse_ntt_cpu(data: &mut [Fq]) -> Result<(), String> {
-    use ff::{Field, PrimeField};
-    
-    let n = data.len();
-    if !n.is_power_of_two() {
-        return Err("NTT size must be power of two".to_string());
-    }
-    
-    let k = n.ilog2();
-    let mut omega = Fq::ROOT_OF_UNITY;
-    for _ in k..Fq::S {
-        omega = omega.square();
-    }
-    let omega_inv = omega.invert().unwrap();
-    let n_inv = Fq::from(n as u64).invert().unwrap();
-    
-    midnight_curves::fft::best_fft(data, omega_inv, k);
-    
-    for val in data.iter_mut() {
-        *val *= n_inv;
-    }
-    
-    Ok(())
 }
 
 #[cfg(test)]
