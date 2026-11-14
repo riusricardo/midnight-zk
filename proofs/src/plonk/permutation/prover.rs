@@ -163,7 +163,7 @@ impl Argument {
         }
 
         crate::plonk::phase_trace::mark("perm_compute");
-        // Batch commit all permutation product polynomials with GPU pipelining
+        // Batch commit all permutation product polynomials (see poly::batch_commit)
         #[cfg(feature = "gpu")]
         let commitments = {
             let poly_refs: Vec<_> = z_polys_lagrange.iter().collect();
