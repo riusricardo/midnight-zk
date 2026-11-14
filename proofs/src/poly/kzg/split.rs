@@ -14,8 +14,20 @@
 //! MSMs it is relatively best at, as long as that shortens the batch. A class
 //! the CPU has not run yet is measured by giving the CPU one of its MSMs, in a
 //! batch of at least [`PROBE_MIN_BATCH`] where the CPU has nothing else to do.
+//!
+//! The CPU takes a share only while the process creates at most one proof
+//! (`create_proof` holds a [`proof_in_flight`] guard). Proofs created at once,
+//! as by a proof server's workers, keep the CPU busy with their own phases, so
+//! their batches stay on the GPU.
 
-use std::{collections::HashMap, sync::Mutex, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
+    time::Duration,
+};
 
 use ff::Field;
 use midnight_curves::Fq;
@@ -25,6 +37,41 @@ pub(crate) const PROBE_MIN_BATCH: usize = 4;
 
 /// Weight of a new measurement in the running estimates.
 const WEIGHT: f64 = 0.3;
+
+/// Proofs the process is creating (`create_proof`).
+static PROOFS_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts a proof as in flight until it is dropped, also when the proof fails
+/// or panics.
+#[must_use = "the proof counts as in flight only while this lives"]
+pub(crate) struct InFlight<'a>(&'a AtomicUsize);
+
+impl<'a> InFlight<'a> {
+    fn enter(count: &'a AtomicUsize) -> Self {
+        count.fetch_add(1, Ordering::Relaxed);
+        InFlight(count)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Counts the calling proof as in flight while the result lives.
+pub(crate) fn proof_in_flight() -> InFlight<'static> {
+    InFlight::enter(&PROOFS_IN_FLIGHT)
+}
+
+/// Whether the CPU may take a share of a batch now (see the module doc).
+pub(crate) fn cpu_share_allowed() -> bool {
+    share_allowed(PROOFS_IN_FLIGHT.load(Ordering::Relaxed))
+}
+
+fn share_allowed(proofs_in_flight: usize) -> bool {
+    proofs_in_flight <= 1
+}
 
 /// What an MSM's relative CPU cost depends on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -199,6 +246,32 @@ mod tests {
         mixed[7] = est(None, Some(1.0));
         let plan = plan_with(&mixed);
         assert!(!plan[7]);
+    }
+
+    #[test]
+    fn proofs_count_while_in_flight() {
+        let count = AtomicUsize::new(0);
+        let first = InFlight::enter(&count);
+        {
+            let _second = InFlight::enter(&count);
+            assert_eq!(count.load(Ordering::Relaxed), 2);
+        }
+        assert_eq!(count.load(Ordering::Relaxed), 1);
+        let failed = std::panic::catch_unwind(|| {
+            let _third = InFlight::enter(&count);
+            panic!("a proof that panics");
+        });
+        assert!(failed.is_err());
+        assert_eq!(count.load(Ordering::Relaxed), 1, "a panicked proof is no longer counted");
+        drop(first);
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn only_a_lone_proof_shares_with_the_cpu() {
+        assert!(share_allowed(0), "commitments outside a proof, e.g. keygen");
+        assert!(share_allowed(1));
+        assert!(!share_allowed(2));
     }
 
     #[test]

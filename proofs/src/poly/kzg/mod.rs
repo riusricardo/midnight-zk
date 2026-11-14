@@ -16,7 +16,7 @@ pub mod msm;
 /// KZG commitment scheme
 pub mod params;
 #[cfg(feature = "gpu")]
-mod split;
+pub(crate) mod split;
 mod utils;
 
 use std::{fmt::Debug, hash::Hash};
