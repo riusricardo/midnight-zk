@@ -560,6 +560,10 @@ where
         + FromUniformBytes<64>,
 {
     let mut rng = rng;
+    // Batch commitments give the CPU a share of their MSMs only while this is
+    // the process's one proof in flight (`poly::kzg::split`).
+    #[cfg(feature = "gpu")]
+    let _in_flight = crate::poly::kzg::split::proof_in_flight();
     super::phase_trace::begin();
     let trace = compute_trace(
         params,

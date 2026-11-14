@@ -3,9 +3,9 @@
 //! Commits several Lagrange polynomials in one call. With the `gpu` feature and
 //! KZG over midnight BLS12-381, a batch large enough for the GPU goes to
 //! `ParamsKZG::commit_lagrange_batch`: the GPU computes its MSMs one after
-//! another, and in Auto mode the CPU computes, at the same time, the share of
-//! the batch planned for it (`poly::kzg::split`). Otherwise the polynomials
-//! are committed one by one.
+//! another, and in Auto mode, while the process creates at most one proof, the
+//! CPU computes at the same time the share of the batch planned for it
+//! (`poly::kzg::split`). Otherwise the polynomials are committed one by one.
 //!
 //! # Usage
 //!

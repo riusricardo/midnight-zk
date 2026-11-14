@@ -293,9 +293,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Commits several Lagrange polynomials as one batch.
     ///
     /// The GPU computes its MSMs one after another (each launch completes its
-    /// MSM); in Auto mode the CPU computes, at the same time, the share of the
-    /// batch `split` plans for it. A batch too small for the GPU is committed
-    /// one polynomial at a time, as `commit_lagrange` commits it.
+    /// MSM); in Auto mode, while the process creates at most one proof, the CPU
+    /// computes at the same time the share of the batch `split` plans for it. A
+    /// batch too small for the GPU is committed one polynomial at a time, as
+    /// `commit_lagrange` commits it.
     ///
     /// GPU failures are handled like in `commit_lagrange` (fix C5): any error
     /// (base upload, async launch or wait) is reported through
@@ -377,16 +378,18 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                 }
             };
 
-            // In Auto mode the CPU takes the share of the batch the split plans
-            // for it (see `split`), in a thread of its own; forced GPU mode
-            // keeps every MSM on the GPU. The commitments do not depend on
-            // which device computes them.
+            // In Auto mode, while the process creates at most one proof, the
+            // CPU takes the share of the batch the split plans for it (see
+            // `split`), in a thread of its own; otherwise, and in forced GPU
+            // mode, every MSM stays on the GPU. The commitments do not depend
+            // on which device computes them.
             let classes: Vec<split::MsmClass> = scalars
                 .iter()
                 .map(|s| split::MsmClass::of(crate::gpu_accel::try_as_fq_slice(s).expect("E is Bls12")))
                 .collect();
             let on_cpu = if midnight_bls12_381_cuda::config::device_type()
                 == midnight_bls12_381_cuda::config::DeviceType::Auto
+                && split::cpu_share_allowed()
             {
                 split::plan(&classes)
             } else {
