@@ -290,12 +290,12 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         })
     }
 
-    /// Commit to multiple Lagrange polynomials with GPU pipelining
-    /// 
-    /// This is the production-ready batch commit that provides optimal performance
-    /// for multiple commitments by enabling GPU kernel pipelining.
-    /// 
-    /// Falls back to sequential sync commits if async is not beneficial.
+    /// Commits several Lagrange polynomials as one batch.
+    ///
+    /// The GPU computes its MSMs one after another (each launch completes its
+    /// MSM); in Auto mode the CPU computes, at the same time, the share of the
+    /// batch `split` plans for it. A batch too small for the GPU is committed
+    /// one polynomial at a time, as `commit_lagrange` commits it.
     ///
     /// GPU failures are handled like in `commit_lagrange` (fix C5): any error
     /// (base upload, async launch or wait) is reported through
@@ -355,7 +355,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         
         if use_async {
             #[cfg(feature = "trace-kzg")]
-            eprintln!("[KZG::batch] Using async pipeline for {} Lagrange commits", polys.len());
+            eprintln!("[KZG::batch] Using the batch path for {} Lagrange commits", polys.len());
             
             // Convert all polynomials to scalar vectors
             let scalars: Vec<Vec<E::Fr>> = polys.iter()
@@ -413,9 +413,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                             .collect::<Vec<_>>()
                     })
                 });
-                // Launch the GPU's MSMs asynchronously, then wait for them in
-                // order. A polynomial whose launch or wait fails is committed
-                // on CPU; the others keep their GPU result.
+                // The GPU's MSMs, one after another: each launch completes its
+                // MSM, and its handle only defers the copy of the result. A
+                // polynomial whose launch or wait fails is committed on CPU;
+                // the others keep their GPU result.
                 let start = std::time::Instant::now();
                 let launches: Vec<_> = (0..scalars.len())
                     .filter(|&i| !on_cpu[i])

@@ -1,9 +1,11 @@
-//! GPU-accelerated batch polynomial commitment
+//! Batch polynomial commitment
 //!
-//! This module provides batch commitment functionality that enables GPU pipelining
-//! for multiple polynomial commitments. When using KZG with BLS12-381 curves and
-//! the GPU feature is enabled, multiple commits are launched asynchronously to
-//! overlap GPU computation with memory transfers.
+//! Commits several Lagrange polynomials in one call. With the `gpu` feature and
+//! KZG over midnight BLS12-381, a batch large enough for the GPU goes to
+//! `ParamsKZG::commit_lagrange_batch`: the GPU computes its MSMs one after
+//! another, and in Auto mode the CPU computes, at the same time, the share of
+//! the batch planned for it (`poly::kzg::split`). Otherwise the polynomials
+//! are committed one by one.
 //!
 //! # Usage
 //!
@@ -18,7 +20,7 @@
 //! // Collect polynomials to commit
 //! let polys = vec![poly1, poly2, poly3, poly4];
 //!
-//! // Batch commit (GPU pipelining if available, else sequential)
+//! // Batch commit (as a GPU batch if available, else one by one)
 //! let commitments = batch_commit::<F, CS>(params, &polys);
 //! ```
 
@@ -35,7 +37,7 @@ use crate::poly::kzg::params::ParamsKZG;
 #[cfg(feature = "gpu")]
 use midnight_curves::{Bls12, Fq, G1Projective};
 
-/// Commits `polys` with [`ParamsKZG::commit_lagrange_batch`] (GPU pipelining)
+/// Commits `polys` with [`ParamsKZG::commit_lagrange_batch`]
 /// when `CS` is KZG over midnight BLS12-381, the GPU-supported configuration.
 /// Returns `None` for any other configuration; the caller then commits the
 /// polynomials one by one with `CS::commit_lagrange`.
@@ -112,7 +114,7 @@ where
     }
 }
 
-/// Batch commit multiple Lagrange polynomials with GPU pipelining when available.
+/// Commits several Lagrange polynomials, as a GPU batch when available.
 ///
 /// This function automatically uses GPU batch commits when:
 /// 1. The `gpu` feature is enabled
@@ -133,7 +135,7 @@ where
 /// # Performance Notes
 ///
 /// - For single polynomials, this is equivalent to calling `CS::commit_lagrange` directly
-/// - For multiple polynomials, the GPU path pipelines the uploads and MSMs
+/// - For multiple polynomials, the GPU path is `ParamsKZG::commit_lagrange_batch` (see the module doc)
 /// - The GPU/CPU size threshold (the calibrated MSM crossover) is checked internally
 #[cfg(feature = "gpu")]
 pub fn batch_commit<F, CS>(
@@ -153,7 +155,7 @@ where
         return vec![CS::commit_lagrange(params, &polys[0])];
     }
     
-    // Use the KZG/BLS12-381 batch (GPU pipelining) only if GPU batching
+    // Use the KZG/BLS12-381 batch only if GPU batching
     // would be beneficial for this size
     let individual_size = polys[0].len();
     let batch_count = polys.len();
@@ -187,7 +189,7 @@ where
         .collect()
 }
 
-/// Batch commit polynomial references with GPU pipelining when available.
+/// [`batch_commit`] over polynomial references.
 ///
 /// Same as [`batch_commit`] but accepts references instead of owned polynomials.
 /// More efficient when polynomials are already stored elsewhere.
@@ -209,7 +211,7 @@ where
         return vec![CS::commit_lagrange(params, polys[0])];
     }
     
-    // Use the KZG/BLS12-381 batch (GPU pipelining) only if GPU batching
+    // Use the KZG/BLS12-381 batch only if GPU batching
     // would be beneficial
     let individual_size = polys[0].len();
     let batch_count = polys.len();

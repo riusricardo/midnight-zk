@@ -25,7 +25,7 @@ pub mod kzg;
 
 pub mod commitment;
 
-/// Batch commitment operations with GPU pipelining support
+/// Batch commitment (a GPU batch when available)
 pub mod batch_commit;
 
 pub use domain::*;

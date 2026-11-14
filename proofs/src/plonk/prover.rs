@@ -33,10 +33,7 @@ use crate::{
 
 /// Batch commits polynomial references when using KZG with BLS12-381 (midnight_curves),
 /// via [`commit_lagrange_batch_if_kzg_bls12`] (see there for how `CS` is identified).
-/// Returns Some(commits) if batch optimization was used, None to fall back to sequential.
-/// 
-/// This enables GPU pipelining for multiple MSM operations
-/// when committing multiple polynomials by overlapping GPU computation with memory transfers.
+/// Returns Some(commits) if the batch path was used, None to fall back to sequential.
 #[cfg(feature = "gpu")]
 fn batch_commit_refs_if_kzg_bls12<F, CS>(
     params: &CS::Parameters,
@@ -46,7 +43,7 @@ where
     F: PrimeField + 'static,
     CS: PolynomialCommitmentScheme<F>,
 {
-    // Only batch if we have multiple polynomials (pipelining benefit requires >1)
+    // A single polynomial is committed on its own.
     if polys.len() <= 1 {
         return None;
     }
@@ -764,7 +761,7 @@ where
             }
             super::phase_trace::mark("advice_invert");
 
-            // Batch commit to advice columns with GPU pipelining when beneficial
+            // Batch commit to advice columns (see poly::batch_commit)
             let advice_commitments: Vec<_> = {
                 #[cfg(feature = "gpu")]
                 {
