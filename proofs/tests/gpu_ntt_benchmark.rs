@@ -11,7 +11,11 @@
 
 #![cfg(feature = "gpu")]
 
+mod common;
+
+use common::{expect_gpu_ops, gpu_ntt_k, gpu_test};
 use ff::{Field, PrimeField};
+use midnight_proofs::gpu_accel::backend::{diag::OpKind, GpuNttContext};
 use midnight_curves::Fq as Scalar;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -85,17 +89,20 @@ fn bench_size(k: u32, reps: usize) -> (f64, f64, f64) {
 /// This pins down ordering AND twiddle correctness exactly (a permuted output
 /// or wrong twiddle basis cannot pass for multiple j). K values chosen to
 /// exercise every tiled high-pass width: K=12 (r=2), 13 (r=3), 16 (r=5+1),
-/// 17 (r=5+2), plus the pure low-pass edge at K=12..13.
+/// 17 (r=5+2), plus the pure low-pass edge at K=12..13. The transforms go
+/// through the GPU context, not the routed entry points: these sizes must run
+/// on the GPU whatever the crossover.
 #[test]
 fn gpu_ntt_impulse_response() {
+    let Some(_gpu) = gpu_test() else { return };
     for k in [12u32, 13, 16, 17] {
         let n = 1usize << k;
         let omega = omega_for(k);
+        let ctx = GpuNttContext::new(k).expect("GPU NTT context");
         for j in [0usize, 1, 7, n - 1] {
             let mut data = vec![Scalar::ZERO; n];
             data[j] = Scalar::ONE;
-            midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut data)
-                .expect("GPU NTT failed");
+            expect_gpu_ops(&[OpKind::Ntt], || ctx.forward_ntt_inplace(&mut data)).expect("GPU NTT failed");
 
             let wj = omega.pow_vartime([j as u64]);
             let mut expect = Scalar::ONE;
@@ -105,8 +112,7 @@ fn gpu_ntt_impulse_response() {
             }
 
             // and back: inverse must recover e_j exactly
-            midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_inplace_auto(&mut data)
-                .expect("GPU iNTT failed");
+            expect_gpu_ops(&[OpKind::Ntt], || ctx.inverse_ntt_inplace(&mut data)).expect("GPU iNTT failed");
             for (i, v) in data.iter().enumerate() {
                 let want = if i == j { Scalar::ONE } else { Scalar::ZERO };
                 assert_eq!(*v, want, "inverse impulse mismatch at k={} j={} i={}", k, j, i);
@@ -116,31 +122,37 @@ fn gpu_ntt_impulse_response() {
     println!("✓ NTT impulse response verified (K=12,13,16,17 × j=0,1,7,n-1)");
 }
 
-/// Batched NTT must produce exactly the same transforms as one-by-one calls.
+/// A batched NTT must transform every polynomial as `best_fft` does, on the
+/// GPU (at a size the routing sends there), and its inverse must undo it.
 #[test]
 fn gpu_ntt_batch_matches_singles() {
-    let k = 14u32;
+    let Some(_gpu) = gpu_test() else { return };
+    let k = gpu_ntt_k(14);
     let n = 1usize << k;
     let b = 8usize;
     let mut rng = ChaCha8Rng::seed_from_u64(0xBA7C4);
     let data: Vec<Scalar> = (0..n * b).map(|_| Scalar::random(&mut rng)).collect();
 
-    let batched = midnight_proofs::gpu_accel::backend::ntt::forward_ntt_batch_auto(&data, n)
-        .expect("batched NTT failed");
+    let batched = expect_gpu_ops(&[OpKind::NttBatch], || {
+        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_batch_auto(&data, n)
+    })
+    .expect("batched NTT failed");
     assert_eq!(batched.len(), n * b);
 
+    let omega = omega_for(k);
     for i in 0..b {
         let mut single = data[i * n..(i + 1) * n].to_vec();
-        midnight_proofs::gpu_accel::backend::ntt::forward_ntt_inplace_auto(&mut single)
-            .expect("single NTT failed");
+        cpu_fft(&mut single, omega, k);
         assert_eq!(&batched[i * n..(i + 1) * n], &single[..], "batch element {} differs", i);
     }
 
-    let inv = midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_batch_auto(&batched, n)
-        .expect("batched iNTT failed");
+    let inv = expect_gpu_ops(&[OpKind::NttBatch], || {
+        midnight_proofs::gpu_accel::backend::ntt::inverse_ntt_batch_auto(&batched, n)
+    })
+    .expect("batched iNTT failed");
     assert_eq!(inv, data, "batched roundtrip != identity");
 
-    println!("✓ batched NTT == singles and roundtrips (b={} × 2^{})", b, k);
+    println!("✓ batched NTT == best_fft and roundtrips (b={} × 2^{})", b, k);
 }
 
 /// Batched call vs host loop of singles (same total work) — measures what

@@ -42,8 +42,16 @@
 //!   cargo test -p midnight-proofs --release --features gpu --test gpu_proof_fidelity
 //! ```
 //! The test also builds without `gpu`, which gives the upstream CPU prover's bytes.
+//!
+//! Under `MIDNIGHT_GPU_STRICT=1` (how every gate runs) with the GPU in use, the proofs
+//! must also have run on it: this fork's backend line launched MSMs and NTTs and nothing
+//! fell back (op counters). Without strict mode the bytes are checked whichever device
+//! ran, so a GPU that fails falls back to the CPU and the CPU's bytes are checked.
 
 #![cfg(feature = "committed-instances")]
+
+#[cfg(feature = "gpu")]
+mod common;
 
 use blake2b_simd::State as Blake2bState;
 use group::{Curve, Group};
@@ -432,8 +440,33 @@ fn gpu_proof_fidelity() {
         },
     ];
 
-    let proof_single = prove(&params, &pk, &single, 1, PROVER_SEED);
-    let proof_multi = prove(&params, &pk, &multi, 0, PROVER_SEED + 1);
+    // Under strict mode the proofs must run on the GPU: in forced GPU mode always, in
+    // Auto mode when K reaches both crossovers (the routing rule, written out).
+    #[cfg(feature = "gpu")]
+    let on_gpu = {
+        use midnight_bls12_381_cuda::{config::gpu_strict, min_gpu_size, min_ntt_gpu_size};
+        let routed = gpu_forced || (1usize << K) >= min_gpu_size().max(min_ntt_gpu_size());
+        gpu_strict()
+            && midnight_bls12_381_cuda::config::device_type()
+                != midnight_bls12_381_cuda::config::DeviceType::Cpu
+            && routed
+    };
+    let prove_both = || {
+        (
+            prove(&params, &pk, &single, 1, PROVER_SEED),
+            prove(&params, &pk, &multi, 0, PROVER_SEED + 1),
+        )
+    };
+    #[cfg(feature = "gpu")]
+    let (proof_single, proof_multi) = if on_gpu {
+        use midnight_proofs::gpu_accel::backend::diag::OpKind;
+        midnight_bls12_381_cuda::settle_calibration();
+        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], prove_both)
+    } else {
+        prove_both()
+    };
+    #[cfg(not(feature = "gpu"))]
+    let (proof_single, proof_multi) = prove_both();
 
     #[cfg(feature = "gpu")]
     {

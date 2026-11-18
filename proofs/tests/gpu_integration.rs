@@ -5,19 +5,22 @@
 
 #![cfg(feature = "gpu")]
 
+mod common;
+
+use common::{expect_gpu_ops, gpu_ntt_k, gpu_test};
 use midnight_proofs::gpu_accel::{
-    backend::{
-        self,
-        diag::{gpu_op_count, OpKind},
-    },
+    backend::{self, diag::OpKind},
     GpuMsmContext,
 };
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
-use ff::Field;
+use ff::{Field, PrimeField};
 use group::{Group, Curve, prime::PrimeCurveAffine};
+use rand::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 
 #[test]
 fn test_gpu_msm_small() {
+    let Some(_gpu) = gpu_test() else { return };
     // Small MSM: 1024 points
     let size = 1024;
     test_msm_with_size(size);
@@ -25,6 +28,7 @@ fn test_gpu_msm_small() {
 
 #[test]
 fn test_gpu_msm_k14() {
+    let Some(_gpu) = gpu_test() else { return };
     // K=14: 16384 points
     let size = 16384;
     test_msm_with_size(size);
@@ -32,13 +36,14 @@ fn test_gpu_msm_k14() {
 
 #[test]
 fn test_gpu_msm_k16() {
+    let Some(_gpu) = gpu_test() else { return };
     // K=16: 65536 points
     let size = 65536;
     test_msm_with_size(size);
 }
 
 fn test_msm_with_size(size: usize) {
-    let mut rng = rand::thread_rng();
+    let mut rng = ChaCha8Rng::seed_from_u64(size as u64);
 
     // Generate random scalars and points
     let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
@@ -49,23 +54,10 @@ fn test_msm_with_size(size: usize) {
     // Create GPU MSM context
     let ctx = GpuMsmContext::new().expect("Failed to create MSM context");
 
-    // Execute MSM
-    let line = backend::line_id();
-    let msm_launches_before = gpu_op_count(line, OpKind::Msm);
-    let result = ctx.msm(&scalars, &points).expect("MSM should succeed");
-
-    // The launch is counted on this fork's backend line (k >= 14: the sizes the
-    // prover routes to the GPU), so a fork wired to the other line's counters
-    // is caught at runtime as well as at compile time.
-    if size >= 1 << 14 {
-        assert!(
-            gpu_op_count(line, OpKind::Msm) > msm_launches_before,
-            "MSM of {size} points was not counted as a GPU launch on backend line {line}"
-        );
-    }
-
-    // Verify result is not identity (with random inputs, extremely unlikely)
-    assert!(!bool::from(result.is_identity()));
+    // Execute MSM. The launch is counted on this fork's backend line, so a fork
+    // wired to the other line's counters is caught at runtime as well as at
+    // compile time.
+    let result = expect_gpu_ops(&[OpKind::Msm], || ctx.msm(&scalars, &points)).expect("MSM should succeed");
 
     // Verify against CPU reference
     let points_proj: Vec<G1Projective> = points.iter().map(|p| G1Projective::from(*p)).collect();
@@ -74,34 +66,35 @@ fn test_msm_with_size(size: usize) {
 }
 
 /// The prover's NTT entry point (`forward_ntt_inplace_auto`, which
-/// `utils::fft::best_fft` routes to) launches on this fork's backend line: its
-/// NTT counter moves for a k = 14 transform whenever the device routing sends
-/// that size to the GPU (`MIDNIGHT_DEVICE=cpu` keeps it on the CPU arm).
+/// `utils::fft::best_fft` routes to) launches on this fork's backend line, at a
+/// size the routing sends to the GPU, and gives `best_fft`'s result.
 #[test]
 fn test_gpu_ntt_counted_on_this_forks_line() {
-    let line = backend::line_id();
-    let n = 1usize << 14;
+    let Some(_gpu) = gpu_test() else { return };
+    let k = gpu_ntt_k(14);
+    let n = 1usize << k;
     let mut data: Vec<Scalar> = (0..n).map(|i| Scalar::from(i as u64 + 1)).collect();
-    let ntt_launches_before = gpu_op_count(line, OpKind::Ntt);
-    backend::ntt::forward_ntt_inplace_auto(&mut data).expect("NTT should succeed");
-    if backend::should_use_gpu_ntt(n) {
-        assert!(
-            gpu_op_count(line, OpKind::Ntt) > ntt_launches_before,
-            "NTT of {n} elements was not counted as a GPU launch on backend line {line}"
-        );
-    } else {
-        println!("[skip] NTT of {n} elements is routed to the CPU; no GPU launch expected");
+    let mut want = data.clone();
+    let mut omega = Scalar::ROOT_OF_UNITY;
+    for _ in k..Scalar::S {
+        omega = omega.square();
     }
+    midnight_curves::fft::best_fft(&mut want, omega, k);
+    expect_gpu_ops(&[OpKind::Ntt], || backend::ntt::forward_ntt_inplace_auto(&mut data))
+        .expect("NTT should succeed");
+    assert!(data == want, "the NTT of 2^{k} elements differs from best_fft");
 }
 
 #[test]
 fn test_gpu_context_creation() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new();
     assert!(ctx.is_ok(), "GPU context should initialize successfully");
 }
 
 #[test]
 fn test_gpu_msm_simple_identity() {
+    let Some(_gpu) = gpu_test() else { return };
     // Simple test: MSM with scalar=1 and generator should return n * G
     let generator = G1Affine::generator();
     let n = 1024;
@@ -111,7 +104,7 @@ fn test_gpu_msm_simple_identity() {
     let ctx = GpuMsmContext::new().expect("Failed to create MSM context");
 
     // This computes sum of n generators = n * G
-    let result = ctx.msm(&scalars, &points).expect("MSM should succeed");
+    let result = expect_gpu_ops(&[OpKind::Msm], || ctx.msm(&scalars, &points)).expect("MSM should succeed");
 
     // Expected: n * G
     let expected = G1Projective::from(generator) * Scalar::from(n as u64);
@@ -120,6 +113,7 @@ fn test_gpu_msm_simple_identity() {
 
 #[test]
 fn test_gpu_msm_empty() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new().expect("Failed to create MSM context");
     let result = ctx.msm(&[], &[]).expect("Empty MSM should succeed");
     assert!(bool::from(result.is_identity()), "Empty MSM should return identity");
@@ -219,6 +213,7 @@ fn test_gpu_g2_msm_zero_scalars() {
 
 #[test]
 fn test_gpu_warmup() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new().expect("Failed to create MSM context");
     let warmup_time = ctx.warmup();
     assert!(warmup_time.is_ok(), "Warmup should succeed");
