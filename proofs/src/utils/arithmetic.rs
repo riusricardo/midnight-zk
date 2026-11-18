@@ -387,3 +387,34 @@ fn test_lagrange_interpolate() {
         }
     }
 }
+
+/// `inner_product_refs` (the multi-open's combination of polynomials) is
+/// sum_j s_j p_j at the first polynomial's length, a later polynomial
+/// contributing where it has coefficients: against that sum written out, with
+/// later polynomials as long as, shorter than and longer than the first, and
+/// against `inner_product` where the lengths are equal.
+#[test]
+fn test_inner_product_refs() {
+    use crate::poly::{Coeff, Polynomial};
+
+    let poly = |len: usize| Polynomial::<Scalar, Coeff> {
+        values: (0..len).map(|_| Scalar::random(OsRng)).collect(),
+        _marker: std::marker::PhantomData,
+    };
+    let x = Scalar::random(OsRng);
+    for lens in [[64, 64, 64], [64, 40, 100], [9, 64, 1]] {
+        let polys: Vec<_> = lens.iter().map(|&len| poly(len)).collect();
+        let refs: Vec<&Polynomial<Scalar, Coeff>> = polys.iter().collect();
+        let got = inner_product_refs(&refs, powers(x));
+        let mut want = vec![Scalar::ZERO; lens[0]];
+        for (p, s) in polys.iter().zip(powers(x)) {
+            for (w, c) in want.iter_mut().zip(&p.values) {
+                *w += *c * s;
+            }
+        }
+        assert_eq!(got.values, want, "lengths {lens:?}");
+        if lens.iter().all(|&len| len == lens[0]) {
+            assert_eq!(got.values, inner_product(&polys, powers(x)).values, "lengths {lens:?}");
+        }
+    }
+}
