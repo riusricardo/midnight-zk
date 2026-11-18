@@ -127,14 +127,17 @@ pub fn ifft<F: PrimeField + 'static>(a: &mut [F], omega_inv: F, log_n: u32, divi
 ///
 /// On the GPU path all polynomials go up in ONE transfer and one grid-batched
 /// kernel sequence instead of `batch_count` separate launch+sync round-trips.
-/// Falls back to per-polynomial `best_fft` for non-`Fq` fields or GPU failure.
+/// Falls back to per-polynomial `best_fft` for non-`Fq` fields or GPU failure
+/// (reported through `note_gpu_fallback`, fatal under `MIDNIGHT_GPU_STRICT`).
+///
+/// Panics unless `batch` holds whole polynomials of `poly_size` elements.
 pub fn best_fft_batch<F: PrimeField + 'static>(
     batch: &mut [F],
     poly_size: usize,
     omega: F,
     log_n: u32,
 ) {
-    debug_assert_eq!(batch.len() % poly_size, 0);
+    assert_eq!(batch.len() % poly_size, 0, "a batch of whole polynomials");
     #[cfg(feature = "gpu")]
     {
         // The `_auto` handles GPU/CPU routing (threshold, MIDNIGHT_DEVICE) itself.
@@ -143,7 +146,7 @@ pub fn best_fft_batch<F: PrimeField + 'static>(
         }) {
             Some(Ok(())) => return,
             Some(Err(e)) => {
-                tracing::warn!("batch NTT failed, falling back to CPU: {}", e);
+                midnight_bls12_381_cuda::config::note_gpu_fallback("NTT (best_fft_batch)", &e.to_string());
             }
             None => {} // field is not Fq — CPU below
         }
@@ -157,7 +160,9 @@ pub fn best_fft_batch<F: PrimeField + 'static>(
 ///
 /// Both the GPU path and the backend's CPU arm already include the `1/n`
 /// scaling (same convention as [`ifft`]); the local CPU fallback applies
-/// `divisor` explicitly.
+/// `divisor` explicitly. A GPU failure is reported as in [`best_fft_batch`].
+///
+/// Panics unless `batch` holds whole polynomials of `poly_size` elements.
 pub fn ifft_batch<F: PrimeField + 'static>(
     batch: &mut [F],
     poly_size: usize,
@@ -165,7 +170,7 @@ pub fn ifft_batch<F: PrimeField + 'static>(
     log_n: u32,
     divisor: F,
 ) {
-    debug_assert_eq!(batch.len() % poly_size, 0);
+    assert_eq!(batch.len() % poly_size, 0, "a batch of whole polynomials");
     #[cfg(feature = "gpu")]
     {
         match crate::gpu_accel::with_fq_slice_mut(batch, |fq| {
@@ -173,7 +178,7 @@ pub fn ifft_batch<F: PrimeField + 'static>(
         }) {
             Some(Ok(())) => return,
             Some(Err(e)) => {
-                tracing::warn!("batch iNTT failed, falling back to CPU: {}", e);
+                midnight_bls12_381_cuda::config::note_gpu_fallback("iNTT (ifft_batch)", &e.to_string());
             }
             None => {}
         }
