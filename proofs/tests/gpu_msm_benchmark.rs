@@ -9,6 +9,9 @@
 
 #![cfg(feature = "gpu")]
 
+mod common;
+
+use common::gpu_test;
 use ff::Field;
 use group::{Curve, Group};
 use midnight_curves::{Fq as Scalar, G1Affine, G1Projective};
@@ -202,6 +205,7 @@ fn gpu_msm_benchmark_quick() {
 /// Test that GPU results are correct (using optimized path)
 #[test]
 fn gpu_msm_correctness() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
 
     for k in [10, 12, 14, 16] {
@@ -233,6 +237,7 @@ fn gpu_msm_correctness() {
 /// - tiny scalars: only the lowest window is populated
 #[test]
 fn gpu_msm_correctness_degenerate_scalars() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
     let k = 16;
     let size = 1usize << k;
@@ -275,6 +280,7 @@ fn gpu_msm_correctness_degenerate_scalars() {
 /// signed digits can put +P and -P for the same base into one bucket.
 #[test]
 fn gpu_msm_correctness_duplicate_points() {
+    let Some(_gpu) = gpu_test() else { return };
     let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
     let k = 14;
     let size = 1usize << k;
@@ -442,10 +448,7 @@ fn profile_msm_single() {
 /// sync and async.
 #[test]
 fn gpu_msm_batch_matches_singles() {
-    if !midnight_bls12_381_cuda::is_gpu_available() {
-        eprintln!("[skip] no GPU");
-        return;
-    }
+    let Some(_gpu) = gpu_test() else { return };
     let k = 13u32;
     let n = 1usize << k;
     let b = 5usize;

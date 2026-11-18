@@ -46,8 +46,16 @@
 //! previous dump. The proof is always verified with an explicit CPU (BLST) pairing check.
 //! Byte equality also covers the verifying key: the transcript starts with the vk hash,
 //! so different fixed commitments would change every challenge.
+//!
+//! Under `MIDNIGHT_GPU_STRICT=1` (how every gate runs) with the GPU in use, the proof
+//! must also have run on it: this fork's backend line launched MSMs and NTTs and nothing
+//! fell back (op counters). Without strict mode the bytes are checked whichever device
+//! ran, so a GPU that fails falls back to the CPU and the CPU's bytes are checked.
 
 #![cfg(feature = "committed-instances")]
+
+#[cfg(feature = "gpu")]
+mod common;
 
 use blake2b_simd::State as Blake2bState;
 use ff::Field;
@@ -352,22 +360,30 @@ fn cpu_instance_commitment(params: &ParamsKZG<Bls12>, values: &[Fq]) -> G1Projec
 fn gpu_proof_bytes_match_cpu() {
     let device = std::env::var("MIDNIGHT_DEVICE").unwrap_or_else(|_| "auto".into());
     #[cfg(feature = "gpu")]
-    let gpu_msm = {
+    let (gpu_msm, on_gpu) = {
+        use midnight_bls12_381_cuda::config::{device_type, gpu_strict, DeviceType};
+        use midnight_bls12_381_cuda::{min_gpu_size, min_ntt_gpu_size};
+        let mode = device_type();
         let gpu_msm = midnight_bls12_381_cuda::should_use_gpu(1 << K);
-        if device.eq_ignore_ascii_case("gpu") {
+        if mode == DeviceType::Gpu {
             assert!(
                 midnight_bls12_381_cuda::is_gpu_available(),
                 "MIDNIGHT_DEVICE=gpu but no GPU"
             );
         }
-        if device.eq_ignore_ascii_case("cpu") {
+        if mode == DeviceType::Cpu {
             assert!(
                 !gpu_msm,
                 "MIDNIGHT_DEVICE=cpu must keep every MSM on the CPU"
             );
         }
         midnight_bls12_381_cuda::config::reset_gpu_fallback_count();
-        gpu_msm
+        // Under strict mode the proof must run on the GPU: in forced GPU mode always, in
+        // Auto mode when K reaches both crossovers (the routing rule, written out).
+        let routed = mode == DeviceType::Gpu
+            || (mode == DeviceType::Auto
+                && (1usize << K) >= min_gpu_size().max(min_ntt_gpu_size()));
+        (gpu_msm, gpu_strict() && routed)
     };
     #[cfg(not(feature = "gpu"))]
     let gpu_msm = false;
@@ -386,16 +402,28 @@ fn gpu_proof_bytes_match_cpu() {
     let prover_instances: Vec<&[&[Fq]]> = prover_instances.iter().map(|i| &i[..]).collect();
 
     let mut transcript = CircuitTranscript::<Blake2bState>::init();
-    create_proof::<_, Scheme, _, _>(
-        &params,
-        &pk,
-        &circuits,
-        2,
-        &prover_instances,
-        &mut transcript,
-        ChaCha8Rng::seed_from_u64(0x5EED),
-    )
-    .expect("create_proof");
+    let mut prove = || {
+        create_proof::<_, Scheme, _, _>(
+            &params,
+            &pk,
+            &circuits,
+            2,
+            &prover_instances,
+            &mut transcript,
+            ChaCha8Rng::seed_from_u64(0x5EED),
+        )
+    };
+    #[cfg(feature = "gpu")]
+    let proved = if on_gpu {
+        use midnight_proofs::gpu_accel::backend::diag::OpKind;
+        midnight_bls12_381_cuda::settle_calibration();
+        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], prove)
+    } else {
+        prove()
+    };
+    #[cfg(not(feature = "gpu"))]
+    let proved = prove();
+    proved.expect("create_proof");
     let proof = transcript.finalize();
 
     #[cfg(feature = "gpu")]
@@ -482,7 +510,9 @@ fn gpu_proof_bytes_match_cpu() {
     // A forced-GPU run must really have run on the GPU. (Under MIDNIGHT_GPU_STRICT a
     // fallback already panicked; without it, the bytes above must still match.)
     #[cfg(feature = "gpu")]
-    if device.eq_ignore_ascii_case("gpu") {
+    if midnight_bls12_381_cuda::config::device_type()
+        == midnight_bls12_381_cuda::config::DeviceType::Gpu
+    {
         assert_eq!(
             midnight_bls12_381_cuda::config::gpu_fallback_count(),
             0,

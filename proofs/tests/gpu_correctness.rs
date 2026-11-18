@@ -17,8 +17,12 @@
 
 #![cfg(feature = "gpu")]
 
+mod common;
+
+use common::{expect_gpu_ops, gpu_msm_k, gpu_ntt_k, gpu_test};
 use ff::{Field, PrimeField};
 use midnight_curves::{Bls12, Fq, G1Projective};
+use midnight_proofs::gpu_accel::backend::diag::OpKind;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 
@@ -27,17 +31,6 @@ use midnight_proofs::poly::{
     kzg::{params::ParamsKZG, KZGCommitmentScheme},
     EvaluationDomain,
 };
-
-/// Skip (rather than fail) when no usable GPU is present, so the suite is safe to run on
-/// CI hosts without a CUDA device.
-fn gpu_present() -> bool {
-    if midnight_bls12_381_cuda::is_gpu_available() {
-        true
-    } else {
-        eprintln!("[skip] GPU backend not available; skipping GPU correctness test");
-        false
-    }
-}
 
 /// The 2^k-th root of unity in midnight_curves' convention (matches EvaluationDomain).
 fn omega_for(k: u32) -> Fq {
@@ -52,17 +45,18 @@ fn omega_for(k: u32) -> Fq {
 /// This fails if the GPU domain is seeded with a root that differs from midnight_curves'.
 #[test]
 fn gpu_forward_ntt_matches_cpu() {
-    if !gpu_present() {
-        return;
-    }
-    for k in [12u32, 14, 16] {
+    let Some(_gpu) = gpu_test() else { return };
+    let k0 = gpu_ntt_k(12);
+    for k in [k0, k0 + 2, k0 + 4] {
         let n = 1usize << k;
         let domain = EvaluationDomain::<Fq>::new(1, k);
         let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
         let coeffs: Vec<Fq> = (0..n).map(|_| Fq::random(&mut rng)).collect();
 
-        // GPU path: coeff_to_lagrange runs a forward NTT via the GPU dispatcher at k >= 12.
-        let gpu = domain.coeff_to_lagrange(domain.coeff_from_vec(coeffs.clone()));
+        // GPU path: coeff_to_lagrange runs a forward NTT through the GPU dispatcher.
+        let gpu = expect_gpu_ops(&[OpKind::Ntt], || {
+            domain.coeff_to_lagrange(domain.coeff_from_vec(coeffs.clone()))
+        });
 
         // CPU reference: raw midnight_curves best_fft with the domain's own omega.
         let mut cpu = coeffs.clone();
@@ -77,17 +71,18 @@ fn gpu_forward_ntt_matches_cpu() {
 /// (1/n)*forward-NTT instead of the inverse.
 #[test]
 fn gpu_inverse_ntt_matches_cpu_and_roundtrips() {
-    if !gpu_present() {
-        return;
-    }
-    for k in [12u32, 14, 16] {
+    let Some(_gpu) = gpu_test() else { return };
+    let k0 = gpu_ntt_k(12);
+    for k in [k0, k0 + 2, k0 + 4] {
         let n = 1usize << k;
         let domain = EvaluationDomain::<Fq>::new(1, k);
         let mut rng = ChaCha8Rng::seed_from_u64(100 + k as u64);
         let evals: Vec<Fq> = (0..n).map(|_| Fq::random(&mut rng)).collect();
 
         // GPU inverse: lagrange_to_coeff -> Self::ifft -> GPU inverse NTT.
-        let gpu_coeff = domain.lagrange_to_coeff(domain.lagrange_from_vec(evals.clone()));
+        let gpu_coeff = expect_gpu_ops(&[OpKind::Ntt], || {
+            domain.lagrange_to_coeff(domain.lagrange_from_vec(evals.clone()))
+        });
 
         // CPU reference inverse: best_fft(omega_inv) then scale by 1/n.
         let mut cpu = evals.clone();
@@ -105,14 +100,13 @@ fn gpu_inverse_ntt_matches_cpu_and_roundtrips() {
     }
 }
 
-/// Overall commit correctness: a GPU KZG Lagrange commitment must equal the BLST result.
-/// Uses k >= 15 so the commit MSM actually runs on the GPU.
+/// Overall commit correctness: a GPU KZG Lagrange commitment must equal the BLST result,
+/// at sizes the routing sends to the GPU (the commit's cached-bases MSM).
 #[test]
 fn gpu_commit_lagrange_matches_blst() {
-    if !gpu_present() {
-        return;
-    }
-    for k in [15u32, 16] {
+    let Some(_gpu) = gpu_test() else { return };
+    let k0 = gpu_msm_k(15);
+    for k in [k0, k0 + 1] {
         let mut rng = ChaCha8Rng::seed_from_u64(7 + k as u64);
         let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
         let domain = EvaluationDomain::<Fq>::new(1, k);
@@ -122,8 +116,10 @@ fn gpu_commit_lagrange_matches_blst() {
             *v = Fq::random(&mut rng);
         }
 
-        // GPU commit (cached-bases MSM at k >= 15).
-        let gpu_c = KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag);
+        // GPU commit (cached-bases MSM).
+        let gpu_c = expect_gpu_ops(&[OpKind::Msm], || {
+            KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag)
+        });
 
         // BLST reference: direct multi_exp over g_lagrange.
         let scalars: Vec<Fq> = lag.iter().copied().collect();
@@ -137,10 +133,9 @@ fn gpu_commit_lagrange_matches_blst() {
 /// the downsized bases (not the stale larger-domain cache).
 #[test]
 fn gpu_downsize_invalidates_base_cache() {
-    if !gpu_present() {
-        return;
-    }
-    let (k_big, k_small) = (16u32, 15u32);
+    let Some(_gpu) = gpu_test() else { return };
+    let k_small = gpu_msm_k(15);
+    let k_big = k_small + 1;
     let mut rng = ChaCha8Rng::seed_from_u64(999);
     let mut params = ParamsKZG::<Bls12>::unsafe_setup(k_big, &mut rng);
 
@@ -150,7 +145,9 @@ fn gpu_downsize_invalidates_base_cache() {
     for v in lag_big.iter_mut() {
         *v = Fq::random(&mut rng);
     }
-    let _ = KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag_big);
+    expect_gpu_ops(&[OpKind::Msm], || {
+        KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag_big)
+    });
 
     // Downsize, then commit at the smaller domain.
     params.downsize(k_small);
@@ -159,7 +156,9 @@ fn gpu_downsize_invalidates_base_cache() {
     for v in lag_small.iter_mut() {
         *v = Fq::random(&mut rng);
     }
-    let gpu_c = KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag_small);
+    let gpu_c = expect_gpu_ops(&[OpKind::Msm], || {
+        KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag_small)
+    });
 
     let scalars: Vec<Fq> = lag_small.iter().copied().collect();
     let cpu_c = G1Projective::multi_exp(params.g_lagrange(), &scalars);
@@ -171,10 +170,8 @@ fn gpu_downsize_invalidates_base_cache() {
 /// yet — this keeps the API honest until device residency makes it pay).
 #[test]
 fn gpu_domain_batch_transforms_match_singles() {
-    if !gpu_present() {
-        return;
-    }
-    let k = 13u32;
+    let Some(_gpu) = gpu_test() else { return };
+    let k = gpu_ntt_k(13);
     let n = 1usize << k;
     let b = 4usize;
     let domain = EvaluationDomain::<Fq>::new(2, k);
@@ -194,7 +191,8 @@ fn gpu_domain_batch_transforms_match_singles() {
         .iter()
         .map(|p| domain.lagrange_to_coeff(p.clone()))
         .collect();
-    let batched = domain.lagrange_to_coeff_batch(lagrange_polys);
+    let batched = expect_gpu_ops(&[OpKind::NttBatch], || domain.lagrange_to_coeff_batch(lagrange_polys));
+    assert_eq!(batched.len(), b);
     for (i, (s, bt)) in singles.iter().zip(batched.iter()).enumerate() {
         assert_eq!(s.len(), n);
         assert!(
@@ -207,7 +205,8 @@ fn gpu_domain_batch_transforms_match_singles() {
         .iter()
         .map(|p| domain.coeff_to_extended(p.clone()))
         .collect();
-    let ext_batched = domain.coeff_to_extended_batch(&singles);
+    let ext_batched = expect_gpu_ops(&[OpKind::NttBatch], || domain.coeff_to_extended_batch(&singles));
+    assert_eq!(ext_batched.len(), b);
     for (i, (s, bt)) in ext_singles.iter().zip(ext_batched.iter()).enumerate() {
         assert!(
             s.iter().zip(bt.iter()).all(|(a, b)| a == b) && s.len() == bt.len(),
@@ -307,16 +306,18 @@ mod e2e {
         let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
 
         let mut transcript = CircuitTranscript::<Blake2bState>::init();
-        create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
-            &params,
-            &pk,
-            &[circuit],
-            #[cfg(feature = "committed-instances")]
-            0,
-            &[&[]],
-            &mut transcript,
-            &mut rng,
-        )
+        expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], || {
+            create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
+                &params,
+                &pk,
+                &[circuit],
+                #[cfg(feature = "committed-instances")]
+                0,
+                &[&[]],
+                &mut transcript,
+                &mut rng,
+            )
+        })
         .expect("create_proof");
         let proof = transcript.finalize();
 
@@ -336,13 +337,13 @@ mod e2e {
         );
     }
 
-    /// K=12 exercises the GPU NTT (threshold 2^12); K=16 exercises GPU NTT + GPU MSM.
+    /// From the smallest size both crossovers send to the GPU: every proof launches GPU
+    /// MSMs and NTTs on this fork's backend line, with no fallback.
     #[test]
     fn gpu_full_proof_verifies() {
-        if !gpu_present() {
-            return;
-        }
-        for k in [12u32, 14, 16] {
+        let Some(_gpu) = gpu_test() else { return };
+        let k0 = gpu_msm_k(gpu_ntt_k(12));
+        for k in [k0, k0 + 2, k0 + 4] {
             prove_and_verify(k);
         }
     }
@@ -351,14 +352,12 @@ mod e2e {
     #[test]
     #[ignore = "heavy (K=18); run with --ignored on a machine with enough VRAM"]
     fn gpu_full_proof_verifies_large() {
-        if !gpu_present() {
-            return;
-        }
+        let Some(_gpu) = gpu_test() else { return };
         prove_and_verify(18);
     }
 
     /// Proof-level timing: keygen / prove / verify per K, proof always verified.
-    /// Deliberately NOT gated on `gpu_present()` — pointing `ICICLE_BACKEND_INSTALL_DIR`
+    /// Deliberately NOT gated on `gpu_test()` — pointing `ICICLE_BACKEND_INSTALL_DIR`
     /// at a nonexistent dir is the pure-CPU arm of the comparison.
     ///
     ///   E2E_BENCH_KS=12,14,16 ICICLE_BACKEND_INSTALL_DIR=... \
@@ -435,41 +434,20 @@ mod e2e {
     }
 
     /// Trust boundary: a proof generated with the GPU backend must be accepted by the
-    /// pure-CPU BLST verifier.
+    /// verifier.
     ///
-    /// - PROVE (GPU): at k=16 the prover runs GPU NTT (threshold 2^12) and GPU MSM
-    ///   (threshold 2^13); `should_use_gpu(2^16)` is asserted so this really is the
-    ///   GPU path, not a silent CPU fallback.
-    /// - VERIFY (CPU/BLST): the KZG verifier's pairing-check accumulator
-    ///   (`DualMSM::eval`) calls `msm_specific` unconditionally — there is no
-    ///   `should_use_gpu` gate on it — so `guard.verify` is a genuine CPU/BLST check
-    ///   of the GPU-produced proof. `is_blst_available::<G1Affine>()` is asserted up
-    ///   front (msm_specific panics without it).
+    /// - PROVE (GPU): the proof launches GPU MSMs and NTTs on this fork's backend line,
+    ///   with no fallback (op counters).
+    /// - VERIFY: `guard.verify` (`DualMSM::eval` -> `msm_specific`). `msm_specific`
+    ///   routes by size like every MSM: in Auto mode the verifier's small MSMs run on
+    ///   the CPU (BLST), under `MIDNIGHT_DEVICE=gpu` on the GPU as well.
     ///
     /// A one-bit tamper of the proof must be rejected, so the positive check is not
     /// vacuous.
     #[test]
     fn gpu_proof_verifies_on_cpu_blst() {
-        use midnight_curves::G1Affine;
-        use midnight_proofs::poly::kzg::msm::is_blst_available;
-
-        if !gpu_present() {
-            return;
-        }
-        assert!(
-            is_blst_available::<G1Affine>(),
-            "BLST must be available for the CPU verifier"
-        );
-
-        let k = 16u32;
-        assert!(
-            midnight_bls12_381_cuda::should_use_gpu(1usize << k),
-            "k={k} must be above the GPU MSM threshold for this test to prove on GPU"
-        );
-        assert!(
-            midnight_bls12_381_cuda::should_use_gpu_ntt(1usize << k),
-            "k={k} must be above the GPU NTT threshold for this test to prove on GPU"
-        );
+        let Some(_gpu) = gpu_test() else { return };
+        let k = gpu_msm_k(gpu_ntt_k(16));
 
         let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
         let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
@@ -479,41 +457,24 @@ mod e2e {
             .expect("keygen_vk");
         let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
 
-        // The proof's GPU work must be launched on this fork's backend line
-        // (the line `gpu_accel` names): its per-line MSM and NTT counters move.
-        use midnight_proofs::gpu_accel::backend::{
-            self,
-            diag::{gpu_op_count, OpKind},
-        };
-        let line = backend::line_id();
-        let msm_launches_before = gpu_op_count(line, OpKind::Msm);
-        let ntt_launches_before = gpu_op_count(line, OpKind::Ntt);
-
-        // ---- Generate the proof on GPU (GPU NTT + GPU MSM) ----
+        // ---- Generate the proof on the GPU (GPU NTT + GPU MSM on this fork's line) ----
         let mut transcript = CircuitTranscript::<Blake2bState>::init();
-        create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
-            &params,
-            &pk,
-            &[circuit],
-            #[cfg(feature = "committed-instances")]
-            0,
-            &[&[]],
-            &mut transcript,
-            &mut rng,
-        )
+        expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], || {
+            create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
+                &params,
+                &pk,
+                &[circuit],
+                #[cfg(feature = "committed-instances")]
+                0,
+                &[&[]],
+                &mut transcript,
+                &mut rng,
+            )
+        })
         .expect("create_proof");
         let proof = transcript.finalize();
 
-        assert!(
-            gpu_op_count(line, OpKind::Msm) > msm_launches_before,
-            "the k={k} proof launched no GPU MSM on backend line {line}"
-        );
-        assert!(
-            gpu_op_count(line, OpKind::Ntt) > ntt_launches_before,
-            "the k={k} proof launched no GPU NTT on backend line {line}"
-        );
-
-        // ---- Verify on CPU/BLST (DualMSM::eval -> msm_specific, no GPU gate) ----
+        // ---- Verify (DualMSM::eval -> msm_specific) ----
         let verify = |bytes: &[u8]| -> bool {
             let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
             match prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
@@ -530,7 +491,7 @@ mod e2e {
 
         assert!(
             verify(&proof),
-            "GPU-generated proof failed CPU/BLST verification at k={k}"
+            "GPU-generated proof failed verification at k={k}"
         );
 
         // Negative control: a corrupted proof must be rejected.
@@ -538,7 +499,7 @@ mod e2e {
         tampered[0] ^= 0x01;
         assert!(
             !verify(&tampered),
-            "tampered proof was accepted by the CPU/BLST verifier"
+            "tampered proof was accepted by the verifier"
         );
     }
 }
