@@ -54,16 +54,11 @@
 
 #![cfg(feature = "committed-instances")]
 
-#[cfg(feature = "gpu")]
 mod common;
 
 use blake2b_simd::State as Blake2bState;
 use ff::Field;
-use group::{Curve, Group};
-use midnight_curves::{
-    pairing::{MillerLoopResult, MultiMillerLoop},
-    Bls12, Fq, G1Projective, G2Prepared,
-};
+use midnight_curves::{Bls12, Fq, G1Projective};
 use midnight_proofs::{
     circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
     plonk::{
@@ -73,7 +68,7 @@ use midnight_proofs::{
     },
     poly::{
         commitment::Guard,
-        kzg::{msm::DualMSM, params::ParamsKZG, KZGCommitmentScheme},
+        kzg::{params::ParamsKZG, KZGCommitmentScheme},
         Rotation,
     },
     transcript::{CircuitTranscript, Transcript},
@@ -329,26 +324,6 @@ impl Circuit<Fq> for FidelityCircuit {
     }
 }
 
-/// Pure CPU (BLST) final check of a KZG verification guard: the same pairing equation as
-/// `DualMSM::check`, but with `G1Projective::multi_exp` instead of `msm_specific`, which
-/// would run on the GPU under `MIDNIGHT_DEVICE=gpu`.
-fn verify_on_cpu(params: &ParamsKZG<Bls12>, guard: &DualMSM<Bls12>) -> bool {
-    fn cpu_msm<L>(terms: &[(&L, &Fq, &G1Projective)]) -> G1Projective {
-        let scalars: Vec<Fq> = terms.iter().map(|t| *t.1).collect();
-        let bases: Vec<G1Projective> = terms.iter().map(|t| *t.2).collect();
-        G1Projective::multi_exp(&bases, &scalars)
-    }
-    let (left, right) = guard.split();
-    let (left, right) = (cpu_msm(&left).to_affine(), cpu_msm(&right).to_affine());
-    let s_g2 = G2Prepared::from(params.s_g2().to_affine());
-    let n_g2 = G2Prepared::from((-params.g2()).to_affine());
-    bool::from(
-        Bls12::multi_miller_loop(&[(&left, &s_g2), (&right, &n_g2)])
-            .final_exponentiation()
-            .is_identity(),
-    )
-}
-
 /// Commitment to a committed-instance column, computed with a CPU (BLST) MSM.
 fn cpu_instance_commitment(params: &ParamsKZG<Bls12>, values: &[Fq]) -> G1Projective {
     let mut scalars = vec![Fq::ZERO; 1 << K];
@@ -458,28 +433,25 @@ fn gpu_proof_bytes_match_cpu() {
     let committed: Vec<&[G1Projective]> = committed.iter().map(|c| &c[..]).collect();
     let no_plain_instances: Vec<&[&[Fq]]> = vec![&[]; circuits.len()];
 
-    let prepare_guard = |bytes: &[u8]| -> Option<DualMSM<Bls12>> {
+    let prepared = |bytes: &[u8]| {
         let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
-        prepare::<_, Scheme, _>(pk.get_vk(), &committed, &no_plain_instances, &mut vt).ok()
+        prepare::<_, Scheme, _>(pk.get_vk(), &committed, &no_plain_instances, &mut vt)
     };
 
-    let guard = prepare_guard(&proof).expect("prepare");
+    // The pairing check with BLST alone, and the verifier's own (its MSMs routed by size).
+    assert_eq!(common::Verdict::of(&params, prepared(&proof)), common::Verdict::Accepted, "the proof");
     assert!(
-        verify_on_cpu(&params, &guard),
-        "proof failed the CPU (BLST) pairing check"
-    );
-    assert!(
-        guard.verify(&params.verifier_params()).is_ok(),
+        prepared(&proof).expect("prepare").verify(&params.verifier_params()).is_ok(),
         "proof failed verification"
     );
 
-    // Negative control: a corrupted proof must be rejected by the CPU check.
-    let mut tampered = proof.clone();
-    let mid = tampered.len() / 2;
-    tampered[mid] ^= 0x01;
-    assert!(
-        !prepare_guard(&tampered).is_some_and(|g| verify_on_cpu(&params, &g)),
-        "tampered proof was accepted"
+    // Negative control: the proof with its first commitment moved to another valid
+    // point still parses, and the pairing must reject it.
+    let tampered = common::tamper_first_commitment(&proof);
+    assert_eq!(
+        common::Verdict::of(&params, prepared(&tampered)),
+        common::Verdict::Rejected,
+        "a proof with a moved commitment"
     );
 
     if let Ok(path) = std::env::var("FIDELITY_DUMP") {
