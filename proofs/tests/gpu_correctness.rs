@@ -8,8 +8,9 @@
 //!   * R1 — the GPU NTT domain was seeded with ICICLE's own root of unity, a different
 //!     primitive 2^32-th root than `midnight_curves::Fq::ROOT_OF_UNITY`, so every GPU NTT
 //!     was a permutation of the CPU basis.
-//! The existing `e2e_proof_benchmark` created proofs but never VERIFIED them, so both bugs
-//! were invisible. `gpu_full_proof_verifies` below closes that gap.
+//!
+//! A benchmark that created proofs but never VERIFIED them left both bugs invisible;
+//! `gpu_full_proof_verifies` below closes that gap.
 //!
 //! Run against ours vs the closed backend via the `ICICLE_BACKEND_INSTALL_DIR` A/B switch:
 //!   ICICLE_BACKEND_INSTALL_DIR=~/.local/icicle-backends/ours \
@@ -19,7 +20,7 @@
 
 mod common;
 
-use common::{expect_gpu_ops, gpu_msm_k, gpu_ntt_k, gpu_test};
+use common::{expect_gpu_ops, gpu_msm_k, gpu_ntt_k, gpu_test, tamper_first_commitment, Verdict};
 use ff::{Field, PrimeField};
 use midnight_curves::{Bls12, Fq, G1Projective};
 use midnight_proofs::gpu_accel::backend::diag::OpKind;
@@ -234,9 +235,12 @@ mod e2e {
         transcript::{CircuitTranscript, Transcript},
     };
 
-    /// Domain-filling circuit (same shape as `e2e_proof_benchmark`): 8 advice columns,
-    /// fills half the domain so polynomial sizes equal the domain size and the GPU NTT/MSM
-    /// paths are actually exercised.
+    /// Domain-filling circuit: 8 advice columns over half the domain, so polynomial
+    /// sizes equal the domain size and the GPU NTT/MSM paths are exercised. Its gates
+    /// are not identically zero (a2 = a0 * a1, and a3 on the next row = a3 + a0) and
+    /// a copy constraint ties a4 to a0 (the permutation argument), so the quotient,
+    /// the extended-domain NTTs and the quotient's evaluation must be right for the
+    /// proof to verify.
     #[derive(Clone)]
     struct DomainFillingCircuit {
         k: u32,
@@ -247,6 +251,18 @@ mod e2e {
     struct DomainFillingConfig {
         advice_cols: Vec<Column<Advice>>,
         selector: Selector,
+    }
+
+    /// The witness of column `col` at `row` (rows < `rows` are constrained).
+    fn witness(col: usize, row: usize) -> Fq {
+        let (a0, a1) = (Fq::from(row as u64 + 1), Fq::from(row as u64 + 2));
+        match col {
+            0 | 4 => a0,
+            1 => a1,
+            2 => a0 * a1,
+            3 => Fq::from((row * (row + 1) / 2) as u64), // sum of a0 over the rows before
+            _ => Fq::from((row + col + 1) as u64),
+        }
     }
 
     impl Circuit<Fq> for DomainFillingCircuit {
@@ -262,9 +278,15 @@ mod e2e {
         fn configure(meta: &mut ConstraintSystem<Fq>) -> Self::Config {
             let advice_cols: Vec<_> = (0..8).map(|_| meta.advice_column()).collect();
             let selector = meta.selector();
+            meta.enable_equality(advice_cols[0]);
+            meta.enable_equality(advice_cols[4]);
             meta.create_gate("domain_fill", |vc| {
                 let a0 = vc.query_advice(advice_cols[0], Rotation::cur());
-                Constraints::with_selector(selector, vec![a0.clone() - a0])
+                let a1 = vc.query_advice(advice_cols[1], Rotation::cur());
+                let a2 = vc.query_advice(advice_cols[2], Rotation::cur());
+                let a3 = vc.query_advice(advice_cols[3], Rotation::cur());
+                let a3_next = vc.query_advice(advice_cols[3], Rotation::next());
+                Constraints::with_selector(selector, vec![a2 - a0.clone() * a1, a3_next - a3 - a0])
             });
             DomainFillingConfig { advice_cols, selector }
         }
@@ -281,15 +303,26 @@ mod e2e {
                     let rows_to_fill = ((domain_size as f64) * self.fill_ratio) as usize;
                     for row in 0..rows_to_fill {
                         config.selector.enable(&mut region, row)?;
+                        let mut cells = Vec::with_capacity(config.advice_cols.len());
                         for (col_idx, col) in config.advice_cols.iter().enumerate() {
-                            region.assign_advice(
+                            cells.push(region.assign_advice(
                                 || format!("a[{col_idx}][{row}]"),
                                 *col,
                                 row,
-                                || Value::known(Fq::from((row + col_idx + 1) as u64)),
-                            )?;
+                                || Value::known(witness(col_idx, row)),
+                            )?);
+                        }
+                        if row == 0 {
+                            region.constrain_equal(cells[0].cell(), cells[4].cell())?;
                         }
                     }
+                    // The rotation reads a3 one row past the last constrained row.
+                    region.assign_advice(
+                        || "a[3] after the last row",
+                        config.advice_cols[3],
+                        rows_to_fill,
+                        || Value::known(witness(3, rows_to_fill)),
+                    )?;
                     Ok(())
                 },
             )
@@ -321,7 +354,7 @@ mod e2e {
         .expect("create_proof");
         let proof = transcript.finalize();
 
-        // The step the benchmark skipped: actually verify.
+        // BLST's pairing check, and the verifier's own (its MSMs routed by size).
         let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(&proof);
         let guard = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
             pk.get_vk(),
@@ -331,6 +364,10 @@ mod e2e {
             &mut vt,
         )
         .expect("prepare");
+        assert!(
+            common::blst_pairing_check(&params, &guard),
+            "GPU-generated proof failed the BLST pairing check at k={k}"
+        );
         assert!(
             guard.verify(&params.verifier_params()).is_ok(),
             "GPU-generated proof failed to verify at k={k}"
@@ -433,17 +470,17 @@ mod e2e {
         }
     }
 
-    /// Trust boundary: a proof generated with the GPU backend must be accepted by the
-    /// verifier.
+    /// Trust boundary: a proof generated with the GPU backend must be accepted by a
+    /// verifier that does not touch the GPU.
     ///
     /// - PROVE (GPU): the proof launches GPU MSMs and NTTs on this fork's backend line,
     ///   with no fallback (op counters).
-    /// - VERIFY: `guard.verify` (`DualMSM::eval` -> `msm_specific`). `msm_specific`
-    ///   routes by size like every MSM: in Auto mode the verifier's small MSMs run on
-    ///   the CPU (BLST), under `MIDNIGHT_DEVICE=gpu` on the GPU as well.
+    /// - VERIFY: `prepare`, then the pairing check with BLST alone
+    ///   (`common::blst_pairing_check`; `guard.verify` would route its MSMs by size,
+    ///   to the GPU under `MIDNIGHT_DEVICE=gpu`).
     ///
-    /// A one-bit tamper of the proof must be rejected, so the positive check is not
-    /// vacuous.
+    /// The same proof with its first commitment moved to another valid point still
+    /// parses and must be rejected by the pairing, so the positive check is not vacuous.
     #[test]
     fn gpu_proof_verifies_on_cpu_blst() {
         let Some(_gpu) = gpu_test() else { return };
@@ -474,32 +511,23 @@ mod e2e {
         .expect("create_proof");
         let proof = transcript.finalize();
 
-        // ---- Verify (DualMSM::eval -> msm_specific) ----
-        let verify = |bytes: &[u8]| -> bool {
+        // ---- Verify: prepare, then BLST's pairing check ----
+        let verdict = |bytes: &[u8]| {
             let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
-            match prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
+            let prepared = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
                 pk.get_vk(),
                 #[cfg(feature = "committed-instances")]
                 &[&[]],
                 &[&[]],
                 &mut vt,
-            ) {
-                Ok(guard) => guard.verify(&params.verifier_params()).is_ok(),
-                Err(_) => false,
-            }
+            );
+            Verdict::of(&params, prepared)
         };
-
-        assert!(
-            verify(&proof),
-            "GPU-generated proof failed verification at k={k}"
-        );
-
-        // Negative control: a corrupted proof must be rejected.
-        let mut tampered = proof.clone();
-        tampered[0] ^= 0x01;
-        assert!(
-            !verify(&tampered),
-            "tampered proof was accepted by the verifier"
+        assert_eq!(verdict(&proof), Verdict::Accepted, "GPU-generated proof, k={k}");
+        assert_eq!(
+            verdict(&tamper_first_commitment(&proof)),
+            Verdict::Rejected,
+            "a proof with a moved commitment, k={k}"
         );
     }
 }

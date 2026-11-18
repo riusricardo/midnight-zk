@@ -50,15 +50,11 @@
 
 #![cfg(feature = "committed-instances")]
 
-#[cfg(feature = "gpu")]
 mod common;
 
 use blake2b_simd::State as Blake2bState;
-use group::{Curve, Group};
-use midnight_curves::{
-    pairing::{MillerLoopResult, MultiMillerLoop},
-    Bls12, Fq, G1Projective, G2Prepared,
-};
+use common::{tamper_first_commitment, Verdict};
+use midnight_curves::{Bls12, Fq, G1Projective};
 use midnight_proofs::{
     circuit::{Layouter, SimpleFloorPlanner, Value},
     plonk::{
@@ -332,15 +328,16 @@ fn prove(
     transcript.finalize()
 }
 
-/// Verifies `proof` entirely on the CPU: the committed-instance commitments and the
-/// final MSMs are evaluated with BLST directly, never through the GPU dispatch.
-fn verifies_on_cpu(
+/// The BLST check's verdict on `proof`: the committed instances' commitments by
+/// BLST MSMs, `prepare`, then the pairing check with BLST alone (never through the
+/// GPU dispatch).
+fn blst_verdict(
     params: &ParamsKZG<Bls12>,
     vk: &VerifyingKey<Fq, Scheme>,
     circuits: &[FidelityCircuit],
     nb_committed: usize,
     proof: &[u8],
-) -> bool {
+) -> Verdict {
     let blst_msm = |scalars: &[Fq], bases: &[G1Projective]| G1Projective::multi_exp(bases, scalars);
 
     let instances: Vec<[Vec<Fq>; 2]> = circuits.iter().map(|c| c.instances()).collect();
@@ -361,23 +358,7 @@ fn verifies_on_cpu(
     let plain: Vec<&[&[Fq]]> = plain.iter().map(|cols| cols.as_slice()).collect();
 
     let mut transcript = CircuitTranscript::<Blake2bState>::init_from_bytes(proof);
-    let Ok(guard) = prepare::<Fq, Scheme, _>(vk, &committed, &plain, &mut transcript) else {
-        return false;
-    };
-
-    let msm = |terms: Vec<(&Fq, &G1Projective)>| {
-        let (scalars, bases): (Vec<Fq>, Vec<G1Projective>) =
-            terms.into_iter().map(|(s, b)| (*s, *b)).unzip();
-        blst_msm(&scalars, &bases).to_affine()
-    };
-    let (left, right) = guard.split();
-    let (left, right) = (msm(left), msm(right));
-    let s_g2 = G2Prepared::from(params.s_g2().to_affine());
-    let n_g2 = G2Prepared::from((-params.g2()).to_affine());
-    Bls12::multi_miller_loop(&[(&left, &s_g2), (&right, &n_g2)])
-        .final_exponentiation()
-        .is_identity()
-        .into()
+    Verdict::of(params, prepare::<Fq, Scheme, _>(vk, &committed, &plain, &mut transcript))
 }
 
 fn fingerprint(bytes: &[u8]) -> String {
@@ -477,22 +458,15 @@ fn gpu_proof_fidelity() {
         }
     }
 
-    assert!(
-        verifies_on_cpu(&params, vk, &single, 1, &proof_single),
-        "proof single rejected"
-    );
-    assert!(
-        verifies_on_cpu(&params, vk, &multi, 0, &proof_multi),
-        "proof multi rejected"
-    );
-    // Negative control: the CPU check must reject a proof with one flipped bit
-    // (in the last commitment, the KZG opening proof).
-    let mut tampered = proof_single.clone();
-    let last = tampered.len() - 1;
-    tampered[last] ^= 1;
-    assert!(
-        !verifies_on_cpu(&params, vk, &single, 1, &tampered),
-        "tampered proof accepted"
+    assert_eq!(blst_verdict(&params, vk, &single, 1, &proof_single), Verdict::Accepted, "proof single");
+    assert_eq!(blst_verdict(&params, vk, &multi, 0, &proof_multi), Verdict::Accepted, "proof multi");
+    // Negative control: the proof with its first commitment moved to another valid
+    // point still parses, and the pairing must reject it.
+    let tampered = tamper_first_commitment(&proof_single);
+    assert_eq!(
+        blst_verdict(&params, vk, &single, 1, &tampered),
+        Verdict::Rejected,
+        "a proof with a moved commitment"
     );
 
     let proofs = [
