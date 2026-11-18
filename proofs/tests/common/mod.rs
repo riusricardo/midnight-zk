@@ -77,6 +77,23 @@ pub fn tamper_first_commitment(proof: &[u8]) -> Vec<u8> {
     tampered
 }
 
+/// BLST's KZG commitment to the Lagrange values `values`: a
+/// multi-exponentiation over the first `values.len()` Lagrange bases.
+pub fn blst_commit_lagrange(params: &ParamsKZG<Bls12>, values: &[Fq]) -> G1Projective {
+    G1Projective::multi_exp(&params.g_lagrange()[..values.len()], values)
+}
+
+/// BLST's KZG commitment to the polynomial with coefficients `coeffs`, of
+/// degree below 2^k: its values on the domain of 2^k points (root `omega`),
+/// from the curves crate's CPU FFT, over the Lagrange bases. KZG commits such
+/// a polynomial to p(s)G either way.
+pub fn blst_commit_coeffs(params: &ParamsKZG<Bls12>, coeffs: &[Fq], k: u32, omega: Fq) -> G1Projective {
+    let mut values = coeffs.to_vec();
+    values.resize(1 << k, Fq::from(0));
+    midnight_curves::fft::best_fft(&mut values, omega, k);
+    blst_commit_lagrange(params, &values)
+}
+
 #[cfg(feature = "gpu")]
 pub use gpu::*;
 
