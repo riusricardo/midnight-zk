@@ -53,7 +53,6 @@ pub use backend::{
     try_as_fq_slice, try_as_fq_slice_mut, try_as_g1_affine_slice,
     projective_to_curve,
     dispatch_ntt_inplace,
-    with_fq_slice_mut,
 };
 
 /// Compile-time wiring guard: this crate builds only if the backend line named

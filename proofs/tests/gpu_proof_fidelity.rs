@@ -344,7 +344,6 @@ fn gpu_proof_bytes_match_cpu() {
                 "MIDNIGHT_DEVICE=cpu must keep every MSM on the CPU"
             );
         }
-        midnight_bls12_381_cuda::config::reset_gpu_fallback_count();
         // Under strict mode the proof must run on the GPU: in forced GPU mode always, in
         // Auto mode when K reaches both crossovers (the routing rule, written out).
         let routed = mode == DeviceType::Gpu
