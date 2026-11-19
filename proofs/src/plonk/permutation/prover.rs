@@ -15,9 +15,6 @@ use crate::{
     utils::arithmetic::{eval_polynomial, parallelize},
 };
 
-#[cfg(feature = "gpu")]
-use crate::poly::batch_commit::batch_commit_refs;
-
 #[cfg_attr(feature = "bench-internal", derive(Clone))]
 #[derive(Debug)]
 pub(crate) struct CommittedSet<F: PrimeField> {
@@ -162,11 +159,11 @@ impl Argument {
         }
 
         crate::plonk::phase_trace::mark("perm_compute");
-        // Batch commit all permutation product polynomials (see poly::batch_commit)
+        // Commit to every permutation product polynomial, as a GPU batch with `gpu`
         #[cfg(feature = "gpu")]
         let commitments = {
             let poly_refs: Vec<_> = z_polys_lagrange.iter().collect();
-            batch_commit_refs::<F, CS>(params, &poly_refs)
+            CS::commit_lagrange_batch(params, &poly_refs)
         };
         
         #[cfg(not(feature = "gpu"))]

@@ -50,6 +50,17 @@ pub trait PolynomialCommitmentScheme<F: PrimeField>: Clone + Debug {
         poly: &Polynomial<F, LagrangeCoeff>,
     ) -> Self::Commitment;
 
+    /// Commits several polynomials expressed in Lagrange evaluations form: the
+    /// commitments `commit_lagrange` gives, in order. KZG over midnight
+    /// BLS12-381 commits them as a GPU batch.
+    #[cfg(feature = "gpu")]
+    fn commit_lagrange_batch(
+        params: &Self::Parameters,
+        polys: &[&Polynomial<F, LagrangeCoeff>],
+    ) -> Vec<Self::Commitment> {
+        polys.iter().map(|poly| Self::commit_lagrange(params, poly)).collect()
+    }
+
     /// Create a multi-opening proof at a set of [ProverQuery]'s.
     fn multi_open<T: Transcript>(
         params: &Self::Parameters,

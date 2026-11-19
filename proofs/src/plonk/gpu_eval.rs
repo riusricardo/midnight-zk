@@ -332,10 +332,7 @@ fn fq_scalar<F: PrimeField>(x: &F) -> Option<Fq> {
 
 /// `GraphEvaluator<F>` viewed as `GraphEvaluator<Fq>` (`F` is `Fq`, checked).
 fn as_fq_graph<F: PrimeField>(ev: &GraphEvaluator<F>) -> Option<&GraphEvaluator<Fq>> {
-    try_as_fq_slice(&ev.constants)?;
-    // SAFETY: the TypeId check above (try_as_fq_slice) guarantees F == Fq, so
-    // GraphEvaluator<F> and GraphEvaluator<Fq> are the same type.
-    Some(unsafe { &*(ev as *const GraphEvaluator<F> as *const GraphEvaluator<Fq>) })
+    (ev as &dyn std::any::Any).downcast_ref()
 }
 
 /// Where the program's auxiliary columns come from: `0..3` l0, l_last,

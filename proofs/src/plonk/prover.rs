@@ -18,8 +18,6 @@ use super::{
 };
 #[cfg(feature = "committed-instances")]
 use crate::poly::EvaluationDomain;
-#[cfg(feature = "gpu")]
-use crate::poly::batch_commit::commit_lagrange_batch_if_kzg_bls12;
 use crate::{
     circuit::Value,
     plonk::{traces::ProverTrace, trash},
@@ -30,40 +28,6 @@ use crate::{
     transcript::{Hashable, Sampleable, Transcript},
     utils::{arithmetic::eval_polynomial, rational::Rational},
 };
-
-/// Batch commits polynomial references when using KZG with BLS12-381 (midnight_curves),
-/// via [`commit_lagrange_batch_if_kzg_bls12`] (see there for how `CS` is identified).
-/// Returns Some(commits) if the batch path was used, None to fall back to sequential.
-#[cfg(feature = "gpu")]
-fn batch_commit_refs_if_kzg_bls12<F, CS>(
-    params: &CS::Parameters,
-    polys: &[&Polynomial<F, LagrangeCoeff>],
-) -> Option<Vec<CS::Commitment>>
-where
-    F: PrimeField + 'static,
-    CS: PolynomialCommitmentScheme<F>,
-{
-    // A single polynomial is committed on its own.
-    if polys.len() <= 1 {
-        return None;
-    }
-    commit_lagrange_batch_if_kzg_bls12::<F, CS>(params, polys)
-}
-
-/// Batch commits advice columns when using KZG with BLS12-381 (midnight_curves); see
-/// [`batch_commit_refs_if_kzg_bls12`].
-#[cfg(feature = "gpu")]
-fn batch_commit_if_kzg_bls12<F, CS>(
-    params: &CS::Parameters,
-    polys: &[Polynomial<F, LagrangeCoeff>],
-) -> Option<Vec<CS::Commitment>>
-where
-    F: PrimeField + 'static,
-    CS: PolynomialCommitmentScheme<F>,
-{
-    let poly_refs: Vec<&Polynomial<F, LagrangeCoeff>> = polys.iter().collect();
-    batch_commit_refs_if_kzg_bls12::<F, CS>(params, &poly_refs)
-}
 
 #[cfg(feature = "committed-instances")]
 /// Commit to a vector of raw instances. This function can be used to prepare
@@ -175,8 +139,7 @@ where
                     .collect::<Result<Vec<_>, _>>()?;
                 let values: Vec<&Polynomial<F, LagrangeCoeff>> =
                     permuted.iter().flat_map(|p| p.permuted_values()).collect();
-                let commitments = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &values)
-                    .unwrap_or_else(|| values.iter().map(|v| CS::commit_lagrange(params, v)).collect());
+                let commitments = CS::commit_lagrange_batch(params, &values);
                 super::phase_trace::mark("lookup_commit");
                 permuted
                     .into_iter()
@@ -258,33 +221,19 @@ where
             .flat_map(|products| products.iter().map(|p| &p.product_poly_lagrange))
             .collect();
         
-        // Try batch commit optimization
-        if let Some(all_commitments) = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &all_polys) {
-            // Distribute commitments back and finalize
-            let mut commitment_iter = all_commitments.into_iter();
-            lookup_products.into_iter()
-                .map(|products| {
-                    products.into_iter()
-                        .map(|product| {
-                            let commitment = commitment_iter.next().unwrap();
-                            product.finalize::<CS, T>(pk, commitment, transcript)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            // Fall back to sequential commits
-            lookup_products.into_iter()
-                .map(|products| {
-                    products.into_iter()
-                        .map(|product| {
-                            let commitment = CS::commit_lagrange(params, &product.product_poly_lagrange);
-                            product.finalize::<CS, T>(pk, commitment, transcript)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
+        let all_commitments = CS::commit_lagrange_batch(params, &all_polys);
+        // Distribute commitments back and finalize
+        let mut commitment_iter = all_commitments.into_iter();
+        lookup_products.into_iter()
+            .map(|products| {
+                products.into_iter()
+                    .map(|product| {
+                        let commitment = commitment_iter.next().unwrap();
+                        product.finalize::<CS, T>(pk, commitment, transcript)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?
     };
     
     #[cfg(not(feature = "gpu"))]
@@ -338,33 +287,19 @@ where
             .flat_map(|trashes| trashes.iter().map(|t| &t.trash_poly_lagrange))
             .collect();
         
-        // Try batch commit optimization
-        if let Some(all_commitments) = batch_commit_refs_if_kzg_bls12::<F, CS>(params, &all_polys) {
-            // Distribute commitments back and finalize
-            let mut commitment_iter = all_commitments.into_iter();
-            trash_computed.into_iter()
-                .map(|trashes| {
-                    trashes.into_iter()
-                        .map(|trash| {
-                            let commitment = commitment_iter.next().unwrap();
-                            trash.finalize::<CS, T>(domain, commitment, transcript)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        } else {
-            // Fall back to sequential commits
-            trash_computed.into_iter()
-                .map(|trashes| {
-                    trashes.into_iter()
-                        .map(|trash| {
-                            let commitment = CS::commit_lagrange(params, &trash.trash_poly_lagrange);
-                            trash.finalize::<CS, T>(domain, commitment, transcript)
-                        })
-                        .collect::<Result<Vec<_>, _>>()
-                })
-                .collect::<Result<Vec<_>, _>>()?
-        }
+        let all_commitments = CS::commit_lagrange_batch(params, &all_polys);
+        // Distribute commitments back and finalize
+        let mut commitment_iter = all_commitments.into_iter();
+        trash_computed.into_iter()
+            .map(|trashes| {
+                trashes.into_iter()
+                    .map(|trash| {
+                        let commitment = commitment_iter.next().unwrap();
+                        trash.finalize::<CS, T>(domain, commitment, transcript)
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?
     };
     
     #[cfg(not(feature = "gpu"))]
@@ -765,18 +700,12 @@ where
             }
             super::phase_trace::mark("advice_invert");
 
-            // Batch commit to advice columns (see poly::batch_commit)
+            // Commit to the advice columns, as a GPU batch with `gpu`
             let advice_commitments: Vec<_> = {
                 #[cfg(feature = "gpu")]
                 {
-                    // Try batch GPU commit optimization
-                    if let Some(batch_commits) = 
-                        batch_commit_if_kzg_bls12::<F, CS>(params, &advice_values)
-                    {
-                        batch_commits
-                    } else {
-                        advice_values.iter().map(|poly| CS::commit_lagrange(params, poly)).collect()
-                    }
+                    let polys: Vec<&Polynomial<F, LagrangeCoeff>> = advice_values.iter().collect();
+                    CS::commit_lagrange_batch(params, &polys)
                 }
                 #[cfg(not(feature = "gpu"))]
                 {

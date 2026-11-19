@@ -78,7 +78,6 @@ pub use backend::{
 
     // Threshold functions (re-exported as-is for GPU code paths)
     should_use_gpu as backend_should_use_gpu,
-    should_use_gpu_batch,
     min_gpu_size,
     min_ntt_gpu_size,
 
@@ -104,7 +103,7 @@ pub use backend::{
 
     // Type-safe dispatch helpers (the key abstraction)
     is_fq, is_g1_affine,
-    try_as_fq_slice, try_as_fq_slice_mut,
+    try_as_fq_slice, try_as_fq_slice_mut, try_as_g1_affine_slice,
     projective_to_curve,
     dispatch_ntt_inplace,
     with_fq_slice_mut,
@@ -124,21 +123,6 @@ fn _backend_line_is_this_forks_curves(
     (f, a, p)
 }
 
-/// View a generic `&[C]` as this fork's `&[midnight_curves::G1Affine]` iff `C`
-/// is that type (an exact `TypeId` check through the backend line's
-/// `is_g1_affine`, so a wrong-line type is reported, not reinterpreted).
-#[cfg(feature = "gpu")]
-#[inline]
-pub fn try_as_g1_affine_slice<C: group::prime::PrimeCurveAffine + 'static>(
-    slice: &[C],
-) -> Option<&[G1Affine]> {
-    if is_g1_affine::<C>() {
-        // SAFETY: the TypeId check guarantees C == G1Affine, the same type.
-        Some(unsafe { &*(slice as *const [C] as *const [G1Affine]) })
-    } else {
-        None
-    }
-}
 
 // Re-export ICICLE runtime types needed by params.rs
 #[cfg(feature = "gpu")]

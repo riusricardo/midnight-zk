@@ -6,8 +6,7 @@
 #![deny(rustdoc::broken_intra_doc_links)]
 #![deny(missing_debug_implementations)]
 #![deny(missing_docs)]
-#![cfg_attr(not(feature = "gpu"), deny(unsafe_code))]
-#![cfg_attr(feature = "gpu", allow(unsafe_code))]
+#![deny(unsafe_code)]
 
 pub mod circuit;
 pub mod plonk;
