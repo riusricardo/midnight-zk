@@ -5,7 +5,7 @@
 //! one line per proof to stderr:
 //!
 //! ```text
-//! [PHASES] k=15 total=1890.2ms instances=0.4ms advice_synthesize=180.2ms ...
+//! [PHASES] k=<k> total=<ms> instances=<ms> advice_synthesize=<ms> ...
 //! ```
 //!
 //! Each phase is the time since the previous mark, so the phases add up to the

@@ -46,7 +46,7 @@ pub(crate) fn is_gpu_engine<E: Engine>() -> bool {
 /// - `g_gpu`: Coefficient form bases for `commit()`
 /// - `g_lagrange_gpu`: Lagrange form bases for `commit_lagrange()`
 /// 
-/// Bases are uploaded lazily on first use via `get_or_upload_gpu_bases()`.
+/// Bases are uploaded lazily on first use via `try_get_or_upload_gpu_bases()`.
 /// This one-time upload removes the per-MSM conversion and host-to-device transfer.
 /// 
 /// The caches use `Arc<OnceCell<...>>` for thread-safe lazy initialization
@@ -60,13 +60,13 @@ pub struct ParamsKZG<E: Engine> {
     pub(crate) s_g2: E::G2,
     
     /// Cached GPU bases for coefficient form commitments.
-    /// Initialized lazily via `get_or_upload_gpu_bases()`.
+    /// Initialized lazily via `try_get_or_upload_gpu_bases()`.
     /// Uses Arc to survive Clone while sharing the same GPU memory.
     #[cfg(feature = "gpu")]
     pub(crate) g_gpu: Arc<OnceCell<PrecomputedBases>>,
     
     /// Cached GPU bases for Lagrange form commitments.
-    /// Initialized lazily via `get_or_upload_gpu_lagrange_bases()`.
+    /// Initialized lazily via `try_get_or_upload_gpu_lagrange_bases()`.
     #[cfg(feature = "gpu")]
     pub(crate) g_lagrange_gpu: Arc<OnceCell<PrecomputedBases>>,
 }
@@ -198,24 +198,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         }
     }
 
-    /// Get or upload GPU bases for coefficient form (lazy initialization)
-    /// 
-    /// Following ingonyama-zk pattern: bases are uploaded ONCE and cached in GPU memory,
-    /// eliminating per-MSM conversion and upload overhead.
-    /// 
-    /// # Montgomery Form Optimization
-    /// 
-    /// Bases are uploaded in Montgomery form (the internal representation of midnight-curves).
-    /// This eliminates per-MSM D2D copy + Montgomery conversion in the CUDA backend.
-    /// When using these bases, set `cfg.are_bases_montgomery_form = true`.
-    #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_bases(&self) -> &PrecomputedBases {
-        self.try_get_or_upload_gpu_bases()
-            .expect("Failed to upload GPU bases")
-    }
-
-    /// Fallible variant of [`Self::get_or_upload_gpu_bases`]: returns an error (for CPU
-    /// fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
+    /// The coefficient-form bases on the GPU, uploaded on first use and kept:
+    /// in Montgomery form (midnight-curves' representation), so an MSM needs no
+    /// per-call conversion. An error (the caller then commits on the CPU) when
+    /// the GPU cannot be used or the upload fails (fix C5).
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
         // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).
@@ -249,18 +235,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         })
     }
     
-    /// Get or upload GPU bases for Lagrange form (lazy initialization)
-    /// 
-    /// Same as `get_or_upload_gpu_bases()` but for Lagrange form bases.
-    /// Bases are stored in Montgomery form for zero-copy MSM execution.
-    #[cfg(feature = "gpu")]
-    pub fn get_or_upload_gpu_lagrange_bases(&self) -> &PrecomputedBases {
-        self.try_get_or_upload_gpu_lagrange_bases()
-            .expect("Failed to upload GPU Lagrange bases")
-    }
-
-    /// Fallible variant of [`Self::get_or_upload_gpu_lagrange_bases`]: returns an error
-    /// (for CPU fallback) instead of panicking when the GPU/backend is unavailable (fix C5).
+    /// The Lagrange-form bases on the GPU, as [`Self::try_get_or_upload_gpu_bases`].
     #[cfg(feature = "gpu")]
     pub fn try_get_or_upload_gpu_lagrange_bases(&self) -> Result<&PrecomputedBases, crate::poly::Error> {
         // Only midnight BLS12-381 bases can be uploaded (see `is_gpu_engine`).

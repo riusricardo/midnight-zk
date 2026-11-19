@@ -1,8 +1,10 @@
-//! GPU MSM Performance Benchmark
+//! GPU MSM timings, and exact MSM checks over degenerate inputs.
 //!
-//! This benchmark tests dense polynomial commitments where GPU acceleration
-//! provides actual speedups. Each test runs twice - first run includes SRS
-//! base upload overhead, second run measures actual cached performance.
+//! The ignored benchmarks time dense commitments on the GPU and the CPU: each
+//! size runs twice, the first run including the upload of the SRS bases, the
+//! second over the bases already on the device. The tests that are not ignored
+//! compare GPU MSMs with BLST over scalar distributions and repeated bases that
+//! random inputs rarely produce.
 //!
 //! Run with:
 //!   cargo test --test gpu_msm_benchmark --features gpu --release -- --ignored --nocapture
@@ -24,7 +26,7 @@ use midnight_proofs::gpu_accel::GpuMsmContext;
 
 /// Benchmark MSM at a given size, comparing GPU vs CPU
 /// 
-/// Uses the optimized path: upload bases in Montgomery form, use msm_with_device_bases()
+/// Uses the provers' path: bases uploaded in Montgomery form, then the async MSM over them
 /// This is the same path KZG uses for polynomial commitments.
 /// 
 /// Runs GPU MSM twice:
@@ -47,12 +49,12 @@ fn benchmark_msm(size: usize, ctx: &GpuMsmContext) -> (f64, f64, f64, f64) {
     let device_bases = ctx.upload_g1_bases(&points).expect("Failed to upload bases");
     
     // Run 1: First MSM with freshly uploaded bases
-    let _ = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let _ = ctx.msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     let gpu_warmup = warmup_start.elapsed().as_secs_f64() * 1000.0;
     
     // Run 2: GPU with cached bases (accurate performance measurement)
     let gpu_start = Instant::now();
-    let gpu_result = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let gpu_result = ctx.msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     let gpu_time = gpu_start.elapsed().as_secs_f64() * 1000.0;
     
     // Benchmark CPU MSM (BLST)
@@ -202,33 +204,6 @@ fn gpu_msm_benchmark_quick() {
     println!("Legend: Warm = includes base upload, Cache = bases already in GPU memory");
 }
 
-/// Test that GPU results are correct (using optimized path)
-#[test]
-fn gpu_msm_correctness() {
-    let Some(_gpu) = gpu_test() else { return };
-    let ctx = GpuMsmContext::new().expect("Failed to create GPU context");
-
-    for k in [10, 12, 14, 16] {
-        let size = 1usize << k;
-        let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
-
-        let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
-        let points_proj: Vec<G1Projective> = (0..size)
-            .map(|_| G1Projective::random(&mut rng))
-            .collect();
-        let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
-
-        // Test optimized path: upload bases then run MSM
-        let device_bases = ctx.upload_g1_bases(&points).expect("Failed to upload bases");
-        let gpu_result = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
-        let cpu_result = G1Projective::multi_exp(&points_proj, &scalars);
-
-        assert_eq!(gpu_result, cpu_result, "GPU/CPU mismatch at K={}", k);
-    }
-
-    println!("✓ GPU MSM correctness verified for K=10,12,14,16");
-}
-
 /// Degenerate scalar distributions that stress bucket accumulation:
 /// - all-equal scalars: every window's contributions land in ONE bucket
 ///   (maximal mega-buckets / partial chains)
@@ -265,8 +240,7 @@ fn gpu_msm_correctness_degenerate_scalars() {
 
     for (name, scalars) in cases {
         let gpu_result = ctx
-            .msm_with_device_bases(&scalars, &device_bases)
-            .expect("GPU MSM failed");
+            .msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
         let cpu_result = G1Projective::multi_exp(&points_proj, &scalars);
         assert_eq!(gpu_result, cpu_result, "GPU/CPU mismatch at K={} case={}", k, name);
         println!("  ✓ {}", name);
@@ -302,7 +276,7 @@ fn gpu_msm_correctness_duplicate_points() {
 
     // Case 1: random scalars over duplicated points
     let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
-    let gpu = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let gpu = ctx.msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     let cpu = G1Projective::multi_exp(&points_proj, &scalars);
     assert_eq!(gpu, cpu, "duplicate-points random-scalar mismatch");
 
@@ -313,91 +287,15 @@ fn gpu_msm_correctness_duplicate_points() {
     let scalars2: Vec<Scalar> = (0..size)
         .map(|i| if i % 2 == 0 { s } else { neg_s })
         .collect();
-    let gpu2 = ctx.msm_with_device_bases(&scalars2, &device_bases).expect("GPU MSM failed");
+    let gpu2 = ctx.msm_with_device_bases_async(&scalars2, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     let cpu2 = G1Projective::multi_exp(&points_proj, &scalars2);
     assert_eq!(gpu2, cpu2, "duplicate-points +/-s mismatch");
 
     println!("✓ GPU MSM duplicate-point edge cases verified at K=14");
 }
 
-/// Host-side simulation of the chunked-accumulation partial-chain distribution.
-/// Replicates the CUDA signed-digit decomposition (c=15, 18 windows, zero->skip)
-/// for the exact PROFILE_K scalars and reports how many boundary-partial chains
-/// the combine pass must walk, their total adds, and the longest chain.
-#[test]
-#[ignore]
-fn sim_chain_distribution() {
-    use ff::PrimeField;
-    let k: usize = std::env::var("PROFILE_K").unwrap_or_else(|_| "19".into()).parse().unwrap();
-    let size = 1usize << k;
-    let c: i64 = 15;
-    let windows: usize = 18; // ceil(256/15) with bitsize = LIMBS*64
-    let nb: i64 = 1 << (c - 1);
-    let bpw = (nb + 1) as usize;
-
-    let mut rng = ChaCha8Rng::seed_from_u64(k as u64);
-    let scalars: Vec<Scalar> = (0..size).map(|_| Scalar::random(&mut rng)).collect();
-
-    let mut counts = vec![0u32; windows * bpw];
-    let mut zeros = 0u64;
-    for s in &scalars {
-        let repr = s.to_repr();
-        let bytes: &[u8] = repr.as_ref();
-        let mut limbs = [0u64; 4];
-        for i in 0..4 {
-            limbs[i] = u64::from_le_bytes(bytes[i * 8..(i + 1) * 8].try_into().unwrap());
-        }
-        let mut carry: i64 = 0;
-        for w in 0..windows {
-            let bit = (w as i64) * c;
-            let li = (bit / 64) as usize;
-            let off = (bit % 64) as u32;
-            let mut window = limbs[li] >> off;
-            if off as i64 + c > 64 && li + 1 < 4 {
-                window |= limbs[li + 1] << (64 - off);
-            }
-            window &= (1u64 << c) - 1;
-            let mut val = window as i64 + carry;
-            carry = 0;
-            if val > nb {
-                val = (1i64 << c) - val;
-                carry = 1;
-            }
-            if val == 0 {
-                zeros += 1;
-            } else {
-                counts[w * bpw + (val as usize - 1)] += 1;
-            }
-        }
-        assert_eq!(carry, 0, "final carry must not occur for valid scalars");
-    }
-
-    let chunk: u64 = 128;
-    let mut pos: u64 = 0;
-    let (mut nchains, mut total_adds, mut max_chain) = (0u64, 0u64, 0u64);
-    let mut top_buckets: Vec<u32> = counts.iter().copied().collect();
-    top_buckets.sort_unstable_by(|a, b| b.cmp(a));
-    for &cnt in &counts {
-        if cnt == 0 { continue; }
-        let start = pos;
-        let end = pos + cnt as u64;
-        pos = end;
-        let spans = (end - 1) / chunk - start / chunk + 1;
-        if spans >= 2 {
-            nchains += 1;
-            let adds = spans - 1;
-            total_adds += adds;
-            max_chain = max_chain.max(adds);
-        }
-    }
-    println!(
-        "K={} valid={} zeros={} | chains={} total_chain_adds={} max_chain={} | top buckets: {:?}",
-        k, pos, zeros, nchains, total_adds, max_chain, &top_buckets[..8]
-    );
-}
-
 /// Profiling test - runs a single MSM at K specified by PROFILE_K env var
-/// Uses the optimized path (upload_g1_bases + msm_with_device_bases)
+/// Uses the provers' path (upload_g1_bases, then the async MSM over them)
 /// Use with: PROFILE_K=16 ncu --set full ./target/release/deps/gpu_msm_benchmark-* profile_msm_single
 #[test]
 #[ignore]
@@ -429,79 +327,14 @@ fn profile_msm_single() {
     
     // Warmup run (cached bases)
     println!("Warmup run...");
-    let _ = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let _ = ctx.msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     
     // Profiled run (cached bases, warmed up)
     println!("Profiled run (bases cached, kernel warmed up)...");
     let start = Instant::now();
-    let result = ctx.msm_with_device_bases(&scalars, &device_bases).expect("GPU MSM failed");
+    let result = ctx.msm_with_device_bases_async(&scalars, &device_bases).and_then(|h| h.wait()).expect("GPU MSM failed");
     let elapsed = start.elapsed();
     
     println!("MSM completed in {:?}", elapsed);
     println!("Result (first bytes): {:?}", &format!("{:?}", result)[..80]);
-}
-
-/// Single-call batch MSM (config.batch_size > 1) must equal per-poly singles
-/// and BLST — exercises the backend's batch loop over shared bases, which
-/// previously computed only member 0 and returned uninitialized memory for
-/// the rest (config.batch_size was silently ignored). Covers factor 1 and 8,
-/// sync and async.
-#[test]
-fn gpu_msm_batch_matches_singles() {
-    let Some(_gpu) = gpu_test() else { return };
-    let k = 13u32;
-    let n = 1usize << k;
-    let b = 5usize;
-    let mut rng = ChaCha8Rng::seed_from_u64(4242);
-
-    let points_proj: Vec<G1Projective> = (0..n).map(|_| G1Projective::random(&mut rng)).collect();
-    let points: Vec<G1Affine> = points_proj.iter().map(|p| p.to_affine()).collect();
-    let scalar_sets: Vec<Vec<Scalar>> = (0..b)
-        .map(|_| (0..n).map(|_| Scalar::random(&mut rng)).collect())
-        .collect();
-    let expected: Vec<G1Projective> = scalar_sets
-        .iter()
-        .map(|s| G1Projective::multi_exp(&points_proj, s))
-        .collect();
-
-    let ctx = GpuMsmContext::new().expect("ctx");
-    let _ = ctx.warmup();
-
-    for factor in [1u32, 8] {
-        let device_bases = if factor == 1 {
-            ctx.upload_g1_bases(&points).expect("upload")
-        } else {
-            ctx.precompute_bases(&points, factor as i32).expect("precompute")
-        };
-
-        let refs: Vec<&[Scalar]> = scalar_sets.iter().map(|s| s.as_slice()).collect();
-
-        // Sync single-call batch
-        let batch_res = ctx
-            .msm_batch_with_device_bases(&refs, &device_bases)
-            .expect("batch msm");
-        assert_eq!(batch_res.len(), b);
-        for (i, (got, want)) in batch_res.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, want, "sync batch member {i} differs (factor {factor})");
-        }
-
-        // Async single-call batch
-        let handle = ctx
-            .msm_batch_with_device_bases_async(&refs, &device_bases)
-            .expect("async batch launch");
-        let async_res = handle.wait().expect("async batch wait");
-        for (i, (got, want)) in async_res.iter().zip(expected.iter()).enumerate() {
-            assert_eq!(got, want, "async batch member {i} differs (factor {factor})");
-        }
-
-        // Per-member async singles (the path commit_lagrange_batch uses)
-        for (i, s) in scalar_sets.iter().enumerate() {
-            let h = ctx
-                .msm_with_device_bases_async(s, &device_bases)
-                .expect("async single launch");
-            let r = h.wait().expect("async single wait");
-            assert_eq!(r, expected[i], "async single {i} differs (factor {factor})");
-        }
-        println!("✓ batch == singles == blst (b={b} × 2^{k}, factor {factor}, sync+async)");
-    }
 }

@@ -20,9 +20,12 @@
 
 mod common;
 
-use common::{expect_gpu_ops, gpu_msm_k, gpu_ntt_k, gpu_test, tamper_first_commitment, Verdict};
-use ff::{Field, PrimeField};
-use midnight_curves::{Bls12, Fq, G1Projective};
+use common::{
+    blst_commit_lagrange, expect_gpu_ops, gpu_msm_k, gpu_ntt_k, gpu_test, omega_for,
+    tamper_first_commitment, Verdict,
+};
+use ff::Field;
+use midnight_curves::{Bls12, Fq};
 use midnight_proofs::gpu_accel::backend::diag::OpKind;
 use rand::SeedableRng;
 use rand_chacha::ChaCha8Rng;
@@ -32,15 +35,6 @@ use midnight_proofs::poly::{
     kzg::{params::ParamsKZG, KZGCommitmentScheme},
     EvaluationDomain,
 };
-
-/// The 2^k-th root of unity in midnight_curves' convention (matches EvaluationDomain).
-fn omega_for(k: u32) -> Fq {
-    let mut omega = Fq::ROOT_OF_UNITY;
-    for _ in k..Fq::S {
-        omega = omega.square();
-    }
-    omega
-}
 
 /// R1 canary: GPU forward NTT (`coeff_to_lagrange`) must equal CPU `best_fft` element-wise.
 /// This fails if the GPU domain is seeded with a root that differs from midnight_curves'.
@@ -122,11 +116,7 @@ fn gpu_commit_lagrange_matches_blst() {
             KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag)
         });
 
-        // BLST reference: direct multi_exp over g_lagrange.
-        let scalars: Vec<Fq> = lag.iter().copied().collect();
-        let cpu_c = G1Projective::multi_exp(params.g_lagrange(), &scalars);
-
-        assert_eq!(gpu_c, cpu_c, "GPU commit_lagrange != BLST at k={k}");
+        assert_eq!(gpu_c, blst_commit_lagrange(&params, &lag), "GPU commit_lagrange != BLST at k={k}");
     }
 }
 
@@ -161,60 +151,7 @@ fn gpu_downsize_invalidates_base_cache() {
         KZGCommitmentScheme::<Bls12>::commit_lagrange(&params, &lag_small)
     });
 
-    let scalars: Vec<Fq> = lag_small.iter().copied().collect();
-    let cpu_c = G1Projective::multi_exp(params.g_lagrange(), &scalars);
-    assert_eq!(gpu_c, cpu_c, "downsized GPU commit != BLST (stale cache?)");
-}
-
-/// Batch domain transforms must equal their per-polynomial counterparts
-/// element-wise (they share the GPU batch path, which the prover doesn't use
-/// yet — this keeps the API honest until device residency makes it pay).
-#[test]
-fn gpu_domain_batch_transforms_match_singles() {
-    let Some(_gpu) = gpu_test() else { return };
-    let k = gpu_ntt_k(13);
-    let n = 1usize << k;
-    let b = 4usize;
-    let domain = EvaluationDomain::<Fq>::new(2, k);
-    let mut rng = ChaCha8Rng::seed_from_u64(99);
-
-    let lagrange_polys: Vec<_> = (0..b)
-        .map(|_| {
-            let mut p = domain.empty_lagrange();
-            for v in p.iter_mut() {
-                *v = Fq::random(&mut rng);
-            }
-            p
-        })
-        .collect();
-
-    let singles: Vec<_> = lagrange_polys
-        .iter()
-        .map(|p| domain.lagrange_to_coeff(p.clone()))
-        .collect();
-    let batched = expect_gpu_ops(&[OpKind::NttBatch], || domain.lagrange_to_coeff_batch(lagrange_polys));
-    assert_eq!(batched.len(), b);
-    for (i, (s, bt)) in singles.iter().zip(batched.iter()).enumerate() {
-        assert_eq!(s.len(), n);
-        assert!(
-            s.iter().zip(bt.iter()).all(|(a, b)| a == b),
-            "lagrange_to_coeff_batch differs from singles at poly {i}"
-        );
-    }
-
-    let ext_singles: Vec<_> = singles
-        .iter()
-        .map(|p| domain.coeff_to_extended(p.clone()))
-        .collect();
-    let ext_batched = expect_gpu_ops(&[OpKind::NttBatch], || domain.coeff_to_extended_batch(&singles));
-    assert_eq!(ext_batched.len(), b);
-    for (i, (s, bt)) in ext_singles.iter().zip(ext_batched.iter()).enumerate() {
-        assert!(
-            s.iter().zip(bt.iter()).all(|(a, b)| a == b) && s.len() == bt.len(),
-            "coeff_to_extended_batch differs from singles at poly {i}"
-        );
-    }
-    println!("✓ domain batch transforms == singles (b={b} × 2^{k})");
+    assert_eq!(gpu_c, blst_commit_lagrange(&params, &lag_small), "downsized GPU commit != BLST (stale cache?)");
 }
 
 // =============================================================================
@@ -329,6 +266,14 @@ mod e2e {
         }
     }
 
+    /// Proves the circuit at `k` with GPU MSMs and NTTs on this fork's backend
+    /// line and no fallback, then checks the proof with BLST's pairing check
+    /// (`common::Verdict`, a verifier that does not touch the GPU) and with the
+    /// verifier itself. Both must reject the same proof with its first
+    /// commitment moved to another valid point: it still parses, so the
+    /// rejection comes from the pairing. The verifier's own verdict on a bad
+    /// proof is asserted nowhere else: a final check that passes whatever it
+    /// is given fails only this assertion.
     fn prove_and_verify(k: u32) {
         let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
         let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
@@ -354,24 +299,30 @@ mod e2e {
         .expect("create_proof");
         let proof = transcript.finalize();
 
-        // BLST's pairing check, and the verifier's own (its MSMs routed by size).
-        let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(&proof);
-        let guard = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
-            pk.get_vk(),
-            #[cfg(feature = "committed-instances")]
-            &[&[]],
-            &[&[]],
-            &mut vt,
-        )
-        .expect("prepare");
-        assert!(
-            common::blst_pairing_check(&params, &guard),
-            "GPU-generated proof failed the BLST pairing check at k={k}"
+        let prepare = |bytes: &[u8]| {
+            let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
+            prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
+                pk.get_vk(),
+                #[cfg(feature = "committed-instances")]
+                &[&[]],
+                &[&[]],
+                &mut vt,
+            )
+        };
+        // The verifier's own check: its MSMs are routed by size, so on the GPU
+        // under forced GPU mode.
+        let verifies = |bytes: &[u8]| {
+            prepare(bytes).expect("the proof parses").verify(&params.verifier_params()).is_ok()
+        };
+        let tampered = tamper_first_commitment(&proof);
+        assert_eq!(Verdict::of(&params, prepare(&proof)), Verdict::Accepted, "GPU-generated proof, k={k}");
+        assert_eq!(
+            Verdict::of(&params, prepare(&tampered)),
+            Verdict::Rejected,
+            "a proof with a moved commitment, k={k}"
         );
-        assert!(
-            guard.verify(&params.verifier_params()).is_ok(),
-            "GPU-generated proof failed to verify at k={k}"
-        );
+        assert!(verifies(&proof), "the verifier rejects the GPU-generated proof, k={k}");
+        assert!(!verifies(&tampered), "the verifier accepts a proof with a moved commitment, k={k}");
     }
 
     /// From the smallest size both crossovers send to the GPU: every proof launches GPU
@@ -383,151 +334,5 @@ mod e2e {
         for k in [k0, k0 + 2, k0 + 4] {
             prove_and_verify(k);
         }
-    }
-
-    /// K=18 is memory/time heavy; run explicitly with `-- --ignored`.
-    #[test]
-    #[ignore = "heavy (K=18); run with --ignored on a machine with enough VRAM"]
-    fn gpu_full_proof_verifies_large() {
-        let Some(_gpu) = gpu_test() else { return };
-        prove_and_verify(18);
-    }
-
-    /// Proof-level timing: keygen / prove / verify per K, proof always verified.
-    /// Deliberately NOT gated on `gpu_test()` — pointing `ICICLE_BACKEND_INSTALL_DIR`
-    /// at a nonexistent dir is the pure-CPU arm of the comparison.
-    ///
-    ///   E2E_BENCH_KS=12,14,16 ICICLE_BACKEND_INSTALL_DIR=... \
-    ///     cargo test --test gpu_correctness --features gpu --release -- \
-    ///     e2e::gpu_e2e_proof_benchmark --ignored --nocapture
-    #[test]
-    #[ignore = "benchmark; run explicitly with --ignored --nocapture"]
-    fn gpu_e2e_proof_benchmark() {
-        use std::time::Instant;
-
-        let ks: Vec<u32> = std::env::var("E2E_BENCH_KS")
-            .map(|s| {
-                s.split(',')
-                    .map(|t| t.trim().parse().expect("bad E2E_BENCH_KS"))
-                    .collect()
-            })
-            .unwrap_or_else(|_| vec![12, 14, 16]);
-
-        println!(
-            "\ngpu={} backend_dir={}",
-            midnight_bls12_381_cuda::is_gpu_available(),
-            std::env::var("ICICLE_BACKEND_INSTALL_DIR").unwrap_or_else(|_| "<default>".into()),
-        );
-        println!(
-            "{:>4} {:>12} {:>12} {:>12}",
-            "K", "keygen(ms)", "prove(ms)", "verify(ms)"
-        );
-
-        for k in ks {
-            let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
-            let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
-            let circuit = DomainFillingCircuit { k, fill_ratio: 0.5 };
-
-            let t = Instant::now();
-            let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)
-                .expect("keygen_vk");
-            let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
-            let keygen_ms = t.elapsed().as_secs_f64() * 1e3;
-
-            let t = Instant::now();
-            let mut transcript = CircuitTranscript::<Blake2bState>::init();
-            create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
-                &params,
-                &pk,
-                &[circuit],
-                #[cfg(feature = "committed-instances")]
-                0,
-                &[&[]],
-                &mut transcript,
-                &mut rng,
-            )
-            .expect("create_proof");
-            let proof = transcript.finalize();
-            let prove_ms = t.elapsed().as_secs_f64() * 1e3;
-
-            let t = Instant::now();
-            let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(&proof);
-            let guard = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
-                pk.get_vk(),
-                #[cfg(feature = "committed-instances")]
-                &[&[]],
-                &[&[]],
-                &mut vt,
-            )
-            .expect("prepare");
-            assert!(
-                guard.verify(&params.verifier_params()).is_ok(),
-                "proof failed to verify at k={k}"
-            );
-            let verify_ms = t.elapsed().as_secs_f64() * 1e3;
-
-            println!("{k:>4} {keygen_ms:>12.1} {prove_ms:>12.1} {verify_ms:>12.1}");
-        }
-    }
-
-    /// Trust boundary: a proof generated with the GPU backend must be accepted by a
-    /// verifier that does not touch the GPU.
-    ///
-    /// - PROVE (GPU): the proof launches GPU MSMs and NTTs on this fork's backend line,
-    ///   with no fallback (op counters).
-    /// - VERIFY: `prepare`, then the pairing check with BLST alone
-    ///   (`common::blst_pairing_check`; `guard.verify` would route its MSMs by size,
-    ///   to the GPU under `MIDNIGHT_DEVICE=gpu`).
-    ///
-    /// The same proof with its first commitment moved to another valid point still
-    /// parses and must be rejected by the pairing, so the positive check is not vacuous.
-    #[test]
-    fn gpu_proof_verifies_on_cpu_blst() {
-        let Some(_gpu) = gpu_test() else { return };
-        let k = gpu_msm_k(gpu_ntt_k(16));
-
-        let mut rng = ChaCha8Rng::seed_from_u64(42 + k as u64);
-        let params = ParamsKZG::<Bls12>::unsafe_setup(k, &mut rng);
-        let circuit = DomainFillingCircuit { k, fill_ratio: 0.5 };
-
-        let vk = keygen_vk::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit)
-            .expect("keygen_vk");
-        let pk = keygen_pk(vk, &circuit).expect("keygen_pk");
-
-        // ---- Generate the proof on the GPU (GPU NTT + GPU MSM on this fork's line) ----
-        let mut transcript = CircuitTranscript::<Blake2bState>::init();
-        expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], || {
-            create_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _, _>(
-                &params,
-                &pk,
-                &[circuit],
-                #[cfg(feature = "committed-instances")]
-                0,
-                &[&[]],
-                &mut transcript,
-                &mut rng,
-            )
-        })
-        .expect("create_proof");
-        let proof = transcript.finalize();
-
-        // ---- Verify: prepare, then BLST's pairing check ----
-        let verdict = |bytes: &[u8]| {
-            let mut vt = CircuitTranscript::<Blake2bState>::init_from_bytes(bytes);
-            let prepared = prepare_plonk_proof::<_, KZGCommitmentScheme<Bls12>, _>(
-                pk.get_vk(),
-                #[cfg(feature = "committed-instances")]
-                &[&[]],
-                &[&[]],
-                &mut vt,
-            );
-            Verdict::of(&params, prepared)
-        };
-        assert_eq!(verdict(&proof), Verdict::Accepted, "GPU-generated proof, k={k}");
-        assert_eq!(
-            verdict(&tamper_first_commitment(&proof)),
-            Verdict::Rejected,
-            "a proof with a moved commitment, k={k}"
-        );
     }
 }

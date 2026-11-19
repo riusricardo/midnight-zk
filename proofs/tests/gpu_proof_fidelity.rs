@@ -57,7 +57,6 @@
 mod common;
 
 use blake2b_simd::State as Blake2bState;
-use ff::Field;
 use midnight_curves::{Bls12, Fq, G1Projective};
 use midnight_proofs::{
     circuit::{AssignedCell, Layouter, SimpleFloorPlanner, Value},
@@ -324,13 +323,6 @@ impl Circuit<Fq> for FidelityCircuit {
     }
 }
 
-/// Commitment to a committed-instance column, computed with a CPU (BLST) MSM.
-fn cpu_instance_commitment(params: &ParamsKZG<Bls12>, values: &[Fq]) -> G1Projective {
-    let mut scalars = vec![Fq::ZERO; 1 << K];
-    scalars[..values.len()].copy_from_slice(values);
-    G1Projective::multi_exp(params.g_lagrange(), &scalars)
-}
-
 #[test]
 fn gpu_proof_bytes_match_cpu() {
     let device = std::env::var("MIDNIGHT_DEVICE").unwrap_or_else(|_| "auto".into());
@@ -421,7 +413,7 @@ fn gpu_proof_bytes_match_cpu() {
             columns
                 .iter()
                 .map(|values| {
-                    let cpu = cpu_instance_commitment(&params, values);
+                    let cpu = common::blst_commit_lagrange(&params, values);
                     let domain = pk.get_vk().get_domain();
                     let helper = commit_to_instances::<Fq, Scheme>(&params, domain, values);
                     assert_eq!(cpu, helper, "commit_to_instances differs from the CPU MSM");

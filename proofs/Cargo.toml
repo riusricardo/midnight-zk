@@ -54,10 +54,6 @@ num-bigint = { workspace = true }
 # Both forks must name it identically: another ref is another Cargo source,
 # and the backend's `links` key forbids two copies in one graph.
 midnight-bls12-381-cuda = { git = "https://github.com/riusricardo/midnight-bls12-381-cuda", branch = "main", version = "0.3", optional = true, features = ["curves-v03"] }
-
-# Direct ICICLE dependencies for params.rs base uploads
-# These are needed because we re-export ICICLE types through gpu_bridge
-icicle-runtime = { git = "https://github.com/ingonyama-zk/icicle.git", tag = "v4.0.0", optional = true }
 once_cell = { version = "1.20", optional = true }
 
 # Compile-time assertions for memory layout verification
@@ -116,23 +112,10 @@ trace-phases = []     # Trace high-level prover phases
 trace-kzg = []        # Trace KZG commitment operations
 trace-all = ["trace-msm", "trace-fft", "trace-phases", "trace-kzg"]
 
-# GPU acceleration features
-# All GPU code flows through gpu_bridge module and midnight-bls12-381-cuda crate
-gpu = ["midnight-bls12-381-cuda/gpu", "icicle-runtime", "once_cell"]
-gpu-cuda = ["gpu"]    # Future: separate CUDA backend
+# GPU acceleration: every GPU item comes from midnight-bls12-381-cuda, through
+# the gpu_accel module
+gpu = ["midnight-bls12-381-cuda/gpu", "once_cell"]
 
 [lib]
 bench = false
 
-# Temporarily commented out - examples removed
-# [[example]]
-# name = "gpu_benchmark"
-# required-features = ["gpu"]
-
-# [[example]]
-# name = "gpu_init"
-# required-features = ["gpu"]
-
-# [[example]]
-# name = "plonk_msm_benchmark"
-# required-features = ["gpu"]
