@@ -73,6 +73,14 @@ where
         params.verifier_params()
     }
 
+    #[cfg(feature = "gpu")]
+    fn commit_lagrange_batch(
+        params: &Self::Parameters,
+        polys: &[&Polynomial<E::Fr, LagrangeCoeff>],
+    ) -> Vec<Self::Commitment> {
+        params.commit_lagrange_batch(polys)
+    }
+
     fn commit(
         params: &Self::Parameters,
         polynomial: &Polynomial<E::Fr, Coeff>,

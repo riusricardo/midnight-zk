@@ -12,7 +12,7 @@ use once_cell::sync::OnceCell;
 
 // GPU types via bridge module (single import point)
 #[cfg(feature = "gpu")]
-use crate::gpu_accel::{PrecomputedBases, should_use_gpu, should_use_gpu_batch};
+use crate::gpu_accel::{PrecomputedBases, should_use_gpu};
 
 use crate::{
     poly::commitment::Params,
@@ -340,11 +340,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             return polys.iter().map(|poly| cpu_commit(poly)).collect();
         }
         
-        // Check if async/GPU is beneficial for this batch
-        // Consider total work, not just individual MSM size
+        // A batch of several MSMs that route to the GPU (by the size of each).
         let individual_size = polys[0].len();
         let batch_count = polys.len();
-        let use_async = batch_count > 1 && should_use_gpu_batch(individual_size, batch_count);
+        let use_async = batch_count > 1 && should_use_gpu(individual_size);
         
         #[cfg(feature = "trace-kzg")]
         if batch_count > 1 {

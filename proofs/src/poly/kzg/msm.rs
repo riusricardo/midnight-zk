@@ -12,14 +12,11 @@ use midnight_curves::{
 };
 use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
 
-#[cfg(feature = "gpu")]
-use midnight_curves::G1Affine;
-
 // GPU types via bridge module (single import point)
 #[cfg(feature = "gpu")]
 use crate::gpu_accel::{
     GpuMsmContext, PrecomputedBases, MsmHandle, should_use_gpu,
-    is_g1_affine, try_as_fq_slice, projective_to_curve,
+    is_g1_affine, try_as_fq_slice, try_as_g1_affine_slice, projective_to_curve,
 };
 
 #[cfg(feature = "gpu")]
@@ -211,22 +208,6 @@ where
     }
 }
 
-/// Check if BLST optimization is available for the given curve type
-/// 
-/// This should always return true for midnight_curves::G1Affine (BLS12-381).
-/// If this returns false, msm_specific() uses the generic `msm_best` path.
-#[inline]
-pub fn is_blst_available<C: CurveAffine + 'static>() -> bool {
-    // Use the dispatch helper for cleaner type checking
-    #[cfg(feature = "gpu")]
-    { is_g1_affine::<C>() }
-    #[cfg(not(feature = "gpu"))]
-    {
-        use std::any::TypeId;
-        TypeId::of::<C>() == TypeId::of::<midnight_curves::G1Affine>()
-    }
-}
-
 #[cfg(feature = "gpu")]
 /// Fallible MSM using pre-uploaded GPU bases.
 ///
@@ -256,7 +237,6 @@ where
     Ok(projective_to_curve::<C>(res))
 }
 
-#[allow(unsafe_code)]
 /// Wrapper over the MSM function to use the blstrs underlying function, with
 /// optional GPU acceleration.
 ///
@@ -292,25 +272,25 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
         // unavailability (`try_get_msm_context` -> None) or any GPU error, fall through to
         // the CPU path below. This makes `msm_specific` a safe fallback target for
         // the commit hot path even on a `gpu`-built binary running with no usable GPU.
-        if is_blst_available::<C>() && should_use_gpu(size) {
+        // Midnight's G1 only: its scalars are `Fq` (both views check the exact
+        // type they reinterpret).
+        let midnight_g1 = is_g1_affine::<C>().then(|| try_as_fq_slice(coeffs)).flatten();
+        if let (Some(fq_coeffs), true) = (midnight_g1, should_use_gpu(size)) {
             if let Some(ctx) = try_get_msm_context() {
                 #[cfg(feature = "trace-msm")]
                 eprintln!("   [MSM] Using GPU backend ({} points)", size);
 
-                // Safe: we verified the type is midnight_curves::G1Affine
-                let fq_coeffs = unsafe { &*(coeffs as *const _ as *const [Fq]) };
-                let proj_bases = unsafe { &*(bases as *const _ as *const [G1Projective]) };
+                // The GPU MSM takes affine bases.
+                let mut affine = vec![C::identity(); bases.len()];
+                C::Curve::batch_normalize(bases, &mut affine);
+                let bases_affine = try_as_g1_affine_slice(&affine).expect("C is midnight's G1Affine");
 
-                // Convert projective bases to affine for GPU MSM
-                let bases_affine: Vec<G1Affine> =
-                    proj_bases.iter().map(|p| G1Affine::from(*p)).collect();
-
-                match ctx.msm(fq_coeffs, &bases_affine) {
+                match ctx.msm(fq_coeffs, bases_affine) {
                     Ok(res) => {
                         #[cfg(feature = "trace-msm")]
                         eprintln!("✓  [MSM] Completed in {:?}", start.elapsed());
 
-                        return unsafe { std::mem::transmute_copy(&res) };
+                        return projective_to_curve::<C>(res);
                     }
                     Err(e) => {
                         // GPU MSM was attempted and FAILED: make it observable +
