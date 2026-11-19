@@ -23,18 +23,6 @@ pub mod utils;
 #[cfg(feature = "gpu")]
 pub mod gpu_accel;
 
-// Re-export GPU initialization function for easy access
 #[cfg(feature = "gpu")]
 #[doc(inline)]
 pub use gpu_accel::init_gpu_backend;
-
-// Also re-export from the old location for backwards compatibility
-#[cfg(feature = "gpu")]
-#[doc(inline)]
-pub use poly::kzg::msm::init_gpu_backend as init_gpu_backend_legacy;
-
-#[cfg(not(feature = "gpu"))]
-/// Stub for non-GPU builds
-pub fn init_gpu_backend() -> Option<std::time::Duration> {
-    None
-}

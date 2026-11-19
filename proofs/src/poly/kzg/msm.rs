@@ -1,8 +1,5 @@
 use std::{any::TypeId, fmt::Debug};
 
-#[cfg(feature = "gpu")]
-use std::sync::OnceLock;
-
 use ff::Field;
 use group::{Curve, Group};
 use midnight_curves::{
@@ -20,95 +17,11 @@ use crate::gpu_accel::{
 };
 
 #[cfg(feature = "gpu")]
-/// Global GPU MSM context instance
-/// 
-/// This is initialized on first use (lazy) or can be initialized eagerly
-/// via init_gpu_backend() to avoid first-call latency.
-static GLOBAL_MSM_CONTEXT: OnceLock<GpuMsmContext> = OnceLock::new();
-
-#[cfg(feature = "gpu")]
-/// Try to get or initialize the global GPU MSM context, returning `None` (for CPU fallback)
-/// instead of panicking when the GPU/backend is unavailable (correctness fix C5).
-pub fn try_get_msm_context() -> Option<&'static GpuMsmContext> {
-    if let Some(ctx) = GLOBAL_MSM_CONTEXT.get() {
-        return Some(ctx);
-    }
-    match GpuMsmContext::new() {
-        Ok(ctx) => {
-            // If another thread won the init race, `set` fails and we return the winner.
-            let _ = GLOBAL_MSM_CONTEXT.set(ctx);
-            GLOBAL_MSM_CONTEXT.get()
-        }
-        Err(_e) => {
-            #[cfg(feature = "trace-msm")]
-            eprintln!("[MSM] GPU MSM context unavailable: {:?}", _e);
-            None
-        }
-    }
-}
-
-#[cfg(feature = "gpu")]
-/// Get or initialize the global GPU MSM context.
-///
-/// Panics if the GPU is unavailable; hot paths that can fall back to CPU should prefer
-/// [`try_get_msm_context`].
-pub fn get_msm_context() -> &'static GpuMsmContext {
-    try_get_msm_context().expect("Failed to create GPU MSM context")
-}
-
-/// Initialize GPU backend eagerly
-/// 
-/// Call this at application startup so the first proof request does not pay
-/// for the backend's initialization. If the backend is already initialized,
-/// this is a no-op.
-/// 
-/// Returns the warmup duration if GPU is available and was initialized.
-/// 
-/// # Example
-/// ```rust,no_run
-/// use midnight_proofs::poly::kzg::msm::init_gpu_backend;
-/// 
-/// fn main() {
-///     // Initialize GPU at startup
-///     if let Some(duration) = init_gpu_backend() {
-///         println!("GPU backend ready in {:?}", duration);
-///     }
-///     
-///     // Start proof server...
-/// }
-/// ```
-#[cfg(feature = "gpu")]
-pub fn init_gpu_backend() -> Option<std::time::Duration> {
-    use tracing::info;
-    
-    // Check if already initialized
-    if GLOBAL_MSM_CONTEXT.get().is_some() {
-        info!("GPU backend already initialized");
-        return None;
-    }
-    
-    info!("Initializing GPU backend eagerly...");
-    let ctx = GpuMsmContext::new().expect("Failed to create GPU MSM context");
-    
-    // Warmup to trigger full CUDA initialization
-    let warmup_result = ctx.warmup().ok();
-    
-    // Store in global
-    let _ = GLOBAL_MSM_CONTEXT.set(ctx);
-    
-    if let Some(duration) = warmup_result {
-        info!("GPU backend initialized and warmed up in {:?}", duration);
-    }
-    
-    warmup_result
-}
-
-#[cfg(not(feature = "gpu"))]
-/// Stub for initializing GPU backend when GPU feature is disabled
-///
-/// Returns `None` since GPU is not available without the `gpu` feature flag.
-pub fn init_gpu_backend() -> Option<std::time::Duration> {
-    None
+/// An MSM context on the process's GPU, or `None` when the GPU cannot be used:
+/// the caller then computes on the CPU (correctness fix C5). Cheap: the backend
+/// decides once per process whether the GPU can be used.
+pub(crate) fn try_get_msm_context() -> Option<GpuMsmContext> {
+    GpuMsmContext::new().ok()
 }
 
 use super::params::ParamsVerifierKZG;
@@ -450,7 +363,7 @@ where
 /// 
 /// # Arguments
 /// * `coeffs` - Scalars for MSM computation
-/// * `device_bases` - Pre-uploaded GPU bases (from ParamsKZG::get_or_upload_gpu_bases)
+/// * `device_bases` - Pre-uploaded GPU bases (from ParamsKZG::try_get_or_upload_gpu_bases)
 /// 
 /// # Returns
 /// Handle that completes to C::Curve when waited

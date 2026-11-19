@@ -338,15 +338,13 @@ fn blst_verdict(
     nb_committed: usize,
     proof: &[u8],
 ) -> Verdict {
-    let blst_msm = |scalars: &[Fq], bases: &[G1Projective]| G1Projective::multi_exp(bases, scalars);
-
     let instances: Vec<[Vec<Fq>; 2]> = circuits.iter().map(|c| c.instances()).collect();
     let committed: Vec<Vec<G1Projective>> = instances
         .iter()
         .map(|cols| {
             cols[..nb_committed]
                 .iter()
-                .map(|col| blst_msm(col, &params.g_lagrange()[..col.len()]))
+                .map(|col| common::blst_commit_lagrange(params, col))
                 .collect()
         })
         .collect();

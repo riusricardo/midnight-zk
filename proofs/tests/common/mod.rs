@@ -77,6 +77,16 @@ pub fn tamper_first_commitment(proof: &[u8]) -> Vec<u8> {
     tampered
 }
 
+/// The 2^k-th root of unity in midnight-curves' convention (`EvaluationDomain`'s).
+pub fn omega_for(k: u32) -> Fq {
+    use ff::{Field, PrimeField};
+    let mut omega = Fq::ROOT_OF_UNITY;
+    for _ in k..Fq::S {
+        omega = omega.square();
+    }
+    omega
+}
+
 /// BLST's KZG commitment to the Lagrange values `values`: a
 /// multi-exponentiation over the first `values.len()` Lagrange bases.
 pub fn blst_commit_lagrange(params: &ParamsKZG<Bls12>, values: &[Fq]) -> G1Projective {
