@@ -100,7 +100,7 @@ impl MsmClass {
         MsmClass {
             log_size: n.next_power_of_two().trailing_zeros(),
             zero_quarter,
-            small: sampled > 0 && 2 * small > sampled,
+            small: 2 * small > sampled,
         }
     }
 }
@@ -292,5 +292,78 @@ mod tests {
         assert_eq!((d.log_size, d.zero_quarter, d.small), (10, 0, false));
         assert_eq!((s.log_size, s.zero_quarter, s.small), (10, 3, true));
         assert_ne!(d, s);
+    }
+
+    #[test]
+    fn the_zero_share_is_counted_in_quarters() {
+        for (zeros, quarter) in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (5, 2), (6, 3), (7, 3), (8, 3)] {
+            let scalars: Vec<Fq> = (0..8u64).map(|i| if i < zeros { Fq::ZERO } else { Fq::from(i + 1) }).collect();
+            assert_eq!(MsmClass::of(&scalars).zero_quarter, quarter, "{zeros} zeros of 8");
+        }
+    }
+
+    #[test]
+    fn the_sample_spans_the_whole_batch() {
+        // Small scalars at even positions, large ones at odd: the sample takes
+        // every second scalar of 128 (64 samples), so it sees the small ones.
+        let scalars: Vec<Fq> =
+            (0..128u64).map(|i| if i % 2 == 0 { Fq::from(i + 1) } else { -Fq::from(i + 1) }).collect();
+        assert!(MsmClass::of(&scalars).small);
+    }
+
+    #[test]
+    fn zero_scalars_are_not_sampled() {
+        // One large scalar among zeros: the sample is that scalar alone.
+        let mut scalars = vec![Fq::ZERO; 64];
+        scalars[5] = -Fq::ONE;
+        assert!(!MsmClass::of(&scalars).small);
+    }
+
+    #[test]
+    fn small_means_more_than_half_of_the_sample() {
+        assert!(!MsmClass::of(&[Fq::from(7u64), -Fq::from(7u64)]).small);
+        assert!(MsmClass::of(&[Fq::from(7u64), Fq::from(8u64), -Fq::from(7u64)]).small);
+    }
+
+    #[test]
+    fn estimates_move_by_the_weight_toward_a_new_measurement() {
+        assert_eq!(blend(None, 2.0), 2.0);
+        assert_eq!(blend(Some(1.0), 3.0), 1.0 + WEIGHT * 2.0);
+        assert_eq!(blend(Some(3.0), 1.0), 3.0 - WEIGHT * 2.0);
+    }
+
+    #[test]
+    fn a_recorded_batch_updates_the_estimates_the_plan_reads() {
+        // Classes no batch of a real proof has (the table is process-wide).
+        let cpu_class = MsmClass { log_size: 40, zero_quarter: 1, small: true };
+        let gpu_class = MsmClass { log_size: 41, zero_quarter: 2, small: false };
+        let two_gpu_msms = [gpu_class, gpu_class];
+        record(&[(cpu_class, Duration::from_secs(2))], Some((&two_gpu_msms, Duration::from_secs(4))));
+        assert_eq!(estimates_of(&[cpu_class, gpu_class]), vec![est(Some(2.0), None), est(None, Some(2.0))]);
+        let classes = [gpu_class, cpu_class, gpu_class, gpu_class];
+        assert_eq!(plan(&classes), plan_with(&estimates_of(&classes)));
+    }
+
+    #[test]
+    fn two_msms_are_shared() {
+        assert_eq!(cpu_count(&plan_with(&[est(Some(1.0), Some(1.0)); 2])), 1);
+    }
+
+    #[test]
+    fn an_unmeasured_gpu_time_counts_as_the_mean_of_the_measured() {
+        let estimates = [est(Some(1.0), Some(1.0)), est(Some(1.0), Some(2.0)), est(Some(2.0), None)];
+        assert_eq!(plan_with(&estimates), vec![true, true, false]);
+    }
+
+    #[test]
+    fn the_lowest_cpu_to_gpu_ratio_goes_first() {
+        let estimates = [est(Some(1.0), Some(1.0)), est(Some(1.0), Some(1.0)), est(Some(1.0), Some(2.0))];
+        assert_eq!(plan_with(&estimates), vec![false, false, true]);
+    }
+
+    #[test]
+    fn proofs_at_once_keep_their_batches_on_the_gpu() {
+        let (_first, _second) = (proof_in_flight(), proof_in_flight());
+        assert!(!cpu_share_allowed());
     }
 }
