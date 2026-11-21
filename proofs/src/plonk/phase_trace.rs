@@ -66,21 +66,67 @@ mod imp {
     }
 
     pub(crate) fn end(k: u32) {
-        TIMER.with(|t| {
-            if let Some(timer) = t.borrow_mut().take() {
-                let ms = |d: Duration| d.as_secs_f64() * 1e3;
-                let phases: Vec<String> = timer
-                    .phases
-                    .iter()
-                    .map(|(name, d)| format!("{name}={:.1}ms", ms(*d)))
-                    .collect();
-                eprintln!(
-                    "[PHASES] k={k} total={:.1}ms {}",
-                    ms(timer.last - timer.start),
-                    phases.join(" ")
-                );
-            }
-        });
+        if let Some(line) = take_line(k) {
+            eprintln!("{line}");
+        }
+    }
+
+    /// The `[PHASES]` line of the proof timed on this thread, clearing its
+    /// timer; `None` if no proof is being timed.
+    fn take_line(k: u32) -> Option<String> {
+        TIMER.with(|t| t.borrow_mut().take()).map(|timer| {
+            let ms = |d: Duration| d.as_secs_f64() * 1e3;
+            let phases: Vec<String> = timer
+                .phases
+                .iter()
+                .map(|(name, d)| format!("{name}={:.1}ms", ms(*d)))
+                .collect();
+            format!(
+                "[PHASES] k={k} total={:.1}ms {}",
+                ms(timer.last - timer.start),
+                phases.join(" ")
+            )
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn ms(line: &str, name: &str) -> f64 {
+            let field = line.split(' ').find_map(|f| f.strip_prefix(&format!("{name}=")));
+            field.expect(name).trim_end_matches("ms").parse().expect(name)
+        }
+
+        /// A phase is the time since the previous mark, a phase marked twice
+        /// sums its intervals under its first position, and the phases add up to
+        /// the total (sleeps bound each interval from below).
+        #[test]
+        fn phases_add_up_to_the_total() {
+            let nap = || std::thread::sleep(Duration::from_millis(20));
+            begin();
+            nap();
+            mark("a");
+            nap();
+            mark("b");
+            nap();
+            mark("a");
+            let line = take_line(7).expect("a timed proof");
+            assert!(line.starts_with("[PHASES] k=7 total="), "{line}");
+            let names: Vec<&str> = line.split(' ').skip(3).map(|f| f.split('=').next().unwrap()).collect();
+            assert_eq!(names, ["a", "b"], "{line}");
+            let (a, b, total) = (ms(&line, "a"), ms(&line, "b"), ms(&line, "total"));
+            assert!(a >= 40.0 && b >= 20.0, "{line}");
+            assert!((a + b - total).abs() <= 0.2, "{line}");
+        }
+
+        #[test]
+        fn end_reports_and_clears_the_timer() {
+            begin();
+            mark("a");
+            end(1);
+            assert!(take_line(1).is_none(), "the timer outlived end");
+        }
     }
 }
 

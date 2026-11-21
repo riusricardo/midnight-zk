@@ -57,9 +57,7 @@ pub trait PolynomialCommitmentScheme<F: PrimeField>: Clone + Debug {
     fn commit_lagrange_batch(
         params: &Self::Parameters,
         polys: &[&Polynomial<F, LagrangeCoeff>],
-    ) -> Vec<Self::Commitment> {
-        polys.iter().map(|poly| Self::commit_lagrange(params, poly)).collect()
-    }
+    ) -> Vec<Self::Commitment>;
 
     /// Create a multi-opening proof at a set of [ProverQuery]'s.
     fn multi_open<T: Transcript>(
