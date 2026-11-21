@@ -240,17 +240,16 @@ fn allocate_slots(calcs: &mut [Calc], parts: &mut [Src], num_intermediates: u32)
         released.sort_unstable();
         released.dedup();
         free.extend(released.iter().map(|&old| slot[old]));
+        // Every target is an intermediate the builder allocated (below n).
         let target = c.target as usize;
         let s = free.pop().unwrap_or_else(|| {
             slots += 1;
             slots - 1
         });
-        if target < n {
-            slot[target] = s;
-            // Written but never read (and not the row's result): free at once.
-            if last_read[target] == usize::MAX && i != last {
-                free.push(s);
-            }
+        slot[target] = s;
+        // Written but never read (and not the row's result): free at once.
+        if last_read[target] == usize::MAX && i != last {
+            free.push(s);
         }
         c.target = s;
     }
@@ -539,6 +538,22 @@ fn used_columns(program: &GraphProgram, n_fixed: usize, n_advice: usize, n_insta
     used
 }
 
+/// Device memory the GPU path needs for a domain of `ext_len` rows: the proof's
+/// columns the program reads (from `product_base` on, the auxiliary ones are the
+/// proof's), the key's it reads unless they are cached on the device, the running
+/// values, the kernel's scratch and the NTT's batch, and a margin.
+fn device_bytes_needed(ext_len: usize, used: &Used, product_base: usize, key_cached: bool) -> u64 {
+    let count = |columns: &[bool]| columns.iter().filter(|u| **u).count();
+    let proof = count(&used.advice) + count(&used.instance) + count(&used.aux[product_base..]);
+    let key = if key_cached { 0 } else { count(&used.fixed) + count(&used.aux[..product_base]) };
+    ge::device_bytes(ext_len, proof + key + 1) + (512 << 20) + MEMORY_MARGIN
+}
+
+/// Whether `need` bytes fit the free memory of the device (`(total, free)`).
+fn fits(memory: Option<(u64, u64)>, need: u64) -> bool {
+    matches!(memory, Some((_, free)) if free >= need)
+}
+
 /// The proof's polynomial behind auxiliary column `j >= layout.product_base`.
 fn proof_aux_poly<'a, F: PrimeField>(
     layout: &Layout,
@@ -588,14 +603,15 @@ where
     if !should_use_gpu_ntt(ext_len) || fq_scalar(&y).is_none() || !ge::is_available() {
         return None;
     }
+    // One entry per circuit of the proof: the prover builds them so, and a
+    // mismatch is a bug to report, not a reason to compute on the CPU.
     let n_circuits = advice_polys.len();
-    if instance_polys.len() != n_circuits
-        || lookups.len() != n_circuits
-        || trashcans.len() != n_circuits
-        || permutations.len() != n_circuits
-    {
-        return None;
-    }
+    assert!(
+        [instance_polys.len(), lookups.len(), trashcans.len(), permutations.len()]
+            .iter()
+            .all(|&n| n == n_circuits),
+        "the quotient's per-circuit inputs differ in number"
+    );
     let n_sets = permutations.first().map_or(0, |p| p.sets.len());
     let (n_lookups, n_trash) = (cs.lookups.len(), cs.trashcans.len());
     let (program, layout) = build_program(
@@ -616,21 +632,9 @@ where
     let advice_used: Vec<usize> = (0..n_advice).filter(|&c| used.advice[c]).collect();
     let instance_used: Vec<usize> = (0..n_instance).filter(|&c| used.instance[c]).collect();
 
-    // Device memory: the proof's extended columns (and the key's, if not
-    // cached), the running values, the kernel's scratch and the NTT's batch.
     let key = key_columns(pk);
-    let column_bytes = ge::device_bytes(ext_len, 1);
-    let proof_columns = (advice_used.len() + instance_used.len() + proof_aux.len()) as u64;
-    let key_columns_uploaded = if key.is_some() {
-        0
-    } else {
-        (used.fixed.iter().filter(|u| **u).count() + used.aux[..layout.product_base].iter().filter(|u| **u).count())
-            as u64
-    };
-    let need = column_bytes * (proof_columns + key_columns_uploaded + 1) + (512 << 20) + MEMORY_MARGIN;
-    match ge::device_memory() {
-        Some((_, free)) if free >= need => {}
-        _ => return None,
+    if !fits(ge::device_memory(), device_bytes_needed(ext_len, &used, layout.product_base, key.is_some())) {
+        return None;
     }
 
     let (Some(scalars), Some(omega), Some(g_coset)) = (
@@ -652,20 +656,22 @@ where
 
     for i in 0..n_circuits {
         let (advice, instance) = (&advice_polys[i], &instance_polys[i]);
-        if advice.len() != n_advice
-            || instance.len() != n_instance
-            || permutations[i].sets.len() != n_sets
-            || lookups[i].len() != n_lookups
-            || trashcans[i].len() != n_trash
-        {
-            return None;
-        }
+        assert!(
+            advice.len() == n_advice
+                && instance.len() == n_instance
+                && permutations[i].sets.len() == n_sets
+                && lookups[i].len() == n_lookups
+                && trashcans[i].len() == n_trash,
+            "circuit {i}'s columns differ from the constraint system's"
+        );
         // This circuit's columns into the extended coset, on the device.
         let mut coeffs: Vec<&[Fq]> = Vec::new();
         coeffs.extend(advice_used.iter().map(|&c| fq(&advice[c][..])));
         coeffs.extend(instance_used.iter().map(|&c| fq(&instance[c][..])));
         for &j in &proof_aux {
-            coeffs.push(fq(&proof_aux_poly(&layout, j, &permutations[i], &lookups[i], &trashcans[i])?[..]));
+            let poly = proof_aux_poly(&layout, j, &permutations[i], &lookups[i], &trashcans[i])
+                .expect("the layout's proof columns are the proof's");
+            coeffs.push(fq(&poly[..]));
         }
         let extended = if coeffs.is_empty() {
             None
@@ -694,13 +700,13 @@ where
         for (pos, &c) in instance_used.iter().enumerate() {
             instance_cols[c] = proof_col(advice_used.len() + pos);
         }
-        let mut aux: Vec<Option<Column>> = (0..layout.n_aux)
-            .map(|j| match j {
-                _ if !used.aux[j] || j >= layout.product_base => None,
-                0..=2 => Some(key_col(n_fixed + n_pk + j)),
-                _ => Some(key_col(n_fixed + (j - layout.pk_base))),
-            })
-            .collect();
+        // l0, l_last, l_active_row and the permutation cosets come from the key
+        // (in its device order: fixed, permutation cosets, then the three).
+        let mut aux: Vec<Option<Column>> = vec![None; layout.n_aux];
+        for j in (0..layout.product_base).filter(|&j| used.aux[j]) {
+            let k = if j < layout.pk_base { n_fixed + n_pk + j } else { n_fixed + (j - layout.pk_base) };
+            aux[j] = Some(key_col(k));
+        }
         for (pos, &j) in proof_aux.iter().enumerate() {
             aux[j] = proof_col(advice_used.len() + instance_used.len() + pos);
         }
@@ -804,9 +810,101 @@ mod tests {
 
     #[test]
     fn read_before_write_stays_out_of_range() {
-        let mut calcs = vec![Calc { op: op::STORE, target: 0, a: interm(1), ..Default::default() }];
-        let slots = allocate_slots(&mut calcs, &mut [], 2);
-        assert_eq!(slots, 1);
-        assert!(calcs[0].a.index >= slots);
+        // An intermediate never written (1), and one past the program's (2).
+        for read in [1, 2] {
+            let mut calcs = vec![Calc { op: op::STORE, target: 0, a: interm(read), ..Default::default() }];
+            let slots = allocate_slots(&mut calcs, &mut [], 2);
+            assert_eq!(slots, 1);
+            assert!(calcs[0].a.index >= slots, "read of {read}");
+        }
+    }
+
+    #[test]
+    fn a_column_read_does_not_hold_an_intermediate_slot() {
+        // t0 is last read by the second calculation; the third reads advice
+        // column 0, whose index is t0's: t0's slot must be free for t1.
+        let a = |c| Src::column(src::ADVICE, c, 0);
+        let mut b = Builder::default();
+        let t0 = b.add(a(0), a(1));
+        let t1 = b.mul(t0, a(2));
+        let t2 = b.add(a(0), t1);
+        let packed = b.finish(t2);
+        assert_eq!(packed.num_intermediates, 1);
+        assert_eq!(run(&packed, &[2, 3, 5]), 2 + (2 + 3) * 5);
+    }
+
+    #[test]
+    fn finish_stores_a_result_no_calculation_ends_with() {
+        let a = |c| Src::column(src::ADVICE, c, 0);
+        let program = |result: fn(Src, Src) -> Src| {
+            let mut b = Builder::default();
+            let x = b.add(a(0), a(1));
+            let y = b.mul(x, a(2));
+            let calcs = b.calcs.len();
+            let p = b.finish(result(x, y));
+            (p, calcs)
+        };
+        // The last calculation's target: nothing appended.
+        let (p, calcs) = program(|_, y| y);
+        assert_eq!(p.calcs.len(), calcs);
+        assert_eq!(run(&p, &[2, 3, 5]), 25);
+        // An earlier intermediate, and a constant (7 to the interpreter): stored.
+        let (p, calcs) = program(|x, _| x);
+        assert_eq!((p.calcs.len(), run(&p, &[2, 3, 5])), (calcs + 1, 5));
+        let (p, calcs) = program(|_, _| Src::default());
+        assert_eq!((p.calcs.len(), run(&p, &[2, 3, 5])), (calcs + 1, 7));
+    }
+
+    #[test]
+    fn inlined_evaluators_keep_their_intermediates_apart() {
+        use crate::plonk::evaluation::{Calculation, CalculationInfo, ValueSource as V};
+        let ev = |calculations: Vec<(Calculation, usize)>| GraphEvaluator::<Fq> {
+            constants: vec![],
+            rotations: vec![0],
+            num_intermediates: calculations.len(),
+            calculations: calculations
+                .into_iter()
+                .map(|(calculation, target)| CalculationInfo { calculation, target })
+                .collect(),
+        };
+        // r1 = a0 + a1; then a0 * a2 in the second evaluator's intermediate 0,
+        // read with r1 (its previous value): r2 = a0 * a2 + r1.
+        let first = ev(vec![(Calculation::Add(V::Advice(0, 0), V::Advice(1, 0)), 0)]);
+        let second = ev(vec![
+            (Calculation::Mul(V::Advice(0, 0), V::Advice(2, 0)), 0),
+            (Calculation::Add(V::Intermediate(0), V::PreviousValue()), 1),
+        ]);
+        let mut b = Builder::default();
+        let r1 = b.inline(&first, Src::scalar(src::PREVIOUS));
+        let r2 = b.inline(&second, r1);
+        assert_eq!(b.num_intermediates, 3);
+        assert_eq!(run(&b.finish(r2), &[2, 3, 5]), 2 * 5 + (2 + 3));
+    }
+
+    #[test]
+    fn device_bytes_count_the_columns_read() {
+        // Read: 3 advice, 1 instance, 2 of the proof's auxiliary columns (from
+        // product_base = 3), 2 fixed and 1 of the key's auxiliary columns.
+        let used = Used {
+            fixed: vec![true, false, true],
+            advice: vec![true, true, false, true],
+            instance: vec![true, false],
+            aux: vec![false, true, false, true, true],
+        };
+        let bytes = |columns: u64| columns * 32 * 1024 + (512 << 20) + (128 << 20);
+        assert_eq!(device_bytes_needed(1024, &used, 3, true), bytes(3 + 1 + 2 + 1));
+        assert_eq!(device_bytes_needed(1024, &used, 3, false), bytes(3 + 1 + 2 + 2 + 1 + 1));
+    }
+
+    #[test]
+    fn the_estimate_must_fit_the_free_memory() {
+        assert!(fits(Some((u64::MAX, 100)), 100));
+        assert!(!fits(Some((u64::MAX, 99)), 100));
+        assert!(!fits(None, 0));
+    }
+
+    #[test]
+    fn key_columns_print_whether_they_are_cached() {
+        assert_eq!(format!("{:?}", KeyColumns::default()), "KeyColumns { cached: false }");
     }
 }

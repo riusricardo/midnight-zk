@@ -440,7 +440,7 @@ fn gpu_proof_fidelity() {
     let (proof_single, proof_multi) = if on_gpu {
         use midnight_proofs::gpu_accel::backend::diag::OpKind;
         midnight_bls12_381_cuda::settle_calibration();
-        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], prove_both)
+        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt, OpKind::GraphEval], prove_both)
     } else {
         prove_both()
     };
