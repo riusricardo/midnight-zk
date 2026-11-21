@@ -17,7 +17,7 @@
 /// package. The line name below is the ONLY line-specific token in this crate;
 /// everything typed is reached through `backend::…`, and the curves-free core
 /// (`config`, `diag`, `is_gpu_available`, …) is the same through this path or
-/// the crate root. `_backend_line_is_this_forks_curves` fails the build if the
+/// the crate root. `_BACKEND_LINE_IS_THIS_FORKS_CURVES` fails the build if the
 /// line's curves types are not this fork's.
 pub use midnight_bls12_381_cuda::v03 as backend;
 
@@ -59,14 +59,11 @@ pub use backend::{
 /// above takes this fork's `midnight_curves` types, i.e. the line's curves
 /// package and this fork's are one package (the workspace `[patch.crates-io]`
 /// redirect). A fork wired to the other line fails here with a type mismatch.
-#[allow(dead_code)]
-fn _backend_line_is_this_forks_curves(
-    f: midnight_curves::Fq,
-    a: midnight_curves::G1Affine,
-    p: midnight_curves::G1Projective,
-) -> (backend::curves::Fq, backend::curves::G1Affine, backend::curves::G1Projective) {
-    (f, a, p)
-}
+const _BACKEND_LINE_IS_THIS_FORKS_CURVES: fn(
+    midnight_curves::Fq,
+    midnight_curves::G1Affine,
+    midnight_curves::G1Projective,
+) -> (backend::curves::Fq, backend::curves::G1Affine, backend::curves::G1Projective) = |f, a, p| (f, a, p);
 
 
 /// Loads the GPU backend, selects the device and warms the GPU up, at start-up,
@@ -97,7 +94,7 @@ pub fn init_gpu_backend() -> Option<std::time::Duration> {
 mod tests {
     use super::*;
 
-    /// Runtime twin of `_backend_line_is_this_forks_curves`: the backend
+    /// Runtime twin of `_BACKEND_LINE_IS_THIS_FORKS_CURVES`: the backend
     /// line's dispatch recognises this fork's curves types by `TypeId`.
     #[test]
     fn test_backend_line_is_this_forks_curves() {

@@ -81,6 +81,16 @@ fn test_gpu_ntt_counted_on_this_forks_line() {
     assert!(data == want, "the NTT of 2^{k} elements differs from best_fft");
 }
 
+/// The start-up entry (`init_gpu_backend`, which the ledger calls before a
+/// proof server serves) loads the backend, warms the GPU up with an MSM on this
+/// fork's line and reports the warm-up.
+#[test]
+fn test_init_gpu_backend_warms_the_gpu_up() {
+    let Some(_gpu) = gpu_test() else { return };
+    let warmup = expect_gpu_ops(&[OpKind::Msm], midnight_proofs::init_gpu_backend);
+    assert!(warmup.is_some(), "init_gpu_backend reported no warm-up");
+}
+
 #[test]
 fn test_gpu_msm_simple_identity() {
     let Some(_gpu) = gpu_test() else { return };
