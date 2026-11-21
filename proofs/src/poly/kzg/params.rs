@@ -375,7 +375,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                 on_cpu.iter().filter(|c| **c).count(),
                 scalars.len()
             );
-            let (results, cpu_times, gpu_time) = std::thread::scope(|scope| {
+            let (results, cpu_times, gpu_time, gpu_failed) = std::thread::scope(|scope| {
                 let cpu_share = on_cpu.contains(&true).then(|| {
                     scope.spawn(|| {
                         on_cpu
@@ -415,7 +415,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                         }
                     });
                 }
-                let gpu_time = (!gpu_failed).then(|| start.elapsed());
+                let gpu_time = start.elapsed();
                 let cpu_done = match cpu_share {
                     Some(worker) => worker.join().unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
                     None => Vec::new(),
@@ -425,11 +425,9 @@ impl<E: Engine + Debug> ParamsKZG<E> {
                     results[i] = Some(r);
                     cpu_times.push((classes[i], t));
                 }
-                (results, cpu_times, gpu_time)
+                (results, cpu_times, gpu_time, gpu_failed)
             });
-            let gpu_classes: Vec<split::MsmClass> =
-                (0..scalars.len()).filter(|&i| !on_cpu[i]).map(|i| classes[i]).collect();
-            split::record(&cpu_times, gpu_time.map(|t| (gpu_classes.as_slice(), t)));
+            split::record_batch(&classes, &on_cpu, &cpu_times, gpu_time, gpu_failed);
             return results.into_iter().map(|r| r.expect("every MSM of the batch was computed")).collect();
         }
         
