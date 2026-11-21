@@ -383,7 +383,7 @@ fn gpu_proof_bytes_match_cpu() {
     let proved = if on_gpu {
         use midnight_proofs::gpu_accel::backend::diag::OpKind;
         midnight_bls12_381_cuda::settle_calibration();
-        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt], prove)
+        common::expect_gpu_ops(&[OpKind::Msm, OpKind::Ntt, OpKind::GraphEval], prove)
     } else {
         prove()
     };
