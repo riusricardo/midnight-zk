@@ -168,6 +168,22 @@ fn blend(old: Option<f64>, new: f64) -> f64 {
     old.map_or(new, |o| o + WEIGHT * (new - o))
 }
 
+/// Records a batch the plan split: the CPU's MSMs with their times, and the
+/// GPU's share (the MSMs `on_cpu` leaves to it) with the time it took, unless
+/// one of the GPU's MSMs failed and was computed on the CPU (that time is not
+/// the GPU's).
+pub(crate) fn record_batch(
+    classes: &[MsmClass],
+    on_cpu: &[bool],
+    cpu: &[(MsmClass, Duration)],
+    gpu_time: Duration,
+    gpu_failed: bool,
+) {
+    let gpu_classes: Vec<MsmClass> =
+        classes.iter().zip(on_cpu).filter(|(_, cpu)| !**cpu).map(|(class, _)| *class).collect();
+    record(cpu, (!gpu_failed).then_some((gpu_classes.as_slice(), gpu_time)));
+}
+
 /// Records a batch: the time of each CPU MSM, and the GPU's MSMs with the time
 /// they took together (none when the GPU took no MSM or one of them failed).
 pub(crate) fn record(cpu: &[(MsmClass, Duration)], gpu: Option<(&[MsmClass], Duration)>) {
@@ -342,6 +358,18 @@ mod tests {
         assert_eq!(estimates_of(&[cpu_class, gpu_class]), vec![est(Some(2.0), None), est(None, Some(2.0))]);
         let classes = [gpu_class, cpu_class, gpu_class, gpu_class];
         assert_eq!(plan(&classes), plan_with(&estimates_of(&classes)));
+    }
+
+    #[test]
+    fn a_batch_records_the_gpu_time_for_its_gpu_share_only() {
+        // Classes no batch of a real proof has (the table is process-wide).
+        let class = |log_size| MsmClass { log_size, zero_quarter: 0, small: true };
+        let (a, b, c) = (class(42), class(43), class(44));
+        record_batch(&[a, b, b], &[true, false, false], &[(a, Duration::from_secs(1))], Duration::from_secs(6), false);
+        assert_eq!(estimates_of(&[a, b]), vec![est(Some(1.0), None), est(None, Some(3.0))]);
+        // One of the GPU's MSMs failed: the batch's time is not the GPU's.
+        record_batch(&[c], &[false], &[], Duration::from_secs(5), true);
+        assert_eq!(estimates_of(&[c]), vec![est(None, None)]);
     }
 
     #[test]
