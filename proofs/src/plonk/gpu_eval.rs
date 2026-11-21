@@ -408,11 +408,11 @@ fn build_program<F: WithSmallOrderMulGroup<3>>(
         // k counting the columns across the sets, X = omega^idx.
         let mut current_delta = beta_q * g_coset;
         let columns = p_columns(cs);
+        // Keygen makes the key's permutation cosets one per permuted column.
+        assert_eq!(n_pk, columns.len(), "one permutation coset per permuted column");
         for (set, cols) in columns.chunks(chunk_len).take(n_sets).enumerate() {
-            // The key's permutation cosets of this set (one per column).
-            let pk = n_pk.saturating_sub(set * chunk_len).min(chunk_len);
             let mut left = z(&mut b, set, 1);
-            for (j, &(kind, index)) in cols.iter().enumerate().take(pk) {
+            for (j, &(kind, index)) in cols.iter().enumerate() {
                 let v = b.column(kind, index, 0);
                 let sigma = b.column(src::AUX, pk_base + set * chunk_len + j, 0);
                 let bs = b.mul(Src::scalar(src::BETA), sigma);
@@ -538,6 +538,12 @@ fn used_columns(program: &GraphProgram, n_fixed: usize, n_advice: usize, n_insta
     used
 }
 
+/// Whether the quotient goes to the GPU: the field is BLS12-381's scalar field
+/// (`Fq` here) and its extended domain of `ext_len` rows routes to the GPU.
+fn gpu_path_applies<F: PrimeField>(ext_len: usize, y: &F) -> bool {
+    should_use_gpu_ntt(ext_len) && fq_scalar(y).is_some()
+}
+
 /// Device memory the GPU path needs for a domain of `ext_len` rows: the proof's
 /// columns the program reads (from `product_base` on, the auxiliary ones are the
 /// proof's), the key's it reads unless they are cached on the device, the running
@@ -600,7 +606,13 @@ where
     let cs = &pk.vk.cs;
     let ext_len = domain.extended_len();
     // Size first: in CPU mode this is false and nothing below runs.
-    if !should_use_gpu_ntt(ext_len) || fq_scalar(&y).is_none() || !ge::is_available() {
+    if !gpu_path_applies(ext_len, &y) {
+        return None;
+    }
+    // A backend without the evaluation does not match this build: reported
+    // (fatal under strict mode), then the CPU computes the quotient.
+    if !ge::is_available() {
+        note_gpu_fallback("graph evaluation (quotient numerator)", "the CUDA backend provides no graph evaluation");
         return None;
     }
     // One entry per circuit of the proof: the prover builds them so, and a
@@ -894,6 +906,14 @@ mod tests {
         let bytes = |columns: u64| columns * 32 * 1024 + (512 << 20) + (128 << 20);
         assert_eq!(device_bytes_needed(1024, &used, 3, true), bytes(3 + 1 + 2 + 1));
         assert_eq!(device_bytes_needed(1024, &used, 3, false), bytes(3 + 1 + 2 + 2 + 1 + 1));
+    }
+
+    #[test]
+    fn the_gpu_path_takes_fq_where_the_ntt_goes_to_the_gpu() {
+        for rows in [2usize, 1 << 20] {
+            assert_eq!(gpu_path_applies(rows, &Fq::ONE), should_use_gpu_ntt(rows), "Fq, {rows} rows");
+            assert!(!gpu_path_applies(rows, &midnight_curves::Fp::ONE), "another field, {rows} rows");
+        }
     }
 
     #[test]

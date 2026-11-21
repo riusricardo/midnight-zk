@@ -626,6 +626,16 @@ impl<E: MultiMillerLoop + Debug> ParamsKZG<E> {
 mod test {
     use rand_core::OsRng;
 
+    /// GPU builds print the host fields (the device caches have no `Debug`).
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_params_print_their_host_fields() {
+        let params: ParamsKZG<midnight_curves::Bls12> = ParamsKZG::unsafe_setup(2, OsRng);
+        let printed = format!("{params:?}");
+        assert!(printed.starts_with("ParamsKZG { g_len: 4, g_lagrange_len: 4, g2: "), "{printed}");
+        assert!(printed.contains(", s_g2: "), "{printed}");
+    }
+
     use crate::{
         poly::{
             commitment::PolynomialCommitmentScheme,
